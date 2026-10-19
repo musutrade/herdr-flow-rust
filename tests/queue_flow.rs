@@ -1,0 +1,563 @@
+//! End-to-end queue, delivery, task and progress behavior over real files.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use herdr_flow::herdr::ReceiverAdapter;
+use herdr_flow::model::{self, J};
+use herdr_flow::queue;
+use herdr_flow::util::{self, FileLock};
+use serde_json::{json, Value};
+use tempfile::TempDir;
+
+const SESSION: &str = "11111111-1111-1111-1111-111111111111";
+const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[derive(Clone)]
+struct AgentState {
+    messages: Vec<String>,
+    notices: Vec<Vec<String>>,
+    status: String,
+    session: Option<String>,
+    fail: bool,
+}
+
+struct FakeAgent {
+    state: Arc<Mutex<AgentState>>,
+}
+
+impl ReceiverAdapter for FakeAgent {
+    fn agent(&self) -> herdr_flow::Result<J> {
+        let state = self.state.lock().unwrap();
+        Ok(json!({
+            "agent_status": state.status,
+            "interactive_ready": true,
+            "agent_session": {"value": state.session}
+        }))
+    }
+
+    fn prompt(&self, text: &str) -> herdr_flow::Result<String> {
+        let mut state = self.state.lock().unwrap();
+        state.messages.push(text.to_string());
+        if state.fail {
+            return Err(herdr_flow::FlowError::guard("ambiguous send"));
+        }
+        Ok("turn-one".to_string())
+    }
+
+    fn call(&self, args: &[String]) -> herdr_flow::Result<J> {
+        let mut state = self.state.lock().unwrap();
+        if state.fail {
+            return Err(herdr_flow::FlowError::guard("ambiguous notification"));
+        }
+        state.notices.push(args.to_vec());
+        Ok(json!({"ok": true}))
+    }
+}
+
+fn factory(
+    state: Arc<Mutex<AgentState>>,
+) -> impl Fn(&J) -> herdr_flow::Result<Box<dyn ReceiverAdapter>> {
+    move |_state: &J| {
+        Ok(Box::new(FakeAgent {
+            state: state.clone(),
+        }))
+    }
+}
+
+fn healthy_watcher(dir: &Path) -> FileLock {
+    std::fs::create_dir_all(dir).unwrap();
+    let pid = std::process::id();
+    let ticks = util::process_start_ticks(pid).unwrap_or_default();
+    util::atomic_write_json(
+        &dir.join("watch.json"),
+        &json!({
+            "pid": pid,
+            "start_ticks": ticks,
+            "started_at": util::now(),
+            "heartbeat_at": util::now(),
+            "max_age": 600,
+            "status": "running"
+        }),
+    )
+    .unwrap();
+    FileLock::acquire(&dir.join("watch.lock"), false)
+        .unwrap()
+        .expect("watcher lock")
+}
+
+struct Harness {
+    _tmp: TempDir,
+    base: PathBuf,
+    guard: PathBuf,
+    queue: PathBuf,
+    _guard_watch: FileLock,
+    _queue_watch: FileLock,
+    agent: Arc<Mutex<AgentState>>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        let guard = base.join("guard");
+        let queue_dir = base.join("queue");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        std::fs::create_dir_all(base.join("repo")).unwrap();
+        let guard_state = json!({
+            "version": 2,
+            "task": "o/r#1",
+            "role": "coordinator",
+            "pane": "w1:p1",
+            "terminal": "term1",
+            "socket": "/herdr",
+            "cwd": base.join("repo").display().to_string(),
+            "session": SESSION,
+            "phase": "monitoring",
+            "auto_rotate": false,
+            "usage": {"tokens": 100, "window": 10000},
+            "level": "normal"
+        });
+        util::atomic_write_json(&guard.join("state.json"), &guard_state).unwrap();
+        let guard_watch = healthy_watcher(&guard);
+        let queue_watch = healthy_watcher(&queue_dir);
+        queue::init(&queue_dir, Some(&guard), 30).unwrap();
+        let agent = Arc::new(Mutex::new(AgentState {
+            messages: Vec::new(),
+            notices: Vec::new(),
+            status: "idle".to_string(),
+            session: Some(SESSION.to_string()),
+            fail: false,
+        }));
+        Self {
+            _tmp: tmp,
+            base,
+            guard,
+            queue: queue_dir,
+            _guard_watch: guard_watch,
+            _queue_watch: queue_watch,
+            agent,
+        }
+    }
+
+    fn enable(&self) {
+        let factory = factory(self.agent.clone());
+        let mut s = queue::load_queue(&self.queue).unwrap();
+        queue::enable(&self.queue, &mut s, &factory).unwrap();
+    }
+
+    fn add(&self, id: &str, assignment: Option<&str>, extra: Value) {
+        let mut spec = json!({
+            "id": id,
+            "task": "o/r#1",
+            "epoch": 1,
+            "owner": "dev",
+            "reason": "step result",
+            "condition": "declared acceptance checked",
+            "kind": "signal",
+            "timeout_seconds": 1000
+        });
+        if let Some(assignment) = assignment {
+            spec["assignment"] = json!(assignment);
+            spec["candidate"] = json!(SHA);
+        }
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                spec[key] = value.clone();
+            }
+        }
+        queue::add(&self.queue, &spec).unwrap();
+    }
+
+    fn tick(&self, now: Option<f64>) -> J {
+        let factory = factory(self.agent.clone());
+        queue::tick(&self.queue, &factory, now).unwrap()
+    }
+
+    fn task_spec(&self) -> J {
+        json!({
+            "task": "o/r#1",
+            "wait": "step1",
+            "goal": "two accepted steps",
+            "apply_timeout_seconds": 10,
+            "acceptance": [
+                {"id": "first", "description": "first step checked"},
+                {"id": "second", "description": "second step checked"}
+            ],
+            "authorization": [
+                {"id": "develop", "action": "development", "source": "user request"}
+            ]
+        })
+    }
+}
+
+fn event_for(s: &J, wait: &str) -> String {
+    model::get(s, "events")
+        .and_then(Value::as_object)
+        .and_then(|events| {
+            events.values().find(|event| {
+                model::string(event, "wait").as_deref() == Some(wait)
+                    && model::string(event, "kind").as_deref() != Some("progress_stall")
+            })
+        })
+        .and_then(|event| model::string(event, "id"))
+        .expect("event")
+}
+
+#[test]
+fn validates_wait_inputs_and_queue_location() {
+    let h = Harness::new();
+    let result = queue::add(
+        &h.queue,
+        &json!({
+            "id": "bad id",
+            "task": "o/r#1",
+            "epoch": 1,
+            "owner": "dev",
+            "reason": "x",
+            "condition": "y",
+            "kind": "signal",
+            "timeout_seconds": 10
+        }),
+    );
+    assert!(result.is_err());
+    let result = queue::add(
+        &h.queue,
+        &json!({
+            "id": "guard",
+            "task": "o/r#1",
+            "epoch": 1,
+            "owner": "dev",
+            "reason": "x",
+            "condition": "y",
+            "kind": "guard",
+            "timeout_seconds": 10
+        }),
+    );
+    assert!(result.is_err());
+    let inside = h.base.join("repo").join("queue-inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    assert!(queue::init(&inside, Some(&h.guard), 30).is_err());
+}
+
+#[test]
+fn delivery_is_submitted_and_acknowledged_once() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", None, json!({}));
+    queue::signal(&h.queue, "step1", "complete", "done", None).unwrap();
+    let s = h.tick(Some(util::now() + 1.0));
+    let active = model::string(&s, "active").expect("active delivery");
+    assert_eq!(
+        model::dig_str(&s, &["deliveries", &active, "phase"]).as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(h.agent.lock().unwrap().messages.len(), 1);
+    let guard_state = util::read_json(&h.guard.join("state.json")).unwrap();
+    assert!(model::get(&guard_state, "external_delivery").is_some());
+    let s = queue::acknowledge(&h.queue, &active, SESSION).unwrap();
+    assert!(model::get(&s, "active").unwrap().is_null());
+    let guard_state = util::read_json(&h.guard.join("state.json")).unwrap();
+    assert!(model::get(&guard_state, "external_delivery").is_none());
+}
+
+#[test]
+fn result_association_is_persisted_before_ack() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", Some("assignment1"), json!({}));
+    let mut registered = queue::load_queue(&h.queue).unwrap();
+    herdr_flow::progress::register(&mut registered, &h.task_spec(), 100.0).unwrap();
+    queue::save(&h.queue, &mut registered).unwrap();
+    queue::signal(
+        &h.queue,
+        "step1",
+        "complete",
+        "result published",
+        Some("/evidence"),
+    )
+    .unwrap();
+    let s = h.tick(Some(100.0));
+    let event_id = event_for(&s, "step1");
+    let disk = queue::load_queue(&h.queue).unwrap();
+    let event = model::dig(&disk, &["events", &event_id]).unwrap();
+    assert!(!model::bool_or(event, "acknowledged", true));
+    assert_eq!(model::number(event, "apply_deadline"), Some(110.0));
+    let pending =
+        model::array_field(model::dig(&disk, &["tasks", "o/r#1"]).unwrap(), "pending").unwrap();
+    assert!(pending
+        .iter()
+        .any(|value| value.as_str() == Some(event_id.as_str())));
+}
+
+#[test]
+fn task_registration_apply_and_completion() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", Some("assignment1"), json!({}));
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    herdr_flow::progress::register(&mut s, &h.task_spec(), 100.0).unwrap();
+    queue::save(&h.queue, &mut s).unwrap();
+    queue::signal(
+        &h.queue,
+        "step1",
+        "complete",
+        "result published",
+        Some("/evidence"),
+    )
+    .unwrap();
+    let s = h.tick(Some(110.0));
+    let event_id = event_for(&s, "step1");
+    let active = model::string(&s, "active").expect("delivery");
+    let s = queue::acknowledge(&h.queue, &active, SESSION).unwrap();
+    let version = model::int(
+        model::dig(&s, &["tasks", "o/r#1"]).unwrap(),
+        "state_version",
+    )
+    .unwrap();
+    let spec = json!({
+        "task": "o/r#1",
+        "state_version": version,
+        "event": event_id,
+        "acceptance": {"first": "/first-result", "second": "/second-result"},
+        "next_action": {"kind": "complete"}
+    });
+    let mut s = s;
+    herdr_flow::progress::apply(&mut s, &spec, 115.0).unwrap();
+    assert_eq!(
+        model::dig_str(&s, &["tasks", "o/r#1", "phase"]).as_deref(),
+        Some("completed")
+    );
+    assert_eq!(
+        model::dig_str(
+            &s,
+            &["tasks", "o/r#1", "acceptance", "first", "evidence", "path"]
+        )
+        .as_deref(),
+        Some("/first-result")
+    );
+}
+
+#[test]
+fn writer_reservation_prevents_overlapping_workspaces() {
+    let h = Harness::new();
+    let s = queue::load_queue(&h.queue).unwrap();
+    let workspace = h.base.join("work-one");
+    std::fs::create_dir_all(&workspace).unwrap();
+    if model::get(&s, "tasks").is_none() {
+        let mut initial = s.clone();
+        initial["tasks"] = json!({});
+        queue::save(&h.queue, &mut initial).unwrap();
+    }
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    let writer = herdr_flow::progress::reserve_writer(
+        &s,
+        &workspace.display().to_string(),
+        "assignment1",
+        SESSION,
+        "o/r#1",
+    )
+    .unwrap();
+    s["tasks"]["o/r#1"] = json!({
+        "task": "o/r#1",
+        "epoch": 1,
+        "assignment": "assignment1",
+        "candidate": SHA,
+        "writer": writer
+    });
+    assert!(herdr_flow::progress::reserve_writer(
+        &s,
+        &workspace.join("sub").display().to_string(),
+        "assignment2",
+        SESSION,
+        "o/r#2",
+    )
+    .is_err());
+    let other = h.base.join("work-two");
+    std::fs::create_dir_all(&other).unwrap();
+    assert!(herdr_flow::progress::reserve_writer(
+        &s,
+        &other.display().to_string(),
+        "assignment2",
+        SESSION,
+        "o/r#2",
+    )
+    .is_ok());
+}
+
+#[test]
+fn worker_guard_fault_becomes_a_decision_event() {
+    let h = Harness::new();
+    let worker = h.base.join("worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    let mut state = util::read_json(&h.guard.join("state.json")).unwrap();
+    state["task"] = json!("o/r#1");
+    state["role"] = json!("review");
+    state["pane"] = json!("w1:p2");
+    state["terminal"] = json!("term2");
+    util::atomic_write_json(&worker.join("state.json"), &state).unwrap();
+    let _worker_watch = healthy_watcher(&worker);
+    h.enable();
+    h.add(
+        "step1",
+        None,
+        json!({
+            "kind": "guard",
+            "source": worker.display().to_string(),
+            "guard_identity": herdr_flow::guard::scope(&state)
+        }),
+    );
+    state["phase"] = json!("needs_attention");
+    state["error"] = json!("model changed");
+    util::atomic_write_json(&worker.join("state.json"), &state).unwrap();
+    let s = h.tick(None);
+    let event = model::get(&s, "events")
+        .and_then(Value::as_object)
+        .and_then(|events| events.values().next())
+        .cloned()
+        .expect("event");
+    assert_eq!(
+        model::string(&event, "outcome").as_deref(),
+        Some("decision")
+    );
+    assert!(model::string(&event, "summary")
+        .unwrap_or_default()
+        .contains("model changed"));
+}
+
+#[test]
+fn ci_wait_identity_is_pinned_and_missing_source_is_an_error() {
+    let h = Harness::new();
+    let source = h.base.join("ci");
+    std::fs::create_dir_all(&source).unwrap();
+    let config = json!({"task": "o/r#1", "epoch": 1, "sha": SHA});
+    let hash = util::sha256_json_sorted(&config);
+    util::atomic_write_json(
+        &source.join("identity.json"),
+        &json!({"config_hash": hash, "config": config}),
+    )
+    .unwrap();
+    util::atomic_write_json(
+        &source.join("status.json"),
+        &json!({"config_hash": hash, "state": "success"}),
+    )
+    .unwrap();
+    h.enable();
+    h.add(
+        "build",
+        None,
+        json!({
+            "kind": "ci",
+            "source": source.display().to_string(),
+            "config_hash": hash
+        }),
+    );
+    let s = h.tick(Some(10.0));
+    let event_id = event_for(&s, "build");
+    assert_eq!(
+        model::dig_str(&s, &["events", &event_id, "outcome"]).as_deref(),
+        Some("complete")
+    );
+}
+
+#[test]
+fn queue_summary_contains_diagnosis() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", Some("assignment1"), json!({}));
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    herdr_flow::progress::register(&mut s, &h.task_spec(), 100.0).unwrap();
+    queue::save(&h.queue, &mut s).unwrap();
+    let text = queue::summary(&queue::load_queue(&h.queue).unwrap());
+    assert!(text.contains("diagnosis="));
+    assert!(text.contains("notification="));
+    assert!(text.contains("next="));
+}
+
+#[test]
+fn enable_and_readiness_require_the_exact_live_receiver() {
+    let h = Harness::new();
+    h.agent.lock().unwrap().session = Some("unrelated".to_string());
+    let factory = factory(h.agent.clone());
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    assert!(queue::enable(&h.queue, &mut s, &factory).is_err());
+    assert!(!model::bool_or(
+        &queue::load_queue(&h.queue).unwrap(),
+        "notify",
+        true
+    ));
+    h.agent.lock().unwrap().session = Some(SESSION.to_string());
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    queue::enable(&h.queue, &mut s, &factory).unwrap();
+    let readiness = herdr_flow::runtime::readiness(&h.queue, Some(SESSION), &factory).unwrap();
+    assert!(model::bool_or(&readiness, "active_wakeup", false));
+    assert!(model::bool_or(&readiness, "context_telemetry", false));
+    assert!(!model::bool_or(&readiness, "safe_rotation", true));
+    let wrong = herdr_flow::runtime::readiness(&h.queue, Some("other"), &factory).unwrap();
+    assert!(!model::bool_or(&wrong, "active_wakeup", true));
+    assert!(!model::array_field(&wrong, "gaps").unwrap().is_empty());
+    let mut guard_state = util::read_json(&h.guard.join("state.json")).unwrap();
+    guard_state["auto_rotate"] = json!(true);
+    guard_state["usage"] = Value::Null;
+    guard_state["level"] = json!("unknown");
+    util::atomic_write_json(&h.guard.join("state.json"), &guard_state).unwrap();
+    let readiness = herdr_flow::runtime::readiness(&h.queue, Some(SESSION), &factory).unwrap();
+    assert!(model::bool_or(&readiness, "active_wakeup", false));
+    assert!(!model::bool_or(&readiness, "safe_rotation", true));
+}
+
+#[test]
+fn dispatch_application_requires_current_notification_readiness() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", Some("assignment1"), json!({}));
+    let mut s = queue::load_queue(&h.queue).unwrap();
+    herdr_flow::progress::register(&mut s, &h.task_spec(), 100.0).unwrap();
+    queue::save(&h.queue, &mut s).unwrap();
+    queue::signal(
+        &h.queue,
+        "step1",
+        "complete",
+        "result published",
+        Some("/evidence"),
+    )
+    .unwrap();
+    let s = h.tick(Some(110.0));
+    let event_id = event_for(&s, "step1");
+    let active = model::string(&s, "active").unwrap();
+    let mut s = queue::acknowledge(&h.queue, &active, SESSION).unwrap();
+    let mut queue_state = queue::load_queue(&h.queue).unwrap();
+    queue_state["notify"] = json!(false);
+    queue::save(&h.queue, &mut queue_state).unwrap();
+    let version = model::int(
+        model::dig(&s, &["tasks", "o/r#1"]).unwrap(),
+        "state_version",
+    )
+    .unwrap();
+    let spec = json!({
+        "task": "o/r#1",
+        "state_version": version,
+        "event": event_id,
+        "acceptance": {"first": "/first-result"},
+        "next_action": {
+            "kind": "dispatch",
+            "operation": "op2",
+            "assignment": "assignment2",
+            "session": "22222222-2222-2222-2222-222222222222",
+            "workspace": h.base.join("work").display().to_string(),
+            "owner": "dev",
+            "instruction": "continue",
+            "action": "development",
+            "authorization": "develop",
+            "wait": "step2",
+            "accept_timeout_seconds": 20
+        }
+    });
+    let factory = factory(h.agent.clone());
+    let error =
+        queue::task_action(&h.queue, "task-apply", &spec, Some(SESSION), &factory).unwrap_err();
+    assert_eq!(error.kind, herdr_flow::ErrorKind::Queue);
+    assert!(error.message.contains("readiness"));
+    let _ = &mut s;
+}

@@ -1,0 +1,542 @@
+//! Atomic durable writes, path resolution, ownership checks and flock helpers.
+
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
+
+use serde_json::Value;
+use tempfile::Builder;
+
+use crate::error::{FlowError, Result};
+
+pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path)
+        .map_err(|error| FlowError::io(format!("cannot read {}: {error}", path.display())))
+}
+
+pub fn read_text(path: &Path) -> Result<String> {
+    let bytes = read_bytes(path)?;
+    String::from_utf8(bytes)
+        .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))
+}
+
+pub fn read_json(path: &Path) -> Result<Value> {
+    let text = read_text(path)?;
+    serde_json::from_str(&text).map_err(|error| {
+        FlowError::new(
+            crate::error::ErrorKind::Json,
+            format!("{}: {error}", path.display()),
+        )
+    })
+}
+
+pub fn read_json_if_exists(path: &Path) -> Result<Option<Value>> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(Some(read_json(path)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Python `Path.resolve(strict=False)`: absolute, symlink-aware for the
+/// existing prefix, lexically normalized for the rest.
+pub fn resolve_path(path: &Path) -> PathBuf {
+    let absolute = absolutize(path);
+    let normalized = normalize_components(&absolute);
+    let (existing, missing) = split_missing(normalized);
+    append_missing(canonicalize_or_self(&existing), &missing)
+}
+
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("/"))
+        .join(path)
+}
+
+fn normalize_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        push_component(&mut normalized, component);
+    }
+    normalized
+}
+
+fn push_component(normalized: &mut PathBuf, component: Component<'_>) {
+    match component {
+        Component::RootDir | Component::Prefix(_) => {}
+        Component::CurDir => {}
+        Component::ParentDir => {
+            normalized.pop();
+        }
+        Component::Normal(name) => normalized.push(name),
+    }
+}
+
+fn split_missing(mut cursor: PathBuf) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    while !cursor.exists() {
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        if !cursor.pop() {
+            break;
+        }
+    }
+    (cursor, missing)
+}
+
+fn canonicalize_or_self(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn append_missing(mut result: PathBuf, missing: &[std::ffi::OsString]) -> PathBuf {
+    for name in missing.iter().rev() {
+        result.push(name);
+    }
+    result
+}
+
+pub fn absolute(path: &Path) -> bool {
+    path.is_absolute()
+}
+
+/// True when `path` is inside `base` (both should be resolved by the caller
+/// where the Python implementation resolved them).
+pub fn is_relative_to(path: &Path, base: &Path) -> bool {
+    path.starts_with(base)
+}
+
+/// True when either resolved path contains the other.
+pub fn overlap(left: &Path, right: &Path) -> bool {
+    let left = resolve_path(left);
+    let right = resolve_path(right);
+    left.starts_with(&right) || right.starts_with(&left)
+}
+
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+pub fn xdg_state_home() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local/state"))
+}
+
+pub fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".codex"))
+}
+
+fn check_parent_not_symlink(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if let Ok(metadata) = fs::symlink_metadata(parent) {
+            if metadata.file_type().is_symlink() {
+                return Err(FlowError::watch("parent directory cannot be a symlink"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Atomic replacement with mode 0600 and an fsync before rename.
+pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<()> {
+    check_parent_not_symlink(path)?;
+    let path = resolve_path(path);
+    let parent = write_parent(&path)?;
+    ensure_parent(&parent)?;
+    let temporary = create_temporary(&parent)?;
+    write_temporary(temporary, data, &path)?;
+    Ok(())
+}
+
+fn write_parent(path: &Path) -> Result<PathBuf> {
+    path.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| FlowError::io("write target has no parent directory"))
+}
+
+fn ensure_parent(parent: &Path) -> Result<()> {
+    if !parent.exists() {
+        create_private_parent(parent)?;
+    }
+    Ok(())
+}
+
+fn create_private_parent(parent: &Path) -> Result<()> {
+    fs::create_dir_all(parent)?;
+    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    Ok(())
+}
+
+fn create_temporary(parent: &Path) -> Result<tempfile::NamedTempFile> {
+    Builder::new()
+        .prefix(".write-")
+        .tempfile_in(parent)
+        .map_err(|error| FlowError::io(format!("cannot create temporary file: {error}")))
+}
+
+fn write_temporary(mut temporary: tempfile::NamedTempFile, data: &[u8], path: &Path) -> Result<()> {
+    set_temporary_mode(&mut temporary)?;
+    write_temporary_data(&mut temporary, data)?;
+    sync_temporary(&mut temporary)?;
+    persist_temporary(temporary, path)
+}
+
+fn set_temporary_mode(temporary: &mut tempfile::NamedTempFile) -> Result<()> {
+    temporary
+        .as_file_mut()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn write_temporary_data(temporary: &mut tempfile::NamedTempFile, data: &[u8]) -> Result<()> {
+    temporary
+        .as_file_mut()
+        .write_all(data)
+        .map_err(|error| FlowError::io(format!("cannot write temporary file: {error}")))
+}
+
+fn sync_temporary(temporary: &mut tempfile::NamedTempFile) -> Result<()> {
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .map_err(|error| FlowError::io(format!("cannot fsync temporary file: {error}")))
+}
+
+fn persist_temporary(temporary: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    temporary.persist(path).map_err(|error| {
+        FlowError::io(format!(
+            "cannot replace {}: {}",
+            path.display(),
+            error.error
+        ))
+    })?;
+    Ok(())
+}
+
+pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(value)
+        .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
+    text.push('\n');
+    atomic_write_bytes(path, text.as_bytes())
+}
+
+pub fn atomic_write_json_compact(path: &Path, value: &Value) -> Result<()> {
+    let mut text = serde_json::to_string(value)
+        .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
+    text.push('\n');
+    atomic_write_bytes(path, text.as_bytes())
+}
+
+pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
+    // Python `open('x')` reservation semantics.
+    let parent = path
+        .parent()
+        .ok_or_else(|| FlowError::io("write target has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                FlowError::io(format!("{} already exists", path.display()))
+            } else {
+                FlowError::io(format!("cannot create {}: {error}", path.display()))
+            }
+        })?;
+    let mut text = serde_json::to_string_pretty(value)
+        .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
+    text.push('\n');
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn fsync_dir(path: &Path) -> Result<()> {
+    let directory = File::open(path)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+pub struct FileLock {
+    file: File,
+}
+
+impl FileLock {
+    /// Open (or create) `path` and take a `flock`. With `blocking=false`,
+    /// returns `Ok(None)` when another process owns the lock.
+    pub fn acquire(path: &Path, blocking: bool) -> Result<Option<Self>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| {
+                FlowError::io(format!("cannot open lock {}: {error}", path.display()))
+            })?;
+        Self::from_file(file, blocking)
+    }
+
+    fn from_file(file: File, blocking: bool) -> Result<Option<Self>> {
+        let operation = libc::LOCK_EX | if blocking { 0 } else { libc::LOCK_NB };
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result == 0 {
+            return Ok(Some(Self { file }));
+        }
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error();
+        if !blocking && matches!(code, Some(libc::EWOULDBLOCK)) {
+            return Ok(None);
+        }
+        Err(FlowError::io(format!("cannot lock file: {error}")))
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// A nonblocking lock probe. Returns true when the lock is free.
+pub fn lock_is_free(path: &Path) -> bool {
+    matches!(FileLock::acquire(path, false), Ok(Some(_)))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+    pub uid: u32,
+    pub mode: u32,
+    pub size: u64,
+}
+
+pub fn metadata_identity(path: &Path) -> Result<FileIdentity> {
+    let metadata = fs::symlink_metadata(path)?;
+    Ok(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        uid: metadata.uid(),
+        mode: metadata.mode(),
+        size: metadata.size(),
+    })
+}
+
+pub fn is_socket(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+pub fn is_owned_regular_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_file() && metadata.uid() == unsafe { libc::geteuid() }
+}
+
+/// Ensure a private real directory (no symlink, owned by this user, mode 0700).
+pub fn ensure_private_dir(path: &Path, create: bool) -> Result<()> {
+    create_private_dir(path, create)?;
+    let metadata = private_dir_metadata(path)?;
+    validate_private_dir_type(&metadata)?;
+    validate_private_dir_owner(&metadata)?;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    Ok(())
+}
+
+fn create_private_dir(path: &Path, create: bool) -> Result<()> {
+    if create {
+        create_private_dir_if_missing(path)?;
+    }
+    Ok(())
+}
+
+fn create_private_dir_if_missing(path: &Path) -> Result<()> {
+    if !path.exists() {
+        fs::create_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn private_dir_metadata(path: &Path) -> Result<fs::Metadata> {
+    fs::symlink_metadata(path)
+        .map_err(|error| FlowError::guard(format!("state directory unavailable: {error}")))
+}
+
+fn validate_private_dir_type(metadata: &fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(FlowError::guard(
+            "state directory must be an owned real directory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_private_dir_owner(metadata: &fs::Metadata) -> Result<()> {
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(FlowError::guard(
+            "state directory must be owned by this user",
+        ));
+    }
+    Ok(())
+}
+
+pub fn remove_file_if_exists(path: &Path) -> Result<()> {
+    fs::remove_file(path).or_else(ignore_not_found)?;
+    Ok(())
+}
+
+fn ignore_not_found(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(());
+    }
+    Err(error)
+}
+
+pub fn read_file_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    Read::by_ref(&mut file)
+        .take(limit as u64)
+        .read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+/// Recursively list regular files whose basename ends with `suffix`.
+pub fn files_with_suffix(root: &Path, suffix: &str) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut visited = HashSet::new();
+    while let Some(directory) = stack.pop() {
+        let Ok(canonical) = directory.canonicalize() else {
+            continue;
+        };
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(suffix))
+                    .unwrap_or(false)
+            {
+                result.push(path);
+            }
+        }
+    }
+    result
+}
+
+pub fn pid_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn resolve_path_follows_symlinks_and_keeps_missing_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("file"), b"x").unwrap();
+        let link = directory.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert_eq!(resolve_path(&link.join("file")), target.join("file"));
+        let missing = link.join("missing").join("..").join("child");
+        assert_eq!(resolve_path(&missing), target.join("child"));
+    }
+
+    #[test]
+    fn atomic_writes_are_private_and_reject_symlink_parents() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("nested");
+        let path = parent.join("state.json");
+        atomic_write_bytes(&path, b"payload").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        symlink(&real, &link).unwrap();
+        assert!(atomic_write_bytes(&link.join("state.json"), b"x").is_err());
+    }
+
+    #[test]
+    fn lock_probe_reports_free_and_held_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.lock");
+        assert!(lock_is_free(&path));
+        let lock = FileLock::acquire(&path, false).unwrap().unwrap();
+        assert!(!lock_is_free(&path));
+        drop(lock);
+        assert!(lock_is_free(&path));
+    }
+
+    #[test]
+    fn private_directory_checks_and_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private");
+        ensure_private_dir(&path, true).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        ensure_private_dir(&path, false).unwrap();
+        let missing = directory.path().join("missing");
+        assert!(ensure_private_dir(&missing, false).is_err());
+
+        let link = directory.path().join("link");
+        symlink(directory.path(), &link).unwrap();
+        assert!(ensure_private_dir(&link, false).is_err());
+
+        let file = directory.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        remove_file_if_exists(&file).unwrap();
+        remove_file_if_exists(&file).unwrap();
+    }
+}

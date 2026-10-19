@@ -1,0 +1,1073 @@
+//! Local process boundaries: bounded command execution, background startup
+//! readiness, `/proc` identity, Git checkout fingerprinting and shell quoting.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use crate::error::{ErrorKind, FlowError, Result};
+use crate::model::{self, J};
+use crate::util::fs::{read_bytes, resolve_path};
+use crate::util::pyjson::to_hex;
+
+#[derive(Clone, Debug)]
+pub struct CommandOptions {
+    pub cwd: Option<PathBuf>,
+    pub timeout: Duration,
+    pub env: BTreeMap<String, String>,
+    pub clear_env: bool,
+    pub stdin: Option<Vec<u8>>,
+}
+
+impl Default for CommandOptions {
+    fn default() -> Self {
+        Self {
+            cwd: None,
+            timeout: Duration::from_secs(30),
+            env: BTreeMap::new(),
+            clear_env: false,
+            stdin: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandOutput {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl CommandOutput {
+    pub fn success(&self) -> bool {
+        self.status == 0
+    }
+
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).to_string()
+    }
+
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).to_string()
+    }
+}
+
+/// Run a command with captured stdout/stderr and a hard timeout.
+///
+/// A timeout is reported as `TimeoutExpired`. A non-zero exit is returned to
+/// the caller as data; policy about failures belongs to each boundary.
+pub fn run_command(argv: &[String], options: &CommandOptions) -> Result<CommandOutput> {
+    require_argv(argv)?;
+    let mut command = build_command(argv, options);
+    let mut child = spawn_child(&mut command, &argv[0])?;
+    let stdout = take_stdout(&mut child)?;
+    let stderr = take_stderr(&mut child)?;
+    let readers = spawn_readers(stdout, stderr);
+    start_stdin(&mut child, options);
+    let outcome = wait_for_child(&mut child, options.timeout);
+    let (stdout, stderr) = join_readers(readers);
+    build_output(outcome, &argv[0], stdout, stderr)
+}
+
+fn require_argv(argv: &[String]) -> Result<()> {
+    if argv.is_empty() {
+        return Err(FlowError::new(
+            ErrorKind::Usage,
+            "command must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn build_command(argv: &[String], options: &CommandOptions) -> Command {
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    apply_cwd(&mut command, options.cwd.as_deref());
+    apply_env(&mut command, options);
+    apply_stdin(&mut command, options.stdin.is_some());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+}
+
+fn apply_cwd(command: &mut Command, cwd: Option<&Path>) {
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+}
+
+fn apply_env(command: &mut Command, options: &CommandOptions) {
+    if options.clear_env {
+        command.env_clear();
+    }
+    apply_env_vars(command, &options.env);
+}
+
+fn apply_env_vars(command: &mut Command, vars: &BTreeMap<String, String>) {
+    for (key, value) in vars {
+        command.env(key, value);
+    }
+}
+
+fn apply_stdin(command: &mut Command, has_stdin: bool) {
+    command.stdin(if has_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+}
+
+fn spawn_child(command: &mut Command, program: &str) -> Result<Child> {
+    command
+        .spawn()
+        .map_err(|error| FlowError::new(ErrorKind::Io, format!("cannot start {program}: {error}")))
+}
+
+fn take_stdout(child: &mut Child) -> Result<ChildStdout> {
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| FlowError::io("missing stdout pipe"))
+}
+
+fn take_stderr(child: &mut Child) -> Result<ChildStderr> {
+    child
+        .stderr
+        .take()
+        .ok_or_else(|| FlowError::io("missing stderr pipe"))
+}
+
+struct ReaderPair {
+    stdout: thread::JoinHandle<Vec<u8>>,
+    stderr: thread::JoinHandle<Vec<u8>>,
+}
+
+fn spawn_readers(stdout: ChildStdout, stderr: ChildStderr) -> ReaderPair {
+    ReaderPair {
+        stdout: thread::spawn(move || read_all(stdout)),
+        stderr: thread::spawn(move || read_all(stderr)),
+    }
+}
+
+fn start_stdin(child: &mut Child, options: &CommandOptions) {
+    if let Some(data) = &options.stdin {
+        spawn_stdin(child, data);
+    }
+}
+
+fn spawn_stdin(child: &mut Child, data: &[u8]) {
+    if let Some(mut stdin) = child.stdin.take() {
+        let data = data.to_vec();
+        thread::spawn(move || {
+            let _ = stdin.write_all(&data);
+            let _ = stdin.flush();
+        });
+    }
+}
+
+enum WaitOutcome {
+    Exited(ExitStatus),
+    TimedOut,
+    Failed(FlowError),
+}
+
+fn wait_for_child(child: &mut Child, timeout: Duration) -> WaitOutcome {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return WaitOutcome::Exited(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return WaitOutcome::TimedOut;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return WaitOutcome::Failed(FlowError::io(format!(
+                    "cannot wait for command: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn join_readers(readers: ReaderPair) -> (Vec<u8>, Vec<u8>) {
+    (
+        readers.stdout.join().unwrap_or_default(),
+        readers.stderr.join().unwrap_or_default(),
+    )
+}
+
+fn build_output(
+    outcome: WaitOutcome,
+    program: &str,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> Result<CommandOutput> {
+    match outcome {
+        WaitOutcome::Exited(status) => Ok(CommandOutput {
+            status: exit_code(status),
+            stdout,
+            stderr,
+        }),
+        WaitOutcome::TimedOut => Err(FlowError::new(
+            ErrorKind::Timeout,
+            format!("{program} timed out"),
+        )),
+        WaitOutcome::Failed(error) => Err(error),
+    }
+}
+
+fn read_all(mut reader: impl Read) -> Vec<u8> {
+    let mut data = Vec::new();
+    let _ = reader.read_to_end(&mut data);
+    data
+}
+
+fn exit_code(status: ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return -signal;
+        }
+    }
+    1
+}
+
+/// The original `context_guard.command`: non-zero exit raises, stderr is
+/// collapsed to one credential-neutral line.
+pub fn command(
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    transient: bool,
+) -> Result<Vec<u8>> {
+    if argv.is_empty() {
+        return Err(FlowError::guard("command must not be empty"));
+    }
+    let options = CommandOptions {
+        cwd: cwd.map(Path::to_path_buf),
+        timeout,
+        ..Default::default()
+    };
+    let output = match run_command(argv, &options) {
+        Ok(output) => output,
+        Err(error) if error.kind == ErrorKind::Timeout => {
+            return Err(FlowError::new(
+                ErrorKind::Timeout,
+                format!("{} timed out", argv[0]),
+            ))
+        }
+        Err(error) => {
+            return Err(FlowError::guard(format!(
+                "{} is not available: {}",
+                argv[0], error
+            )))
+        }
+    };
+    if output.status != 0 {
+        let mut message = format!(
+            "{} failed (exit {})",
+            argv.iter().take(2).cloned().collect::<Vec<_>>().join(" "),
+            output.status
+        );
+        let detail = error_detail(&output.stderr, STDERR_LIMIT);
+        if !detail.is_empty() {
+            message.push_str(": ");
+            message.push_str(&detail);
+        }
+        return Err(FlowError::new(
+            if transient {
+                ErrorKind::Transient
+            } else {
+                ErrorKind::Guard
+            },
+            message,
+        ));
+    }
+    Ok(output.stdout)
+}
+
+pub const STDERR_LIMIT: usize = 2048;
+
+/// Collapse bounded stderr into one printable, credential-neutral line.
+pub fn error_detail(data: &[u8], limit: usize) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(data);
+    let text: String = text
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || (character as u32) >= 32 {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    // Redact URL credentials, local user names and long opaque tokens.
+    static URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static HOME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static TOKEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let url = URL.get_or_init(|| regex::Regex::new(r"(https?://)[^@\s/]+@").expect("url regex"));
+    let home =
+        HOME.get_or_init(|| regex::Regex::new(r"(/home/|/Users/)[^/\s]+").expect("home regex"));
+    let token =
+        TOKEN.get_or_init(|| regex::Regex::new(r"\b[A-Za-z0-9_-]{32,}\b").expect("token regex"));
+    let text = url.replace_all(&text, "$1[REDACTED]@").into_owned();
+    let text = home.replace_all(&text, "$1[USER]").into_owned();
+    let text = token.replace_all(&text, "[TOKEN]").into_owned();
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= limit {
+        collapsed
+    } else {
+        let mut truncated: String = collapsed.chars().take(limit.saturating_sub(3)).collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+/// The original `batch_git._sanitize_stderr`: first nonempty line, max 200.
+pub fn sanitize_stderr(raw: &[u8]) -> String {
+    if raw.is_empty() {
+        return "no error output".to_string();
+    }
+    let text = String::from_utf8_lossy(raw);
+    let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return "no error output".to_string();
+    };
+    error_detail(line.as_bytes(), 200)
+}
+
+pub fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'_' | b'-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|argument| shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn check_platform() -> J {
+    let system = std::env::consts::OS;
+    if cfg!(target_os = "linux") {
+        serde_json::json!({"supported": true, "system": "Linux"})
+    } else {
+        serde_json::json!({
+            "supported": false,
+            "system": system,
+            "reason": format!("{system} is not supported; Linux-only features: /proc filesystem, Unix domain sockets, flock")
+        })
+    }
+}
+
+pub fn process_start_ticks(pid: u32) -> Option<String> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = text.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19).map(ToString::to_string)
+}
+
+pub fn process_identity(pid: u32) -> Result<J> {
+    let platform = check_platform();
+    if !model::bool_or(&platform, "supported", false) {
+        return Err(FlowError::guard(model::string_or(
+            &platform,
+            "reason",
+            "platform unsupported",
+        )));
+    }
+    let Some(start_ticks) = process_start_ticks(pid) else {
+        return Err(FlowError::guard("cannot establish process identity"));
+    };
+    Ok(serde_json::json!({"pid": pid, "start_ticks": start_ticks}))
+}
+
+pub fn current_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+pub fn git_output_bounded(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
+    let mut argv = vec![
+        "git".to_string(),
+        "-C".to_string(),
+        cwd.display().to_string(),
+    ];
+    argv.extend(args.iter().map(|argument| argument.to_string()));
+    command(&argv, None, timeout, false)
+}
+
+pub fn checkout_root(cwd: &Path) -> PathBuf {
+    let result = git_output_bounded(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        Duration::from_secs(30),
+    );
+    match result {
+        Ok(output) => resolve_path(Path::new(String::from_utf8_lossy(&output).trim())),
+        Err(_) => resolve_path(cwd),
+    }
+}
+
+pub fn inside_checkout(path: &Path, cwd: &Path) -> bool {
+    let path = resolve_path(path);
+    path.starts_with(resolve_path(cwd)) || path.starts_with(checkout_root(cwd))
+}
+
+/// Bind branch, HEAD, index/worktree diff and untracked bytes; never stage.
+pub fn fingerprint(cwd: &Path) -> Result<String> {
+    let repo_root = repository_root(cwd)?;
+    ensure_no_submodules(&repo_root)?;
+    let mut hasher = Sha256::new();
+    hash_tracked_state(&repo_root, &mut hasher)?;
+    hash_untracked(&repo_root, &mut hasher)?;
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn repository_root(cwd: &Path) -> Result<PathBuf> {
+    let output = command(
+        &[
+            "git".to_string(),
+            "rev-parse".to_string(),
+            "--show-toplevel".to_string(),
+        ],
+        Some(cwd),
+        Duration::from_secs(30),
+        false,
+    )?;
+    let text = String::from_utf8_lossy(&output);
+    Ok(PathBuf::from(text.trim()))
+}
+
+fn git_in(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let mut argv = vec!["git".to_string()];
+    argv.extend(args.iter().map(|argument| argument.to_string()));
+    command(&argv, Some(repo_root), Duration::from_secs(120), false)
+}
+
+fn ensure_no_submodules(repo_root: &Path) -> Result<()> {
+    let staged = git_in(repo_root, &["ls-files", "--stage", "-z"])?;
+    reject_if_submodule(&staged)
+}
+
+fn reject_if_submodule(staged: &[u8]) -> Result<()> {
+    if staged
+        .split(|byte| *byte == 0)
+        .any(|entry| entry.starts_with(b"160000 "))
+    {
+        return Err(FlowError::guard(
+            "submodule checkout requires an explicit recursive binding adapter",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_tracked_state(repo_root: &Path, hasher: &mut Sha256) -> Result<()> {
+    let head = git_in(repo_root, &["rev-parse", "HEAD"])?;
+    let branch = branch_binding(repo_root)?;
+    let worktree_diff = git_in(
+        repo_root,
+        &["diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"],
+    )?;
+    let index_diff = git_in(
+        repo_root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--binary",
+        ],
+    )?;
+    for data in [
+        head.as_slice(),
+        branch.as_slice(),
+        worktree_diff.as_slice(),
+        index_diff.as_slice(),
+    ] {
+        hash_length_prefixed(hasher, data);
+    }
+    Ok(())
+}
+
+fn branch_binding(repo_root: &Path) -> Result<Vec<u8>> {
+    let abbrev = git_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    symbolic_branch(repo_root, &abbrev)
+}
+
+fn symbolic_branch(repo_root: &Path, abbrev: &[u8]) -> Result<Vec<u8>> {
+    if String::from_utf8_lossy(abbrev).trim() == "HEAD" {
+        return Ok(b"DETACHED".to_vec());
+    }
+    git_in(repo_root, &["symbolic-ref", "-q", "HEAD"])
+}
+
+fn hash_length_prefixed(hasher: &mut Sha256, data: &[u8]) {
+    hasher.update((data.len() as u64).to_be_bytes());
+    hasher.update(data);
+}
+
+fn hash_untracked(repo_root: &Path, hasher: &mut Sha256) -> Result<()> {
+    let untracked = git_in(
+        repo_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    let mut names = untracked_names(&untracked);
+    names.sort();
+    for name in names {
+        hash_untracked_entry(repo_root, name, hasher)?;
+    }
+    Ok(())
+}
+
+fn untracked_names(untracked: &[u8]) -> Vec<&[u8]> {
+    untracked
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn hash_untracked_entry(repo_root: &Path, name: &[u8], hasher: &mut Sha256) -> Result<()> {
+    hasher.update(name);
+    hasher.update([0u8]);
+    let name_text = String::from_utf8_lossy(name);
+    let path = repo_root.join(name_text.as_ref());
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| FlowError::guard(format!("cannot inspect untracked path: {error}")))?;
+    if metadata.file_type().is_symlink() {
+        return hash_symlink(&path, hasher);
+    }
+    if metadata.is_file() {
+        return hash_regular_file(&path, &metadata, hasher);
+    }
+    Err(FlowError::guard(
+        "unsupported untracked path; cannot bind checkout",
+    ))
+}
+
+fn hash_symlink(path: &Path, hasher: &mut Sha256) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    hasher.update(b"link:");
+    let target = fs::read_link(path)?;
+    hasher.update(target.as_os_str().as_bytes());
+    Ok(())
+}
+
+fn hash_regular_file(path: &Path, metadata: &fs::Metadata, hasher: &mut Sha256) -> Result<()> {
+    hasher.update(metadata.mode().to_string().as_bytes());
+    let mut file = File::open(path)?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(())
+}
+
+pub fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => return,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn set_cloexec(fd: RawFd, enabled: bool) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 {
+            let updated = if enabled {
+                flags | libc::FD_CLOEXEC
+            } else {
+                flags & !libc::FD_CLOEXEC
+            };
+            libc::fcntl(fd, libc::F_SETFD, updated);
+        }
+    }
+}
+
+pub struct BackgroundChild {
+    pub child: Child,
+    pub pid: u32,
+    pub ready: Option<J>,
+}
+
+impl BackgroundChild {
+    pub fn reap(mut self) {
+        thread::spawn(move || {
+            let _ = self.child.wait();
+        });
+    }
+}
+
+/// Spawn a detached helper that writes one readiness JSON object to fd 3.
+pub fn spawn_with_ready(
+    argv: &[String],
+    log_path: &Path,
+    cwd: Option<&Path>,
+    timeout: Duration,
+) -> Result<BackgroundChild> {
+    ensure_log_parent(log_path)?;
+    let (log, log_err) = open_log_pair(log_path)?;
+    let (read_fd, write_fd) = readiness_pipe()?;
+    set_cloexec(read_fd, true);
+    set_cloexec(write_fd, true);
+    let mut command = ready_command(argv, log, log_err, cwd, write_fd);
+    let mut child = spawn_ready_child(&mut command, read_fd, write_fd)?;
+    unsafe {
+        libc::close(write_fd);
+    }
+    let ready = read_ready(read_fd, timeout);
+    unsafe {
+        libc::close(read_fd);
+    }
+    let ready = ready.inspect_err(|_| {
+        terminate_child(&mut child);
+    })?;
+    let pid = child.id();
+    Ok(BackgroundChild {
+        child,
+        pid,
+        ready: Some(ready),
+    })
+}
+
+fn ensure_log_parent(log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn open_log_pair(log_path: &Path) -> Result<(fs::File, fs::File)> {
+    let log = open_log_file(log_path)?;
+    let clone = log.try_clone()?;
+    Ok((log, clone))
+}
+
+fn open_log_file(log_path: &Path) -> Result<fs::File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(log_path)
+        .map_err(|error| FlowError::io(format!("cannot open log: {error}")))
+}
+
+fn readiness_pipe() -> Result<(RawFd, RawFd)> {
+    let mut fds = [0 as RawFd; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(FlowError::io(format!(
+            "cannot create readiness pipe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok((fds[0], fds[1]))
+}
+
+fn ready_command(
+    argv: &[String],
+    log: fs::File,
+    log_err: fs::File,
+    cwd: Option<&Path>,
+    write_fd: RawFd,
+) -> Command {
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .arg("--ready-fd")
+        .arg("3")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(write_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            set_cloexec(3, false);
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+}
+
+fn spawn_ready_child(command: &mut Command, read_fd: RawFd, write_fd: RawFd) -> Result<Child> {
+    command.spawn().map_err(|error| {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        FlowError::io(format!("cannot start background helper: {error}"))
+    })
+}
+
+fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(FlowError::watch(
+                "helper startup timed out; inspect its log",
+            ));
+        }
+        let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(FlowError::io(format!("readiness poll failed: {error}")));
+        }
+        if result == 0 {
+            return Err(FlowError::watch(
+                "helper startup timed out; inspect its log",
+            ));
+        }
+        let mut buffer = [0u8; 4096];
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read <= 0 {
+            return Err(FlowError::watch(
+                "helper exited before readiness; inspect its log",
+            ));
+        }
+        let data = &buffer[..read as usize];
+        return serde_json::from_slice(data)
+            .map_err(|_| FlowError::watch("helper exited before readiness; inspect its log"));
+    }
+}
+
+/// Spawn a detached process without a readiness handshake (advisor workers,
+/// queue command wrappers).
+pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> Result<Child> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(log_path)
+        .map_err(|error| FlowError::io(format!("cannot open log: {error}")))?;
+    let log_err = log.try_clone()?;
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
+        .map_err(|error| FlowError::io(format!("cannot start background process: {error}")))
+}
+
+/// Spawn the native TUI with inherited terminal I/O.
+pub fn spawn_inherit(argv: &[String], cwd: Option<&Path>) -> Result<Child> {
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command
+        .spawn()
+        .map_err(|error| FlowError::io(format!("cannot launch native TUI: {error}")))
+}
+
+pub fn current_exe() -> Result<PathBuf> {
+    std::env::current_exe()
+        .map_err(|error| FlowError::io(format!("cannot locate current executable: {error}")))
+}
+
+pub fn open_dir_fd(path: &Path) -> Result<RawFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| FlowError::io("path contains NUL"))?;
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(FlowError::io(format!(
+            "cannot open state directory: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(fd)
+}
+
+pub fn path_metadata_mode(path: &Path) -> Option<u32> {
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.mode())
+}
+
+pub fn is_regular_uid(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file() && metadata.uid() == current_uid())
+        .unwrap_or(false)
+}
+
+pub fn is_socket_uid(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_socket() && metadata.uid() == current_uid())
+        .unwrap_or(false)
+}
+
+pub fn read_dir_names(path: &Path) -> Vec<String> {
+    fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn write_stdout(value: &str) {
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(value.as_bytes());
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
+}
+
+pub fn write_stderr(value: &str) {
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(value.as_bytes());
+    let _ = stderr.flush();
+}
+
+pub fn read_json_stdin() -> Result<J> {
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text)?;
+    serde_json::from_str(&text).map_err(Into::into)
+}
+
+pub fn ensure_existing_file(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| FlowError::io(format!("evidence file unavailable: {error}")))?;
+    if !metadata.is_file() {
+        return Err(FlowError::io("evidence path must be a regular file"));
+    }
+    Ok(())
+}
+
+pub fn read_file_identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+pub fn file_is_world_writable(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.mode() & 0o002 != 0)
+        .unwrap_or(false)
+}
+
+pub fn read_bytes_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    read_bytes(path).map(|mut data| {
+        if data.len() > limit {
+            data.truncate(limit);
+        }
+        data
+    })
+}
+
+/// Write one JSON readiness message to an inherited fd and close it.
+pub fn write_ready_fd(fd: RawFd, value: &J) {
+    let mut data = match serde_json::to_vec(value) {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+    data.push(b'\n');
+    let mut written = 0;
+    while written < data.len() {
+        let result =
+            unsafe { libc::write(fd, data[written..].as_ptr().cast(), data.len() - written) };
+        if result <= 0 {
+            break;
+        }
+        written += result as usize;
+    }
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+// Keep a reference so unused imports are not a problem while modules grow.
+#[allow(dead_code)]
+fn _fd_from_raw(fd: RawFd) -> File {
+    unsafe { File::from_raw_fd(fd) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn pipe() -> (RawFd, RawFd) {
+        let mut fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    fn close(fd: RawFd) {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+
+    #[test]
+    fn ready_fd_round_trips_and_times_out() {
+        let (read_fd, write_fd) = pipe();
+        write_ready_fd(write_fd, &serde_json::json!({"ready": true}));
+        close(write_fd);
+        let value = read_ready(read_fd, Duration::from_secs(1)).unwrap();
+        assert_eq!(value["ready"], true);
+        close(read_fd);
+
+        let (read_fd, write_fd) = pipe();
+        let error = read_ready(read_fd, Duration::from_millis(10)).unwrap_err();
+        assert_eq!(error.kind, crate::error::ErrorKind::Watch);
+        close(read_fd);
+        close(write_fd);
+    }
+
+    #[test]
+    fn cloexec_flag_can_be_set_and_cleared() {
+        let (read_fd, write_fd) = pipe();
+        set_cloexec(read_fd, true);
+        let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        assert!(flags & libc::FD_CLOEXEC != 0);
+        set_cloexec(read_fd, false);
+        let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        assert!(flags & libc::FD_CLOEXEC == 0);
+        close(read_fd);
+        close(write_fd);
+    }
+
+    #[test]
+    fn existing_file_requires_a_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("evidence");
+        fs::write(&file, b"x").unwrap();
+        ensure_existing_file(&file).unwrap();
+        assert!(ensure_existing_file(directory.path()).is_err());
+        assert!(ensure_existing_file(&directory.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn terminate_child_stops_a_running_process() {
+        let mut child = Command::new("sh").arg("-c").arg("sleep 5").spawn().unwrap();
+        terminate_child(&mut child);
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn spawn_with_ready_accepts_a_helper_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("helper.log");
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '{\"ready\":true}' >&3".to_string(),
+        ];
+        let mut child = spawn_with_ready(&argv, &log, None, Duration::from_secs(2)).unwrap();
+        assert_eq!(child.ready.as_ref().unwrap()["ready"], true);
+        terminate_child(&mut child.child);
+    }
+
+    #[test]
+    fn fingerprint_tracks_head_worktree_and_untracked_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |arguments: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(root)
+                .args(arguments)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {arguments:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(root.join("tracked"), b"one").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-q", "-m", "initial"]);
+        let first = fingerprint(root).unwrap();
+        fs::write(root.join("tracked"), b"two").unwrap();
+        let second = fingerprint(root).unwrap();
+        assert_ne!(first, second);
+        fs::write(root.join("untracked"), b"three").unwrap();
+        let third = fingerprint(root).unwrap();
+        assert_ne!(second, third);
+        git(&["checkout", "-q", "--detach"]);
+        let detached = fingerprint(root).unwrap();
+        assert_ne!(third, detached);
+    }
+}

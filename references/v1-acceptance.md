@@ -1,0 +1,36 @@
+# V1 basic single-PR loop
+
+V1 combines durable result application, explicit successor takeover, local PR
+provenance and required-job decisions. External publication still uses an
+authorized publisher; these tools do not push, create PRs or merge them.
+
+The 2026-10-17 acceptance used isolated test base branches in this repository.
+It did not merge source into the production `main` branch.
+
+| Stage | Recorded observation |
+| --- | --- |
+| Native coordinator | Actual result delivery, exact-session ACK, application, command takeover, command result application and writer release |
+| Normal PR | [PR #16](https://github.com/musutrade/herdr-issue-flow/pull/16): required job succeeded, advisory job failed, native auto-merge and landing confirmed on the isolated base |
+| Repair PR | [PR #17](https://github.com/musutrade/herdr-issue-flow/pull/17): inspected required failure, one isolated native repair worker, same-PR update, successful required job and confirmed landing |
+| Interrupted dispatch | Existing `sending` operation accepted and recovered without replay; old-head update observation retained until convergence |
+| Old candidate | Original failed-SHA result refused after repair candidate changed |
+| Owned cleanup | Two temporary protections and four test refs removed, temporary auto-merge setting restored, owned worker and observers retired; evidence retained |
+| External review | Existing OpenCode v2 session with DeepSeek free published its report, signaled the registered wait, and had its delivered result ACKed and applied by the successor coordinator |
+
+The external review found no blocking issues. Follow-up corrections canonicalize
+CI evidence paths and consistently give non-code decisions precedence over code
+repair. Required failure remains visible, but missing/cancelled/skipped required
+jobs need inspection before dispatch. Generic OpenCode signals remain local
+coordination, with identity checked separately by the coordinator.
+
+Final source verification uses the repository's full Rust test suite, including
+real temporary Git repositories and injected GitHub responses. That offline
+suite complements the retained live evidence; it does not reproduce GitHub
+authorization, native arrival or merge acceptance. Private reports, identities,
+raw logs and queue records stay outside the repository. Session rotation alone
+does not invalidate unchanged completed evidence.
+
+Trusted App Checks and GateHouse #98 remain separate acceptance work. V2
+integration/batching, automatic OpenCode rotation and production source merge
+are outside this V1 basic-loop delivery. Successful required Actions jobs do not
+attest external checks or grant publication/merge permission.

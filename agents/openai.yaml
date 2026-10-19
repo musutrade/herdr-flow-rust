@@ -1,0 +1,3 @@
+interface:
+  display_name: "Herdr Issue Flow"
+  short_description: "Bounded agent sessions and durable CI monitoring"
