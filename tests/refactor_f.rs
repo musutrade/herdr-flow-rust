@@ -383,11 +383,12 @@ fn gate_query_and_quiescent_accept_valid_receipts() {
     let tmp = tempfile::tempdir().unwrap();
     let verifier = tmp.path().join("verifier");
     std::fs::create_dir_all(&verifier).unwrap();
+    let receipt_verifier = verifier.join("verify-receipt");
     let lane = json!({
         "repo": "o/r",
         "host": "github.com",
         "base_ref": "main",
-        "gate": {"verifier": [verifier.join("verify").display().to_string()], "policy": "policy-1", "check_name": "trusted-gate", "app_id": 123}
+        "gate": {"verifier": [receipt_verifier.display().to_string()], "policy": "policy-1", "check_name": "trusted-gate", "app_id": 123}
     });
     let batch = json!({
         "base": "base-1",
@@ -409,23 +410,27 @@ fn gate_query_and_quiescent_accept_valid_receipts() {
         "external_id": "external-1",
         "evidence": "evidence-1"
     });
-    verifier_script(&verifier, "verify", &receipt);
+    verifier_script(&verifier, "verify-receipt", &receipt);
     let verified = batch::gate::query(&lane, &batch, Some(&json!("reference-1")), 100.0).unwrap();
     assert_eq!(
         model::string(&verified, "decision").as_deref(),
         Some("allow")
     );
 
+    let inspection_verifier = verifier.join("verify-inspection");
+    let mut inspection_lane = lane.clone();
+    inspection_lane["gate"]["verifier"] = json!([inspection_verifier.display().to_string()]);
+    let inspection_binding = batch::gate::binding(&inspection_lane, &batch).unwrap();
     let inspection = json!({
         "version": 1,
-        "binding": binding,
+        "binding": inspection_binding,
         "operation": "op-1",
         "status": "completed",
         "quiescent": true,
         "evidence": "inspection-1"
     });
-    verifier_script(&verifier, "verify", &inspection);
-    let inspected = batch::gate::quiescent(&lane, &batch).unwrap();
+    verifier_script(&verifier, "verify-inspection", &inspection);
+    let inspected = batch::gate::quiescent(&inspection_lane, &batch).unwrap();
     assert_eq!(
         model::string(&inspected, "status").as_deref(),
         Some("completed")
