@@ -240,6 +240,7 @@ outside the checkout and start a new bounded task contract.
 Record the exact live receiver, result event, ACK, application and takeover times
 from the queue/delivery/operation records. Retain a compact evidence index and
 the declared completion conditions. Full transcripts, private paths and command
-logs stay outside GitHub. The test suite exercises these crash boundaries and
-the actual subprocess wrapper, but uses an isolated receiver adapter; live
-active-arrival and rotation acceptance must be recorded separately.
+logs stay outside GitHub. The Rust test suite exercises state-level apply/stall
+transitions and timestamps, but not process crash/restart, real-clock watcher
+ticks or live notification; the actual subprocess wrapper is only partially
+covered. Live active-arrival and rotation acceptance must be recorded separately.

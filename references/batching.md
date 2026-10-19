@@ -186,9 +186,12 @@ checkout. Deployment retains owned cleanup/retention responsibility for workspac
 logs and gate caches; this consumer never deletes active data automatically.
 
 Real temporary Git repositories, private refs/indexes, a stdio verifier fixture
-and injected GitHub GETs test capacity, dependency replay, repairs, exact takeover,
-crash boundaries, same-PR rebasing, revocation, landing and successor freeze. They
-do not attest deployment, credential isolation, coverage or production delivery.
+and injected GitHub GETs cover capacity, dependency validation, some repair guards,
+exact takeover and a single happy-path integrate/snapshot. They do **not** cover
+all crash boundaries, successful same-PR rebasing, gate revocation, landing-tree
+verification or successor freeze; the Rust audit found unported regressions in
+these areas. They do not attest deployment, credential isolation, coverage or
+production delivery.
 After #98 is available, complete normal/failure/recovery live paths and the #12
 same-host cold/hot/cache-invalidation and per-delivered-task cost comparison.
 Include failed/cancelled runs, cache maintenance, waiting, repairs and manual

@@ -571,7 +571,7 @@ fn parse_header_line(line: &str) -> Result<(String, String)> {
     Ok((name.to_lowercase(), value.trim().to_string()))
 }
 
-fn validate_socket(socket_path: &str) -> Result<()> {
+pub(crate) fn validate_socket(socket_path: &str) -> Result<()> {
     validate_socket_metadata(&socket_metadata(socket_path)?)
 }
 

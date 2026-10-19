@@ -59,7 +59,13 @@ fn candidate(t: &mut J, head: &str) -> Result<()> {
 
 fn lane_target(spec: &J) -> Result<(String, String, String)> {
     let repo = progress::text(model::get(spec, "repo"), "owner/repo", 250)?;
-    let host = model::string_or(spec, "host", "github.com");
+    let host = match model::get(spec, "host") {
+        None => "github.com".to_string(),
+        Some(value) => value
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| FlowError::progress("invalid repository/host"))?,
+    };
     if !regex::Regex::new(r"^[\w.-]+/[\w.-]+$")
         .expect("static repo regex")
         .is_match(&repo)
@@ -537,11 +543,15 @@ fn verifier_from_checkout(lane: &J, source: &J) -> bool {
 }
 
 fn verifier_argument_in(argument: &J, checkout: &str) -> bool {
+    if checkout.is_empty() {
+        return false;
+    }
     argument
         .as_str()
         .map(|argument| {
-            Path::new(argument).is_absolute()
-                && util::is_relative_to(Path::new(argument), Path::new(checkout))
+            let argument = util::resolve_path(Path::new(argument));
+            let checkout = util::resolve_path(Path::new(checkout));
+            argument.is_absolute() && util::is_relative_to(&argument, &checkout)
         })
         .unwrap_or(false)
 }
@@ -1142,7 +1152,9 @@ fn freeze_build(
         "gate": null,
         "revision": 0,
         "progress_deadline": now + model::number(&lane, "progress_timeout").unwrap_or(600.0),
-        "integration": {"ready": false, "offset": 0, "mapping": [], "current": null, "conflict": null}
+        "integration": {"ready": false, "offset": 0, "mapping": [], "current": null, "conflict": null},
+        "corrections": [],
+        "versions": []
     });
     freeze_dependencies(s, now, api, t, lane, batch)
 }
@@ -1378,9 +1390,10 @@ fn integrate_run(
         let task_name = model::string(&t, "task").unwrap_or_default();
         t["lane"]["active"] = batch.clone();
         s["tasks"][&task_name] = t.clone();
-        save(s, t.clone(), now, "batch_integration_checkpoint")?;
+        t = save(s, t.clone(), now, "batch_integration_checkpoint")?;
         checkpoint(s)
     };
+    persist(&batch)?;
     let result = git::integrate(&mut batch, &lane, &mut persist);
     // Persist the final integration state even after a conflict return.
     t["lane"]["active"] = batch.clone();
@@ -3657,19 +3670,28 @@ fn repair_corrections(
     evidence: String,
     own: Vec<String>,
 ) -> Result<J> {
-    if let Some(corrections) =
-        model::get_mut(&mut batch, "corrections").and_then(Value::as_array_mut)
-    {
-        corrections.push(json!({
+    append_correction(
+        &mut batch,
+        json!({
             "task": t.get("task").cloned().unwrap_or(Value::Null),
             "checkout": checkout.display().to_string(),
             "original_base": parent,
             "head": head,
             "own_commits": own,
             "evidence": evidence
-        }));
-    }
+        }),
+    );
     repair_common(s, now, t, lane, batch, operation, parent, head)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_correction(batch: &mut J, entry: J) {
+    if !matches!(batch.get("corrections"), Some(Value::Array(_))) {
+        batch["corrections"] = json!([]);
+    }
+    if let Some(corrections) = batch.get_mut("corrections").and_then(Value::as_array_mut) {
+        corrections.push(entry);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4216,7 +4238,10 @@ fn rebase_apply(mut batch: J, lane: &J, now: f64, base: &str) -> J {
 }
 
 fn push_version(batch: &mut J, version: J) {
-    if let Some(versions) = model::get_mut(batch, "versions").and_then(Value::as_array_mut) {
+    if !matches!(batch.get("versions"), Some(Value::Array(_))) {
+        batch["versions"] = json!([]);
+    }
+    if let Some(versions) = batch.get_mut("versions").and_then(Value::as_array_mut) {
         versions.push(version);
     }
 }
@@ -4443,4 +4468,18 @@ fn batch_action_rebase(
 #[allow(dead_code)]
 fn _path_buf(path: &str) -> PathBuf {
     PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn repair_and_rebase_history_arrays_are_initialized() {
+        let mut batch = json!({});
+        append_correction(&mut batch, json!({"head": "repair-head"}));
+        assert_eq!(batch["corrections"].as_array().unwrap().len(), 1);
+        push_version(&mut batch, json!({"base": "old-base"}));
+        assert_eq!(batch["versions"].as_array().unwrap().len(), 1);
+    }
 }

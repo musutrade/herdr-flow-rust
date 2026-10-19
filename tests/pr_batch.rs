@@ -327,6 +327,8 @@ fn batch_offer_freeze_integrate_and_snapshot() {
         Some("integration_prepared")
     );
     let batch_id = model::string(active, "id").unwrap();
+    assert!(model::array_field(active, "corrections").is_some());
+    assert!(model::array_field(active, "versions").is_some());
     let workspace = PathBuf::from(model::string(active, "workspace").unwrap());
     // Pre-populate the private object store so integration never needs network.
     std::fs::create_dir_all(&workspace).unwrap();
@@ -359,8 +361,9 @@ fn batch_offer_freeze_integrate_and_snapshot() {
             &repo.head,
         ],
     );
-    let version = model::int(&frozen, "state_version").unwrap();
-    let integrate_spec = json!({"task": "lane", "state_version": version, "batch": batch_id});
+    let frozen_version = model::int(&frozen, "state_version").unwrap();
+    let integrate_spec =
+        json!({"task": "lane", "state_version": frozen_version, "batch": batch_id});
     let integrated =
         batch::lane::integrate(&mut s, &integrate_spec, 13.0, &mut |_s| Ok(()), Some(&api))
             .unwrap();
@@ -371,6 +374,10 @@ fn batch_offer_freeze_integrate_and_snapshot() {
         "{integrated}"
     );
     let version = model::int(&integrated, "state_version").unwrap();
+    assert!(
+        version > frozen_version,
+        "integration must advance the task version"
+    );
     let snapshot_spec =
         json!({"task": "lane", "state_version": version, "batch": batch_id, "issue": 7});
     let snapshotted = batch::lane::snapshot(&mut s, &snapshot_spec, 14.0, Some(&api)).unwrap();

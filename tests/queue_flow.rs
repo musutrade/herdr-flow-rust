@@ -561,3 +561,25 @@ fn dispatch_application_requires_current_notification_readiness() {
     assert!(error.message.contains("readiness"));
     let _ = &mut s;
 }
+
+#[test]
+fn add_rejects_non_object_waits_instead_of_panicking() {
+    let h = Harness::new();
+    let mut state = util::read_json(&h.queue.join("queue.json")).unwrap();
+    state["waits"] = json!([]);
+    util::atomic_write_json(&h.queue.join("queue.json"), &state).unwrap();
+    let result = queue::add(
+        &h.queue,
+        &json!({
+            "id": "w1",
+            "task": "o/r#1",
+            "epoch": 1,
+            "owner": "dev",
+            "reason": "x",
+            "condition": "y",
+            "kind": "signal",
+            "timeout_seconds": 10
+        }),
+    );
+    assert!(result.is_err(), "{result:?}");
+}

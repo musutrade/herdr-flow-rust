@@ -424,7 +424,10 @@ pub fn add(root: &Path, spec: &J) -> Result<J> {
     w["result"] = Value::Null;
     w["seen"] = json!([]);
     w["closed"] = json!(false);
-    s["waits"][&id] = w.clone();
+    let waits = model::get_mut(&mut s, "waits")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| queue_error("queue waits must be a JSON object"))?;
+    waits.insert(id, w.clone());
     save(root, &mut s)?;
     Ok(w)
 }

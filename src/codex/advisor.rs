@@ -2406,37 +2406,41 @@ fn start_verified_job(
 }
 
 fn run_locked_job(run: &mut JobRun, factory: &AdvisorClientFactory<'_>) -> Result<Value> {
-    let Some(early) = acquire_run_locks(run)? else {
-        return execute_run(run, factory);
-    };
-    Ok(early)
-}
-
-fn acquire_run_locks(run: &mut JobRun) -> Result<Option<Value>> {
-    // Read once before probing locks (a missing or malformed journal fails
-    // here), then re-read after taking the per-job lock for the current view.
+    // Validate the journal before probing locks, then keep both locks alive
+    // for the entire inference/cleanup body.
     let _initial = read_json(&run.result_path)?;
-    acquire_worker_stage(run)
-}
-
-fn acquire_worker_stage(run: &mut JobRun) -> Result<Option<Value>> {
-    let Some(_job_lock) = FileLock::acquire(&run.parent.join("worker.lock"), false)? else {
-        return result_summary(&run.path).map(Some);
+    let Some(job_lock) = FileLock::acquire(&run.parent.join("worker.lock"), false)? else {
+        return result_summary(&run.path);
     };
-    load_locked_result(run)
+    run_with_job_lock(run, factory, job_lock)
 }
 
-fn load_locked_result(run: &mut JobRun) -> Result<Option<Value>> {
+fn run_with_job_lock(
+    run: &mut JobRun,
+    factory: &AdvisorClientFactory<'_>,
+    _job_lock: FileLock,
+) -> Result<Value> {
     run.result = read_json(&run.result_path)?;
-    finish_loaded_result(run)
-}
-
-fn finish_loaded_result(run: &mut JobRun) -> Result<Option<Value>> {
     if is_terminal_result(&run.result) {
-        return result_summary(&run.path).map(Some);
+        return result_summary(&run.path);
     }
     mark_interrupted(run);
-    acquire_global_stage(run)
+    let Some(global_lock) = FileLock::acquire(&run.global_dir.join("request.lock"), false)? else {
+        return skip_busy(run)?.ok_or_else(|| advisor("advisor busy result is unavailable"));
+    };
+    run_with_global_lock(run, factory, _job_lock, global_lock)
+}
+
+fn run_with_global_lock(
+    run: &mut JobRun,
+    factory: &AdvisorClientFactory<'_>,
+    _job_lock: FileLock,
+    _global_lock: FileLock,
+) -> Result<Value> {
+    if let Some(early) = check_faults(run)? {
+        return Ok(early);
+    }
+    execute_run(run, factory)
 }
 
 fn is_terminal_result(result: &Value) -> bool {
@@ -2444,21 +2448,11 @@ fn is_terminal_result(result: &Value) -> bool {
 }
 
 fn mark_interrupted(run: &mut JobRun) {
-    // An interrupted job (phase advanced past 'queued' but not terminal) keeps
-    // its lifecycle phase forever: skip paths below must not overwrite it, or
-    // a crash during thread/start would later look like "never created".
     run.interrupted = result_phase(&run.result) != Some("queued");
 }
 
 fn result_phase(result: &Value) -> Option<&str> {
     result.get("phase").and_then(Value::as_str)
-}
-
-fn acquire_global_stage(run: &mut JobRun) -> Result<Option<Value>> {
-    let Some(_global_lock) = FileLock::acquire(&run.global_dir.join("request.lock"), false)? else {
-        return skip_busy(run);
-    };
-    check_faults(run)
 }
 
 fn skip_busy(run: &mut JobRun) -> Result<Option<Value>> {

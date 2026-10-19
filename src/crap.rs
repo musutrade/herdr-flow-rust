@@ -112,95 +112,231 @@ fn print_usage() {
 
 /// Parse CLI options. `Ok(None)` means help was requested.
 fn parse_options(args: &[String]) -> Result<Option<Options>, String> {
-    let mut root = std::env::current_dir()
+    let root = std::env::current_dir()
         .map_err(|error| format!("cannot determine current directory: {error}"))?;
-    let mut threshold = DEFAULT_THRESHOLD;
-    let mut all = false;
-    let mut base = DEFAULT_BASE.to_string();
-    let mut skip_tests = false;
-    let mut always_test = false;
-    let mut coverage: Option<PathBuf> = None;
-    let mut baseline: Option<PathBuf> = None;
-    let mut update_baseline = false;
-    let mut no_baseline = false;
-    let mut json = false;
+    let mut state = ParseState::new(root);
+    if parse_arguments(args, &mut state)? {
+        return Ok(None);
+    }
+    Ok(Some(state.finish()?))
+}
 
-    let mut index = 0;
+/// Boolean flags accepted by the gate. The declaration order defines the
+/// indexes into `ParseState::flags`; `Help` must stay last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flag {
+    All,
+    SkipTests,
+    AlwaysTest,
+    UpdateBaseline,
+    NoBaseline,
+    Json,
+    Help,
+}
+
+const HELP_FLAG: usize = Flag::Help as usize;
+const FLAG_COUNT: usize = 7;
+
+const FLAG_NAMES: [(&str, Flag); 6] = [
+    ("--all", Flag::All),
+    ("--skip-tests", Flag::SkipTests),
+    ("--always-test", Flag::AlwaysTest),
+    ("--update-baseline", Flag::UpdateBaseline),
+    ("--no-baseline", Flag::NoBaseline),
+    ("--json", Flag::Json),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Continue,
+    Help,
+}
+
+struct ParseState {
+    root: PathBuf,
+    threshold: f64,
+    base: String,
+    coverage: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    flags: [bool; FLAG_COUNT],
+}
+
+impl ParseState {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            threshold: DEFAULT_THRESHOLD,
+            base: DEFAULT_BASE.to_string(),
+            coverage: None,
+            baseline: None,
+            flags: [false; FLAG_COUNT],
+        }
+    }
+
+    fn record_flag(&mut self, index: usize) -> Control {
+        self.flags[index] = true;
+        if index == HELP_FLAG {
+            Control::Help
+        } else {
+            Control::Continue
+        }
+    }
+
+    fn finish(self) -> Result<Options, String> {
+        if !self.threshold.is_finite() {
+            return Err("--threshold must be a finite number".to_string());
+        }
+        if self.flags[Flag::UpdateBaseline as usize] && self.flags[Flag::NoBaseline as usize] {
+            return Err("--update-baseline and --no-baseline are mutually exclusive".to_string());
+        }
+        Ok(Options {
+            root: self.root,
+            threshold: self.threshold,
+            all: self.flags[Flag::All as usize],
+            base: self.base,
+            skip_tests: self.flags[Flag::SkipTests as usize],
+            always_test: self.flags[Flag::AlwaysTest as usize],
+            coverage: self.coverage,
+            baseline: self.baseline,
+            update_baseline: self.flags[Flag::UpdateBaseline as usize],
+            no_baseline: self.flags[Flag::NoBaseline as usize],
+            json: self.flags[Flag::Json as usize],
+        })
+    }
+}
+
+fn parse_arguments(args: &[String], state: &mut ParseState) -> Result<bool, String> {
+    let mut index = 0usize;
     while index < args.len() {
-        let argument = &args[index];
-        let (name, inline_value) = match argument.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_string())),
-            None => (argument.as_str(), None),
-        };
-        match name {
-            "-h" | "--help" if inline_value.is_none() => {
-                print_usage();
-                return Ok(None);
-            }
-            "--root" => {
-                let value = option_value(args, &mut index, inline_value, "--root")?;
-                root = PathBuf::from(value);
-            }
-            "--threshold" => {
-                let value = option_value(args, &mut index, inline_value, "--threshold")?;
-                threshold = value.parse::<f64>().map_err(|_| {
-                    format!("invalid --threshold value {value:?}; expected a number")
-                })?;
-            }
-            "--all" if inline_value.is_none() => all = true,
-            "--base" => {
-                base = option_value(args, &mut index, inline_value, "--base")?;
-            }
-            "--skip-tests" if inline_value.is_none() => skip_tests = true,
-            "--always-test" if inline_value.is_none() => always_test = true,
-            "--coverage" => {
-                let value = option_value(args, &mut index, inline_value, "--coverage")?;
-                coverage = Some(PathBuf::from(value));
-            }
-            "--baseline" => {
-                let value = option_value(args, &mut index, inline_value, "--baseline")?;
-                baseline = Some(PathBuf::from(value));
-            }
-            "--update-baseline" if inline_value.is_none() => update_baseline = true,
-            "--no-baseline" if inline_value.is_none() => no_baseline = true,
-            "--json" if inline_value.is_none() => json = true,
-            other => {
-                return Err(format!("unrecognized argument: {other}\n\n{}", usage()));
-            }
+        let control = apply_argument(args, &mut index, state)?;
+        if control == Control::Help {
+            print_usage();
+            return Ok(true);
         }
         index += 1;
     }
+    Ok(false)
+}
 
-    if !threshold.is_finite() {
-        return Err("--threshold must be a finite number".to_string());
+fn apply_argument(
+    args: &[String],
+    index: &mut usize,
+    state: &mut ParseState,
+) -> Result<Control, String> {
+    let argument = &args[*index];
+    let (name, inline_value) = split_option(argument);
+    if let Some(result) = apply_known_argument(args, index, name, inline_value, state) {
+        return result;
     }
+    Err(format!("unrecognized argument: {name}\n\n{}", usage()))
+}
 
-    if update_baseline && no_baseline {
-        return Err("--update-baseline and --no-baseline are mutually exclusive".to_string());
+/// Split `--name=value` into its name and inline value.
+fn split_option(argument: &str) -> (&str, Option<&str>) {
+    match argument.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (argument, None),
     }
-    Ok(Some(Options {
-        root,
-        threshold,
-        all,
-        base,
-        skip_tests,
-        always_test,
-        coverage,
-        baseline,
-        update_baseline,
-        no_baseline,
-        json,
-    }))
+}
+
+fn apply_known_argument(
+    args: &[String],
+    index: &mut usize,
+    name: &str,
+    inline_value: Option<&str>,
+    state: &mut ParseState,
+) -> Option<Result<Control, String>> {
+    apply_flag(name, inline_value, state)
+        .or_else(|| apply_value_option(args, index, name, inline_value, state))
+}
+
+fn apply_flag(
+    name: &str,
+    inline_value: Option<&str>,
+    state: &mut ParseState,
+) -> Option<Result<Control, String>> {
+    if inline_value.is_some() {
+        return None;
+    }
+    flag_index(name).map(|index| Ok(state.record_flag(index)))
+}
+
+fn flag_index(name: &str) -> Option<usize> {
+    if matches!(name, "-h" | "--help") {
+        return Some(HELP_FLAG);
+    }
+    FLAG_NAMES
+        .iter()
+        .position(|(candidate, _)| *candidate == name)
+}
+
+type ValueSetter = fn(&mut ParseState, String) -> Result<(), String>;
+
+const VALUE_OPTIONS: [(&str, ValueSetter); 5] = [
+    ("--root", set_root),
+    ("--threshold", set_threshold),
+    ("--base", set_base),
+    ("--coverage", set_coverage),
+    ("--baseline", set_baseline),
+];
+
+fn apply_value_option(
+    args: &[String],
+    index: &mut usize,
+    name: &str,
+    inline_value: Option<&str>,
+    state: &mut ParseState,
+) -> Option<Result<Control, String>> {
+    let setter = value_setter(name)?;
+    Some(
+        option_value(args, index, inline_value, name)
+            .and_then(|value| setter(state, value))
+            .map(|()| Control::Continue),
+    )
+}
+
+fn value_setter(name: &str) -> Option<ValueSetter> {
+    VALUE_OPTIONS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, setter)| *setter)
+}
+
+fn set_root(state: &mut ParseState, value: String) -> Result<(), String> {
+    state.root = PathBuf::from(value);
+    Ok(())
+}
+
+fn set_threshold(state: &mut ParseState, value: String) -> Result<(), String> {
+    state.threshold = value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid --threshold value {value:?}; expected a number"))?;
+    Ok(())
+}
+
+fn set_base(state: &mut ParseState, value: String) -> Result<(), String> {
+    state.base = value;
+    Ok(())
+}
+
+fn set_coverage(state: &mut ParseState, value: String) -> Result<(), String> {
+    state.coverage = Some(PathBuf::from(value));
+    Ok(())
+}
+
+fn set_baseline(state: &mut ParseState, value: String) -> Result<(), String> {
+    state.baseline = Some(PathBuf::from(value));
+    Ok(())
 }
 
 fn option_value(
     args: &[String],
     index: &mut usize,
-    inline_value: Option<String>,
+    inline_value: Option<&str>,
     name: &str,
 ) -> Result<String, String> {
     if let Some(value) = inline_value {
-        return Ok(value);
+        return Ok(value.to_string());
     }
     *index += 1;
     args.get(*index)
@@ -212,145 +348,259 @@ fn option_value(
 // Main flow
 // ---------------------------------------------------------------------------
 
+struct Context {
+    options: Options,
+    analyzed: Vec<Function>,
+    baseline: Option<Baseline>,
+}
+
 fn run(args: &[String]) -> Result<i32, String> {
-    let Some(mut options) = parse_options(args)? else {
+    let Some(context) = prepare_context(args)? else {
         return Ok(0);
     };
+    execute(context)
+}
 
+fn prepare_context(args: &[String]) -> Result<Option<Context>, String> {
+    let Some(mut options) = parse_options(args)? else {
+        return Ok(None);
+    };
+    prepare_root(&mut options)?;
+    let mut analyzed = analyze_workspace(&options.root)?;
+    assign_keys(&mut analyzed);
+    let baseline = load_baseline(&options)?;
+    Ok(Some(Context {
+        options,
+        analyzed,
+        baseline,
+    }))
+}
+
+fn prepare_root(options: &mut Options) -> Result<(), String> {
     options.root = fs::canonicalize(&options.root)
         .map_err(|error| format!("cannot resolve --root {}: {error}", options.root.display()))?;
-    if !options.root.is_dir() {
-        return Err(format!(
-            "--root {} is not a directory",
-            options.root.display()
-        ));
+    if options.root.is_dir() {
+        return Ok(());
     }
+    Err(format!(
+        "--root {} is not a directory",
+        options.root.display()
+    ))
+}
 
-    let files = source_files(&options.root)?;
+fn analyze_workspace(root: &Path) -> Result<Vec<Function>, String> {
     let mut analyzed = Vec::new();
-    for file in &files {
-        analyzed.extend(analyze_file(file, &options.root)?);
+    for file in source_files(root)? {
+        analyzed.extend(analyze_file(&file, root)?);
     }
-    assign_keys(&mut analyzed);
+    Ok(analyzed)
+}
 
-    let implicit_baseline = options.root.join(DEFAULT_BASELINE);
-    let baseline_path = if options.no_baseline {
-        None
-    } else if let Some(path) = &options.baseline {
-        Some(path.clone())
-    } else if implicit_baseline.exists() {
-        Some(implicit_baseline)
-    } else {
-        None
-    };
-    let baseline = if options.update_baseline && options.all {
-        // Full regeneration must not be blocked by an unreadable old baseline.
-        None
-    } else {
-        baseline_path
-            .as_ref()
-            .map(|path| Baseline::load(path))
-            .transpose()?
-    };
-
-    let (base, mode, selected) = if options.all {
-        (None, "all".to_string(), analyzed)
-    } else {
-        let Some(base) = resolve_base(&options.root, &options.base)? else {
-            return Err("cannot resolve a base revision; use --all or --base".to_string());
-        };
-        let changes = changed_ranges(&options.root, &base)?;
-        let selected: Vec<Function> = analyzed
-            .into_iter()
-            .filter(|function| {
-                changes
-                    .get(&function.file)
-                    .map(|ranges| intersects(function.start, function.end, ranges))
-                    .unwrap_or(false)
-            })
-            .collect();
-        let mode = format!("changed vs {base}");
-        (Some(base), mode, selected)
-    };
-
-    if selected.is_empty() && !options.all {
-        let base = base.as_deref().unwrap_or(DEFAULT_BASE);
-        if options.update_baseline {
-            println!("CRAP gate: no changed production functions vs {base}; baseline unchanged");
-            return Ok(0);
-        }
-        return no_changed_production_functions(&options, base);
+fn load_baseline(options: &Options) -> Result<Option<Baseline>, String> {
+    if full_regeneration(options) {
+        return Ok(None);
     }
-    if selected.is_empty() {
+    explicit_or_implicit_baseline(options)
+        .map(|path| Baseline::load(&path))
+        .transpose()
+}
+
+fn full_regeneration(options: &Options) -> bool {
+    options.update_baseline && options.all
+}
+
+fn explicit_or_implicit_baseline(options: &Options) -> Option<PathBuf> {
+    if options.no_baseline {
+        return None;
+    }
+    if let Some(path) = &options.baseline {
+        return Some(path.clone());
+    }
+    let implicit = options.root.join(DEFAULT_BASELINE);
+    implicit.exists().then_some(implicit)
+}
+
+fn execute(context: Context) -> Result<i32, String> {
+    let Context {
+        options,
+        analyzed,
+        baseline,
+    } = context;
+    let (base, mode, selected) = select_functions(&options, analyzed)?;
+    finish_execution(
+        &options,
+        base.as_deref(),
+        &mode,
+        &selected,
+        baseline.as_ref(),
+    )
+}
+
+fn finish_execution(
+    options: &Options,
+    base: Option<&str>,
+    mode: &str,
+    selected: &[Function],
+    baseline: Option<&Baseline>,
+) -> Result<i32, String> {
+    if let Some(early) = empty_selection_result(options, base, selected)? {
+        return Ok(early);
+    }
+    let coverage = acquire_coverage(options)?;
+    let measurement = measure(options, selected, &coverage);
+    if options.update_baseline {
+        return update_baseline_output(options, &measurement, coverage.source);
+    }
+    Ok(report(options, mode, &measurement, &coverage, baseline))
+}
+
+fn select_functions(
+    options: &Options,
+    analyzed: Vec<Function>,
+) -> Result<(Option<String>, String, Vec<Function>), String> {
+    if options.all {
+        return Ok((None, "all".to_string(), analyzed));
+    }
+    select_changed_functions(options, analyzed)
+}
+
+fn select_changed_functions(
+    options: &Options,
+    analyzed: Vec<Function>,
+) -> Result<(Option<String>, String, Vec<Function>), String> {
+    require_base(options).and_then(|base| filter_by_changes(options, analyzed, base))
+}
+
+fn require_base(options: &Options) -> Result<String, String> {
+    resolve_base(&options.root, &options.base)?
+        .ok_or_else(|| "cannot resolve a base revision; use --all or --base".to_string())
+}
+
+fn filter_by_changes(
+    options: &Options,
+    analyzed: Vec<Function>,
+    base: String,
+) -> Result<(Option<String>, String, Vec<Function>), String> {
+    let changes = changed_ranges(&options.root, &base)?;
+    let selected = analyzed
+        .into_iter()
+        .filter(|function| function_changed(function, &changes))
+        .collect();
+    Ok((Some(base.clone()), format!("changed vs {base}"), selected))
+}
+
+fn function_changed(function: &Function, changes: &BTreeMap<PathBuf, Vec<LineRange>>) -> bool {
+    changes
+        .get(&function.file)
+        .map(|ranges| intersects(function.start, function.end, ranges))
+        .unwrap_or(false)
+}
+
+fn update_baseline_output(
+    options: &Options,
+    measurement: &Measurement,
+    source: CoverageSource,
+) -> Result<i32, String> {
+    let target = options
+        .baseline
+        .clone()
+        .unwrap_or_else(|| options.root.join(DEFAULT_BASELINE));
+    let existing = existing_baseline_entries(options, &target)?;
+    let count = write_baseline(&target, existing, measurement, options.threshold, source)?;
+    println!(
+        "CRAP gate: baseline updated {} ({} entries) from {} function(s); coverage={}",
+        target.display(),
+        count,
+        measurement.rows.len(),
+        source.label()
+    );
+    Ok(0)
+}
+
+fn existing_baseline_entries(
+    options: &Options,
+    target: &Path,
+) -> Result<BTreeMap<String, Value>, String> {
+    if options.all {
+        return Ok(BTreeMap::new());
+    }
+    load_existing_entries(target)
+}
+
+fn load_existing_entries(target: &Path) -> Result<BTreeMap<String, Value>, String> {
+    if target.exists() {
+        return Baseline::load(target).map(|baseline| baseline.functions);
+    }
+    Ok(BTreeMap::new())
+}
+
+fn empty_selection_result(
+    options: &Options,
+    base: Option<&str>,
+    selected: &[Function],
+) -> Result<Option<i32>, String> {
+    if !selected.is_empty() {
+        return Ok(None);
+    }
+    handle_empty_selection(options, base)
+}
+
+fn handle_empty_selection(options: &Options, base: Option<&str>) -> Result<Option<i32>, String> {
+    if options.all {
         return Err("no functions found under src".to_string());
     }
+    empty_changed_selection(options, base)
+}
 
-    let coverage = acquire_coverage(&options)?;
-    let measurement = measure(&options, &selected, &coverage);
-
+fn empty_changed_selection(options: &Options, base: Option<&str>) -> Result<Option<i32>, String> {
+    let base = base.unwrap_or(DEFAULT_BASE);
     if options.update_baseline {
-        let target = options
-            .baseline
-            .clone()
-            .unwrap_or_else(|| options.root.join(DEFAULT_BASELINE));
-        let existing = if options.all {
-            BTreeMap::new()
-        } else if target.exists() {
-            Baseline::load(&target)?.functions
-        } else {
-            BTreeMap::new()
-        };
-        let count = write_baseline(
-            &target,
-            existing,
-            &measurement,
-            options.threshold,
-            coverage.source,
-        )?;
-        println!(
-            "CRAP gate: baseline updated {} ({} entries) from {} function(s); coverage={}",
-            target.display(),
-            count,
-            measurement.rows.len(),
-            coverage.source.label()
-        );
-        return Ok(0);
+        println!("CRAP gate: no changed production functions vs {base}; baseline unchanged");
+        return Ok(Some(0));
     }
-
-    let result = report(&options, &mode, &measurement, &coverage, baseline.as_ref());
-    Ok(result)
+    no_changed_production_functions(options, base).map(Some)
 }
 
 /// Behavior when no production function intersects the diff.
 fn no_changed_production_functions(options: &Options, base: &str) -> Result<i32, String> {
-    if !options.always_test {
-        println!("CRAP gate: no changed production functions vs {base}");
-        return Ok(0);
+    if options.always_test {
+        return run_always_test(options, base);
     }
+    println!("CRAP gate: no changed production functions vs {base}");
+    Ok(0)
+}
+
+fn run_always_test(options: &Options, base: &str) -> Result<i32, String> {
     if options.skip_tests {
         println!("CRAP gate: no changed production functions vs {base}; tests skipped");
         return Ok(0);
     }
+    run_tests_for_no_changes(options, base)
+}
 
+fn run_tests_for_no_changes(options: &Options, base: &str) -> Result<i32, String> {
     let output = run_command(&options.root, "cargo", &["test"])?;
-    if output.status != 0 {
-        eprintln!(
-            "CRAP gate: test suite failed (exit {}); fix tests before evaluating CRAP",
-            output.status
-        );
-        print_error_detail(&output);
-        return Ok(2);
+    Ok(tests_outcome(base, &output))
+}
+
+fn tests_outcome(base: &str, output: &CommandOutput) -> i32 {
+    if output.status == 0 {
+        println!("{}", tests_passed_message(base, &output.stdout));
+        return 0;
     }
-    let summary = test_summary(&output.stdout);
-    match summary {
-        Some(summary) => {
-            println!(
-                "CRAP gate: no changed production functions vs {base}; tests passed ({summary})"
-            );
-        }
-        None => println!("CRAP gate: no changed production functions vs {base}; tests passed"),
-    }
-    Ok(0)
+    eprintln!(
+        "CRAP gate: test suite failed (exit {}); fix tests before evaluating CRAP",
+        output.status
+    );
+    print_error_detail(output);
+    2
+}
+
+fn tests_passed_message(base: &str, stdout: &[u8]) -> String {
+    let Some(summary) = test_summary(stdout) else {
+        return format!("CRAP gate: no changed production functions vs {base}; tests passed");
+    };
+    format!("CRAP gate: no changed production functions vs {base}; tests passed ({summary})")
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +662,6 @@ fn walk_rust_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), Str
                 .extension()
                 .map(|extension| extension == "rs")
                 .unwrap_or(false)
-            && path.file_name().and_then(|name| name.to_str()) != Some("crap.rs")
         {
             files.push(path);
         }
@@ -433,57 +682,78 @@ fn analyze_source(path: &Path, display: &str, source: &str) -> Result<Vec<Functi
 
     let mut collector = FunctionCollector::default();
     collector.visit_file(&parsed);
+    let mut spans = SpanMatcher::new(scan_source_functions(source));
+    Ok(collector
+        .functions
+        .into_iter()
+        .map(|ast_function| analyze_function(path, display, ast_function, &mut spans))
+        .collect())
+}
 
-    let spans = scan_source_functions(source);
-    let mut functions = Vec::new();
-    let mut cursor = 0usize;
+/// Maps AST functions, in declaration order, onto the spans recovered from the
+/// source text. A missing span is skipped by searching forward.
+struct SpanMatcher {
+    spans: Vec<SourceFunction>,
+    cursor: usize,
+}
 
-    for ast_function in collector.functions {
-        let matched = match spans.get(cursor) {
-            Some(span) if span.name == ast_function.name => {
-                cursor += 1;
-                Some(span)
-            }
-            _ => {
-                let found = spans
-                    .iter()
-                    .enumerate()
-                    .skip(cursor)
-                    .find(|(_, span)| span.name == ast_function.name)
-                    .map(|(index, _)| index);
-                match found {
-                    Some(index) => {
-                        cursor = index + 1;
-                        spans.get(index)
-                    }
-                    None => None,
-                }
-            }
-        };
-
-        let (start, end) = match matched {
-            Some(span) => (span.start, span.end),
-            None => {
-                eprintln!(
-                    "CRAP gate: warning: cannot locate source span for function {} in {}; using line 1",
-                    ast_function.name, display
-                );
-                (1, 1)
-            }
-        };
-
-        functions.push(Function {
-            file: path.to_path_buf(),
-            display: display.to_string(),
-            name: ast_function.name,
-            start,
-            end,
-            cc: ast_function.cc,
-            key: String::new(),
-        });
+impl SpanMatcher {
+    fn new(spans: Vec<SourceFunction>) -> Self {
+        Self { spans, cursor: 0 }
     }
 
-    Ok(functions)
+    fn next(&mut self, name: &str) -> Option<SourceFunction> {
+        let current = self
+            .spans
+            .get(self.cursor)
+            .map(|span| span.name == name)
+            .unwrap_or(false);
+        if current {
+            let span = self.spans[self.cursor].clone();
+            self.cursor += 1;
+            return Some(span);
+        }
+        self.find_later(name)
+    }
+
+    fn find_later(&mut self, name: &str) -> Option<SourceFunction> {
+        let found = self
+            .spans
+            .iter()
+            .enumerate()
+            .skip(self.cursor)
+            .find(|(_, span)| span.name == name)
+            .map(|(index, _)| index)?;
+        self.cursor = found + 1;
+        Some(self.spans[found].clone())
+    }
+}
+
+fn analyze_function(
+    path: &Path,
+    display: &str,
+    ast_function: AstFunction,
+    spans: &mut SpanMatcher,
+) -> Function {
+    let (start, end) = spans
+        .next(&ast_function.name)
+        .map(|span| (span.start, span.end))
+        .unwrap_or_else(|| {
+            eprintln!(
+                "CRAP gate: warning: cannot locate source span for function {} in {}; using line 1",
+                ast_function.name, display
+            );
+            (1, 1)
+        });
+    Function {
+        file: path.to_path_buf(),
+        display: display.to_string(),
+        name: ast_function.name,
+        start,
+        end,
+        cc: ast_function.cc,
+        key: String::new(),
+    }
 }
 
 /// Assign stable `file::name#ordinal` keys. Ordinals are based on declaration
@@ -642,124 +912,220 @@ struct Token {
 }
 
 fn tokenize(source: &str) -> Vec<Token> {
-    let chars: Vec<char> = source.chars().collect();
-    let mut tokens = Vec::new();
-    let mut index = 0usize;
-    let mut line = 1usize;
+    Lexer::new(source).run()
+}
 
-    while index < chars.len() {
-        let character = chars[index];
+/// Minimal lexer that recovers line spans. It intentionally keeps only the
+/// punctuation the span scanner needs and skips everything inside comments and
+/// literals.
+struct Lexer {
+    chars: Vec<char>,
+    index: usize,
+    line: usize,
+    tokens: Vec<Token>,
+}
 
-        if character == '\n' {
-            line += 1;
-            index += 1;
-            continue;
-        }
-        if character.is_whitespace() {
-            index += 1;
-            continue;
-        }
-
-        // Comments.
-        if character == '/' && chars.get(index + 1) == Some(&'/') {
-            index += 2;
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if character == '/' && chars.get(index + 1) == Some(&'*') {
-            let end = block_comment_end(&chars, index);
-            line += chars[index..end].iter().filter(|c| **c == '\n').count();
-            index = end;
-            continue;
-        }
-
-        // String-like literals (including raw and byte/C variants).
-        if let Some(end) = string_literal_end(&chars, index) {
-            line += chars[index..end].iter().filter(|c| **c == '\n').count();
-            index = end;
-            continue;
-        }
-
-        // Character literal or lifetime.
-        if character == '\'' {
-            if let Some(end) = char_literal_end(&chars, index) {
-                line += chars[index..end].iter().filter(|c| **c == '\n').count();
-                index = end;
-            } else {
-                // Lifetime: drop the quote; the following identifier is
-                // tokenized normally.
-                index += 1;
-            }
-            continue;
-        }
-
-        if is_ident_start(character) {
-            let end = ident_end(&chars, index);
-            let text: String = chars[index..end].iter().collect();
-            tokens.push(Token {
-                text,
-                line,
-                kind: TokenKind::Ident,
-            });
-            index = end;
-            continue;
-        }
-
-        if character.is_ascii_digit() {
-            index += 1;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
-            {
-                index += 1;
-            }
-            continue;
-        }
-
-        // Only the punctuation needed by the span scanner is retained.
-        match character {
-            '{' | '}' | '(' | ')' | '[' | ']' | '<' | '>' | ';' | '!' | '#' => {
-                tokens.push(Token {
-                    text: character.to_string(),
-                    line,
-                    kind: TokenKind::Punct,
-                });
-                index += 1;
-            }
-            '-' if chars.get(index + 1) == Some(&'>') => {
-                index += 2;
-            }
-            '=' if chars.get(index + 1) == Some(&'>') => {
-                index += 2;
-            }
-            _ => {
-                index += 1;
-            }
+impl Lexer {
+    fn new(source: &str) -> Self {
+        Self {
+            chars: source.chars().collect(),
+            index: 0,
+            line: 1,
+            tokens: Vec::new(),
         }
     }
 
-    tokens
+    fn run(mut self) -> Vec<Token> {
+        while self.index < self.chars.len() {
+            self.step();
+        }
+        self.tokens
+    }
+
+    fn step(&mut self) {
+        let character = self.chars[self.index];
+        let _ = self
+            .step_non_code(character)
+            .or_else(|| self.step_char_or_lifetime(character))
+            .or_else(|| self.step_identifier(character))
+            .or_else(|| self.step_number(character))
+            .or_else(|| self.step_punctuation(character));
+    }
+
+    fn peek(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.index + offset).copied()
+    }
+
+    fn step_non_code(&mut self, character: char) -> Option<()> {
+        if character == '\n' {
+            self.line += 1;
+            self.index += 1;
+            return Some(());
+        }
+        if character.is_whitespace() {
+            self.index += 1;
+            return Some(());
+        }
+        self.skip_comment(character)
+            .or_else(|| self.skip_string_literal())
+    }
+
+    fn skip_comment(&mut self, character: char) -> Option<()> {
+        if character != '/' {
+            return None;
+        }
+        if self.peek(1) == Some('/') {
+            self.skip_line_comment();
+            return Some(());
+        }
+        if self.peek(1) == Some('*') {
+            self.skip_block_comment();
+            return Some(());
+        }
+        None
+    }
+
+    fn skip_line_comment(&mut self) {
+        self.index += 2;
+        let rest = &self.chars[self.index..];
+        let skip = rest.iter().position(|character| *character == '\n');
+        self.index += skip.unwrap_or(rest.len());
+    }
+
+    fn skip_block_comment(&mut self) {
+        let end = block_comment_end(&self.chars, self.index);
+        self.line += newline_count(&self.chars[self.index..end]);
+        self.index = end;
+    }
+
+    fn skip_string_literal(&mut self) -> Option<()> {
+        let end = string_literal_end(&self.chars, self.index)?;
+        self.line += newline_count(&self.chars[self.index..end]);
+        self.index = end;
+        Some(())
+    }
+
+    fn step_char_or_lifetime(&mut self, character: char) -> Option<()> {
+        if character != '\'' {
+            return None;
+        }
+        self.consume_char_literal();
+        Some(())
+    }
+
+    fn consume_char_literal(&mut self) {
+        let Some(end) = char_literal_end(&self.chars, self.index) else {
+            self.index += 1;
+            return;
+        };
+        self.line += newline_count(&self.chars[self.index..end]);
+        self.index = end;
+    }
+
+    fn step_identifier(&mut self, character: char) -> Option<()> {
+        if !is_ident_start(character) {
+            return None;
+        }
+        let end = ident_end(&self.chars, self.index);
+        let text: String = self.chars[self.index..end].iter().collect();
+        self.tokens.push(Token {
+            text,
+            line: self.line,
+            kind: TokenKind::Ident,
+        });
+        self.index = end;
+        Some(())
+    }
+
+    fn step_number(&mut self, character: char) -> Option<()> {
+        if !character.is_ascii_digit() {
+            return None;
+        }
+        self.index = number_end(&self.chars, self.index);
+        Some(())
+    }
+
+    fn step_punctuation(&mut self, character: char) -> Option<()> {
+        if is_span_punctuation(character) {
+            self.tokens.push(Token {
+                text: character.to_string(),
+                line: self.line,
+                kind: TokenKind::Punct,
+            });
+            self.index += 1;
+            return Some(());
+        }
+        self.index += punctuation_width(&self.chars, self.index);
+        Some(())
+    }
+}
+
+fn newline_count(chars: &[char]) -> usize {
+    chars.iter().filter(|character| **character == '\n').count()
+}
+
+fn number_end(chars: &[char], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < chars.len() && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+        index += 1;
+    }
+    index
+}
+
+fn is_span_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '{' | '}' | '(' | ')' | '[' | ']' | '<' | '>' | ';' | '!' | '#'
+    )
+}
+
+fn punctuation_width(chars: &[char], index: usize) -> usize {
+    let next = chars.get(index + 1).copied();
+    let arrow = matches!((chars[index], next), ('-' | '=', Some('>')));
+    if arrow {
+        2
+    } else {
+        1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommentMarker {
+    Open,
+    Close,
+    None,
 }
 
 fn block_comment_end(chars: &[char], start: usize) -> usize {
     let mut depth = 0usize;
     let mut index = start;
     while index < chars.len() {
-        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
-            depth += 1;
-            index += 2;
-        } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-            depth = depth.saturating_sub(1);
-            index += 2;
-            if depth == 0 {
-                return index;
+        match comment_marker(chars, index) {
+            CommentMarker::Open => {
+                depth += 1;
+                index += 2;
             }
-        } else {
-            index += 1;
+            CommentMarker::Close => {
+                depth = depth.saturating_sub(1);
+                index += 2;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            CommentMarker::None => index += 1,
         }
     }
     chars.len()
+}
+
+fn comment_marker(chars: &[char], index: usize) -> CommentMarker {
+    if chars[index..].starts_with(&['/', '*']) {
+        return CommentMarker::Open;
+    }
+    if chars[index..].starts_with(&['*', '/']) {
+        return CommentMarker::Close;
+    }
+    CommentMarker::None
 }
 
 fn string_literal_end(chars: &[char], start: usize) -> Option<usize> {
@@ -767,67 +1133,79 @@ fn string_literal_end(chars: &[char], start: usize) -> Option<usize> {
     if character == '"' {
         return Some(escaped_string_end(chars, start + 1));
     }
+    prefixed_string_end(chars, start, character)
+}
+
+fn prefixed_string_end(chars: &[char], start: usize, character: char) -> Option<usize> {
     if character == 'r' {
-        let mut index = start + 1;
-        let mut hashes = 0usize;
-        while chars.get(index) == Some(&'#') {
-            hashes += 1;
-            index += 1;
-        }
-        if chars.get(index) == Some(&'"') {
-            return Some(raw_string_end(chars, index + 1, hashes));
-        }
-        return None;
+        return raw_prefixed_string_end(chars, start + 1);
     }
     if character == 'b' || character == 'c' {
-        if chars.get(start + 1) == Some(&'"') {
-            return Some(escaped_string_end(chars, start + 2));
-        }
-        if chars.get(start + 1) == Some(&'r') {
-            let mut index = start + 2;
-            let mut hashes = 0usize;
-            while chars.get(index) == Some(&'#') {
-                hashes += 1;
-                index += 1;
-            }
-            if chars.get(index) == Some(&'"') {
-                return Some(raw_string_end(chars, index + 1, hashes));
-            }
-        }
-        if character == 'b' && chars.get(start + 1) == Some(&'\'') {
-            return char_literal_end(chars, start + 1);
-        }
+        return c_prefixed_literal_end(chars, start);
+    }
+    None
+}
+
+fn raw_prefixed_string_end(chars: &[char], mut index: usize) -> Option<usize> {
+    let mut hashes = 0usize;
+    while chars.get(index) == Some(&'#') {
+        hashes += 1;
+        index += 1;
+    }
+    if chars.get(index) == Some(&'"') {
+        return Some(raw_string_end(chars, index + 1, hashes));
+    }
+    None
+}
+
+fn c_prefixed_literal_end(chars: &[char], start: usize) -> Option<usize> {
+    if chars.get(start + 1) == Some(&'"') {
+        return Some(escaped_string_end(chars, start + 2));
+    }
+    if chars.get(start + 1) == Some(&'r') {
+        return raw_prefixed_string_end(chars, start + 2);
+    }
+    if chars.get(start) == Some(&'b') && chars.get(start + 1) == Some(&'\'') {
+        return char_literal_end(chars, start + 1);
     }
     None
 }
 
 fn escaped_string_end(chars: &[char], mut index: usize) -> usize {
     while index < chars.len() {
-        match chars[index] {
-            '\\' => index += 2,
-            '"' => return index + 1,
-            _ => index += 1,
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
         }
+        if chars[index] == '"' {
+            return index + 1;
+        }
+        index += 1;
     }
     chars.len()
 }
 
-fn raw_string_end(chars: &[char], mut index: usize, hashes: usize) -> usize {
+fn raw_string_end(chars: &[char], start: usize, hashes: usize) -> usize {
+    let mut index = start;
     while index < chars.len() {
         if chars[index] == '"' {
-            let mut check = index + 1;
-            let mut found = 0usize;
-            while found < hashes && chars.get(check) == Some(&'#') {
-                found += 1;
-                check += 1;
-            }
-            if found == hashes {
-                return check;
+            if let Some(end) = raw_string_close(chars, index + 1, hashes) {
+                return end;
             }
         }
         index += 1;
     }
     chars.len()
+}
+
+fn raw_string_close(chars: &[char], mut index: usize, hashes: usize) -> Option<usize> {
+    for _ in 0..hashes {
+        if chars.get(index) != Some(&'#') {
+            return None;
+        }
+        index += 1;
+    }
+    Some(index)
 }
 
 fn char_literal_end(chars: &[char], quote: usize) -> Option<usize> {
@@ -835,37 +1213,50 @@ fn char_literal_end(chars: &[char], quote: usize) -> Option<usize> {
     if index >= chars.len() {
         return None;
     }
-    if chars[index] == '\\' {
-        index += 1;
-        match chars.get(index).copied()? {
-            'x' => {
-                index += 1;
-                while index < chars.len() && chars[index].is_ascii_hexdigit() {
-                    index += 1;
-                }
-            }
-            'u' => {
-                index += 1;
-                if chars.get(index) == Some(&'{') {
-                    index += 1;
-                    while index < chars.len() && chars[index] != '}' {
-                        index += 1;
-                    }
-                    if index < chars.len() {
-                        index += 1;
-                    }
-                }
-            }
-            _ => index += 1,
-        }
-    } else {
-        index += 1;
-    }
+    index = skip_char_escape(chars, index);
     if chars.get(index) == Some(&'\'') {
         Some(index + 1)
     } else {
         None
     }
+}
+
+fn skip_char_escape(chars: &[char], index: usize) -> usize {
+    if chars.get(index) != Some(&'\\') {
+        return index + 1;
+    }
+    let escaped = index + 1;
+    let Some(character) = chars.get(escaped).copied() else {
+        return escaped;
+    };
+    if character == 'x' {
+        return skip_hex_escape(chars, escaped + 1);
+    }
+    if character == 'u' {
+        return skip_unicode_escape(chars, escaped + 1);
+    }
+    escaped + 1
+}
+
+fn skip_hex_escape(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index].is_ascii_hexdigit() {
+        index += 1;
+    }
+    index
+}
+
+fn skip_unicode_escape(chars: &[char], mut index: usize) -> usize {
+    if chars.get(index) != Some(&'{') {
+        return index;
+    }
+    index += 1;
+    while index < chars.len() && chars[index] != '}' {
+        index += 1;
+    }
+    if index < chars.len() {
+        return index + 1;
+    }
+    index
 }
 
 fn is_ident_start(character: char) -> bool {
@@ -904,57 +1295,92 @@ fn strip_attributes_and_macros(tokens: &[Token]) -> Vec<Token> {
     let mut result = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
-        let token = &tokens[index];
-        let next = tokens.get(index + 1);
-        let next_next = tokens.get(index + 2);
-
-        if token.text == "#" {
-            let mut group = index + 1;
-            if tokens.get(group).map(|token| token.text.as_str()) == Some("!") {
-                group += 1;
-            }
-            if tokens.get(group).map(|token| token.text.as_str()) == Some("[") {
-                index = skip_delimited(tokens, group);
-                continue;
-            }
+        let skip_to = attribute_end(tokens, index)
+            .or_else(|| macro_rules_end(tokens, index))
+            .or_else(|| macro_invocation_end(tokens, index));
+        if let Some(next) = skip_to {
+            index = next;
+            continue;
         }
-
-        if token.kind == TokenKind::Ident && token.text == "macro_rules" {
-            if let Some(bang) = next {
-                if bang.text == "!" {
-                    let mut group = index + 2;
-                    if tokens
-                        .get(group)
-                        .map(|token| token.kind == TokenKind::Ident)
-                        .unwrap_or(false)
-                    {
-                        group += 1;
-                    }
-                    if tokens
-                        .get(group)
-                        .map(|token| is_open_delimiter(&token.text))
-                        .unwrap_or(false)
-                    {
-                        index = skip_delimited(tokens, group);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        if token.kind == TokenKind::Ident && next.map(|token| token.text.as_str()) == Some("!") {
-            if let Some(group) = next_next {
-                if is_open_delimiter(&group.text) {
-                    index = skip_delimited(tokens, index + 2);
-                    continue;
-                }
-            }
-        }
-
-        result.push(token.clone());
+        result.push(tokens[index].clone());
         index += 1;
     }
     result
+}
+
+fn attribute_end(tokens: &[Token], index: usize) -> Option<usize> {
+    if !token_is(tokens, index, "#") {
+        return None;
+    }
+    let group = attribute_group(tokens, index + 1)?;
+    Some(skip_delimited(tokens, group))
+}
+
+fn attribute_group(tokens: &[Token], mut index: usize) -> Option<usize> {
+    if token_is(tokens, index, "!") {
+        index += 1;
+    }
+    token_is(tokens, index, "[").then_some(index)
+}
+
+fn macro_rules_end(tokens: &[Token], index: usize) -> Option<usize> {
+    if !token_is_ident(tokens, index, "macro_rules") {
+        return None;
+    }
+    let group = macro_rules_group(tokens, index + 1)?;
+    Some(skip_delimited(tokens, group))
+}
+
+fn macro_rules_group(tokens: &[Token], index: usize) -> Option<usize> {
+    if !token_is(tokens, index, "!") {
+        return None;
+    }
+    let mut group = index + 1;
+    if token_kind_is(tokens, group, TokenKind::Ident) {
+        group += 1;
+    }
+    is_open_delimiter_at(tokens, group).then_some(group)
+}
+
+fn macro_invocation_end(tokens: &[Token], index: usize) -> Option<usize> {
+    let group = macro_group(tokens, index)?;
+    Some(skip_delimited(tokens, group))
+}
+
+fn macro_group(tokens: &[Token], index: usize) -> Option<usize> {
+    if !token_kind_is(tokens, index, TokenKind::Ident) || !token_is(tokens, index + 1, "!") {
+        return None;
+    }
+    let group = index + 2;
+    is_open_delimiter_at(tokens, group).then_some(group)
+}
+
+fn token_text(tokens: &[Token], index: usize) -> Option<&str> {
+    tokens.get(index).map(|token| token.text.as_str())
+}
+
+fn token_is(tokens: &[Token], index: usize, text: &str) -> bool {
+    token_text(tokens, index) == Some(text)
+}
+
+fn token_is_ident(tokens: &[Token], index: usize, text: &str) -> bool {
+    tokens
+        .get(index)
+        .map(|token| token.kind == TokenKind::Ident && token.text == text)
+        .unwrap_or(false)
+}
+
+fn token_kind_is(tokens: &[Token], index: usize, kind: TokenKind) -> bool {
+    tokens
+        .get(index)
+        .map(|token| token.kind == kind)
+        .unwrap_or(false)
+}
+
+fn is_open_delimiter_at(tokens: &[Token], index: usize) -> bool {
+    token_text(tokens, index)
+        .map(is_open_delimiter)
+        .unwrap_or(false)
 }
 
 fn is_open_delimiter(text: &str) -> bool {
@@ -1029,31 +1455,101 @@ fn find_function_end(tokens: &[Token], fn_index: usize) -> Option<usize> {
 }
 
 fn find_body_end(tokens: &[Token], fn_index: usize, track_angles: bool) -> Option<usize> {
-    let mut parens = 0i32;
-    let mut brackets = 0i32;
-    let mut angles = 0i32;
+    let mut scan = BodyScan::new(track_angles);
     let mut index = fn_index + 2;
     while index < tokens.len() {
-        match tokens[index].text.as_str() {
-            "(" => parens += 1,
-            ")" => parens = (parens - 1).max(0),
-            "[" => brackets += 1,
-            "]" => brackets = (brackets - 1).max(0),
-            "<" if track_angles => angles += 1,
-            ">" if track_angles => angles = (angles - 1).max(0),
-            "{" => {
-                if parens == 0 && brackets == 0 && angles <= 0 {
-                    return Some(end_of_brace_group(tokens, index));
-                }
-                index = skip_delimited(tokens, index);
-                continue;
-            }
-            ";" if parens == 0 && brackets == 0 && angles <= 0 => return None,
-            _ => {}
+        match scan.step(tokens, index) {
+            ScanStep::Skip(next) => index = next,
+            ScanStep::Return(result) => return result,
+            ScanStep::Continue => index += 1,
         }
-        index += 1;
     }
     None
+}
+
+/// Tracks the nesting state while searching for a function body.
+struct BodyScan {
+    parens: i32,
+    brackets: i32,
+    angles: i32,
+    track_angles: bool,
+}
+
+enum ScanStep {
+    Continue,
+    Skip(usize),
+    Return(Option<usize>),
+}
+
+impl BodyScan {
+    fn new(track_angles: bool) -> Self {
+        Self {
+            parens: 0,
+            brackets: 0,
+            angles: 0,
+            track_angles,
+        }
+    }
+
+    fn step(&mut self, tokens: &[Token], index: usize) -> ScanStep {
+        self.step_paren(tokens, index)
+            .or_else(|| self.step_bracket(tokens, index))
+            .or_else(|| self.step_angle(tokens, index))
+            .or_else(|| self.step_brace(tokens, index))
+            .or_else(|| self.step_semicolon(tokens, index))
+            .unwrap_or(ScanStep::Continue)
+    }
+
+    fn at_top_level(&self) -> bool {
+        self.parens == 0 && self.brackets == 0 && self.angles <= 0
+    }
+
+    fn step_paren(&mut self, tokens: &[Token], index: usize) -> Option<ScanStep> {
+        match tokens[index].text.as_str() {
+            "(" => self.parens += 1,
+            ")" => self.parens = (self.parens - 1).max(0),
+            _ => return None,
+        }
+        Some(ScanStep::Continue)
+    }
+
+    fn step_bracket(&mut self, tokens: &[Token], index: usize) -> Option<ScanStep> {
+        match tokens[index].text.as_str() {
+            "[" => self.brackets += 1,
+            "]" => self.brackets = (self.brackets - 1).max(0),
+            _ => return None,
+        }
+        Some(ScanStep::Continue)
+    }
+
+    fn step_angle(&mut self, tokens: &[Token], index: usize) -> Option<ScanStep> {
+        if !self.track_angles {
+            return None;
+        }
+        match tokens[index].text.as_str() {
+            "<" => self.angles += 1,
+            ">" => self.angles = (self.angles - 1).max(0),
+            _ => return None,
+        }
+        Some(ScanStep::Continue)
+    }
+
+    fn step_brace(&mut self, tokens: &[Token], index: usize) -> Option<ScanStep> {
+        if tokens[index].text != "{" {
+            return None;
+        }
+        if self.at_top_level() {
+            return Some(ScanStep::Return(Some(end_of_brace_group(tokens, index))));
+        }
+        Some(ScanStep::Skip(skip_delimited(tokens, index)))
+    }
+
+    fn step_semicolon(&mut self, tokens: &[Token], index: usize) -> Option<ScanStep> {
+        if tokens[index].text != ";" || !self.at_top_level() {
+            return None;
+        }
+        Some(ScanStep::Return(None))
+    }
 }
 
 fn end_of_brace_group(tokens: &[Token], open: usize) -> usize {
@@ -1102,27 +1598,28 @@ fn parse_diff(text: &str) -> BTreeMap<String, Vec<LineRange>> {
 }
 
 fn parse_hunk_header(line: &str) -> Option<LineRange> {
-    if !line.starts_with("@@ ") {
-        return None;
-    }
-    let mut parts = line.split_whitespace();
-    parts.next()?;
+    let mut parts = line.strip_prefix("@@ ")?.split_whitespace();
     let old = parts.next()?;
     let new = parts.next()?;
-    if !old.starts_with('-') || !new.starts_with('+') {
+    parse_hunk_range(old, new)
+}
+
+fn parse_hunk_range(old: &str, new: &str) -> Option<LineRange> {
+    let spec = new.strip_prefix('+')?;
+    if !old.starts_with('-') {
         return None;
     }
-    let spec = new.strip_prefix('+')?;
-    let (start_text, count_text) = match spec.split_once(',') {
-        Some((start, count)) => (start, Some(count)),
-        None => (spec, None),
-    };
-    let start = start_text.parse::<usize>().ok()?;
-    let count = match count_text {
-        Some(count) => count.parse::<usize>().ok()?,
-        None => 1,
-    };
-    Some((start, start.saturating_add(count.max(1)).saturating_sub(1)))
+    let (start, count) = split_hunk_numbers(spec)?;
+    Some(hunk_range(start, count))
+}
+
+fn split_hunk_numbers(spec: &str) -> Option<(usize, usize)> {
+    let (start_text, count_text) = spec.split_once(',').unwrap_or((spec, "1"));
+    Some((start_text.parse().ok()?, count_text.parse().ok()?))
+}
+
+fn hunk_range(start: usize, count: usize) -> LineRange {
+    (start, start.saturating_add(count.max(1)).saturating_sub(1))
 }
 
 fn intersects(start: usize, end: usize, ranges: &[LineRange]) -> bool {
@@ -1140,6 +1637,15 @@ fn valid_revision(value: &str) -> bool {
 }
 
 fn resolve_base(root: &Path, requested: &str) -> Result<Option<String>, String> {
+    for candidate in base_candidates(requested) {
+        if revision_exists(root, &candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn base_candidates(requested: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     if !requested.is_empty() {
         candidates.push(requested.to_string());
@@ -1149,39 +1655,64 @@ fn resolve_base(root: &Path, requested: &str) -> Result<Option<String>, String> 
             candidates.push(fallback.to_string());
         }
     }
+    candidates.retain(|candidate| usable_candidate(candidate));
+    candidates
+}
 
-    for candidate in candidates {
-        if candidate.chars().all(|character| character == '0') || !valid_revision(&candidate) {
-            continue;
-        }
-        let output = run_git(root, &["rev-parse", "--verify", "--quiet", &candidate])?;
-        if output.status == 0 {
-            return Ok(Some(candidate));
-        }
-    }
-    Ok(None)
+fn usable_candidate(candidate: &str) -> bool {
+    !candidate.chars().all(|character| character == '0') && valid_revision(candidate)
+}
+
+fn revision_exists(root: &Path, candidate: &str) -> Result<bool, String> {
+    let output = run_git(root, &["rev-parse", "--verify", "--quiet", candidate])?;
+    Ok(output.status == 0)
 }
 
 fn changed_ranges(root: &Path, base: &str) -> Result<BTreeMap<PathBuf, Vec<LineRange>>, String> {
     let repo_root = git_repo_root(root)?;
+    let mut changes = tracked_changes(root, base, &repo_root)?;
+    add_untracked_changes(root, &repo_root, &mut changes)?;
+    Ok(changes)
+}
+
+fn tracked_changes(
+    root: &Path,
+    base: &str,
+    repo_root: &Path,
+) -> Result<BTreeMap<PathBuf, Vec<LineRange>>, String> {
     let diff = run_git(
         root,
         &["diff", "--unified=0", "--no-color", base, "--", "src"],
     )?;
-    if diff.status != 0 {
+    let text = checked_diff_stdout(&diff, base)?;
+    Ok(paths_from_diff(&text, repo_root))
+}
+
+fn checked_diff_stdout(output: &CommandOutput, base: &str) -> Result<String, String> {
+    if output.status != 0 {
         return Err(format!(
             "git diff against {base} failed (exit {}): {}",
-            diff.status,
-            error_detail(&diff.stderr)
+            output.status,
+            error_detail(&output.stderr)
         ));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
 
+fn paths_from_diff(text: &str, repo_root: &Path) -> BTreeMap<PathBuf, Vec<LineRange>> {
     let mut changes: BTreeMap<PathBuf, Vec<LineRange>> = BTreeMap::new();
-    for (name, ranges) in parse_diff(&String::from_utf8_lossy(&diff.stdout)) {
+    for (name, ranges) in parse_diff(text) {
         let path = canonical_or_lexical(&repo_root.join(&name));
         changes.entry(path).or_default().extend(ranges);
     }
+    changes
+}
 
+fn add_untracked_changes(
+    root: &Path,
+    repo_root: &Path,
+    changes: &mut BTreeMap<PathBuf, Vec<LineRange>>,
+) -> Result<(), String> {
     let untracked = run_git(
         root,
         &[
@@ -1193,15 +1724,35 @@ fn changed_ranges(root: &Path, base: &str) -> Result<BTreeMap<PathBuf, Vec<LineR
             "src",
         ],
     )?;
-    if untracked.status != 0 {
-        return Err(format!(
-            "git ls-files failed (exit {}): {}",
-            untracked.status,
-            error_detail(&untracked.stderr)
-        ));
+    checked_untracked_status(&untracked)?;
+    add_untracked_paths(
+        &String::from_utf8_lossy(&untracked.stdout),
+        root,
+        repo_root,
+        changes,
+    );
+    Ok(())
+}
+
+fn checked_untracked_status(output: &CommandOutput) -> Result<(), String> {
+    if output.status == 0 {
+        return Ok(());
     }
+    Err(format!(
+        "git ls-files failed (exit {}): {}",
+        output.status,
+        error_detail(&output.stderr)
+    ))
+}
+
+fn add_untracked_paths(
+    text: &str,
+    root: &Path,
+    repo_root: &Path,
+    changes: &mut BTreeMap<PathBuf, Vec<LineRange>>,
+) {
     let src_root = canonical_or_lexical(&root.join("src"));
-    for name in String::from_utf8_lossy(&untracked.stdout).lines() {
+    for name in text.lines() {
         if !name.ends_with(".rs") {
             continue;
         }
@@ -1211,12 +1762,14 @@ fn changed_ranges(root: &Path, base: &str) -> Result<BTreeMap<PathBuf, Vec<LineR
         }
         changes.entry(path).or_default().push((1, usize::MAX));
     }
-
-    Ok(changes)
 }
 
 fn git_repo_root(root: &Path) -> Result<PathBuf, String> {
     let output = run_git(root, &["rev-parse", "--show-toplevel"])?;
+    parse_git_repo_root(&output)
+}
+
+fn parse_git_repo_root(output: &CommandOutput) -> Result<PathBuf, String> {
     if output.status != 0 {
         return Err(format!(
             "cannot determine git repository root: {}",
@@ -1313,40 +1866,77 @@ impl CoverageData {
 
 fn acquire_coverage(options: &Options) -> Result<CoverageData, String> {
     if let Some(path) = &options.coverage {
-        let text = fs::read_to_string(path)
-            .map_err(|error| format!("cannot read coverage file {}: {error}", path.display()))?;
-        let value: Value = serde_json::from_str(&text).map_err(|error| {
-            format!(
-                "cannot parse llvm-cov JSON from {}: {error}",
-                path.display()
-            )
-        })?;
-        let files = parse_coverage_value(&value, &options.root)?;
-        return Ok(CoverageData {
-            source: CoverageSource::External,
-            files,
-        });
+        return external_coverage(path, &options.root);
     }
-
     if options.skip_tests {
         return Ok(CoverageData::unmeasured());
     }
+    run_coverage(&options.root)
+}
 
-    if !cargo_llvm_cov_available(&options.root) {
-        return Err(
-            "cargo-llvm-cov is not available; install it (`cargo install cargo-llvm-cov`) \
-             or pass --coverage FILE / --skip-tests"
-                .to_string(),
-        );
+fn external_coverage(path: &Path, root: &Path) -> Result<CoverageData, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read coverage file {}: {error}", path.display()))?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "cannot parse llvm-cov JSON from {}: {error}",
+            path.display()
+        )
+    })?;
+    let files = parse_coverage_value(&value, root)?;
+    Ok(CoverageData {
+        source: CoverageSource::External,
+        files,
+    })
+}
+
+fn run_coverage(root: &Path) -> Result<CoverageData, String> {
+    generate_coverage(root).map(|files| CoverageData {
+        source: CoverageSource::LlvmCov,
+        files,
+    })
+}
+
+fn generate_coverage(root: &Path) -> Result<BTreeMap<String, FileCoverage>, String> {
+    ensure_llvm_cov(root)?;
+    collect_llvm_cov(root)
+}
+
+fn ensure_llvm_cov(root: &Path) -> Result<(), String> {
+    if cargo_llvm_cov_available(root) {
+        return Ok(());
     }
+    Err(
+        "cargo-llvm-cov is not available; install it (`cargo install cargo-llvm-cov`) \
+         or pass --coverage FILE / --skip-tests"
+            .to_string(),
+    )
+}
 
-    let temp = tempfile::Builder::new()
+fn collect_llvm_cov(root: &Path) -> Result<BTreeMap<String, FileCoverage>, String> {
+    let temp = coverage_tempdir()?;
+    let output_path = temp.path().join("coverage.json");
+    read_exported_coverage(root, &output_path)
+}
+
+fn coverage_tempdir() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
         .prefix("herdr-crap-")
         .tempdir()
-        .map_err(|error| format!("cannot create temporary coverage directory: {error}"))?;
-    let output_path = temp.path().join("coverage.json");
+        .map_err(|error| format!("cannot create temporary coverage directory: {error}"))
+}
+
+fn read_exported_coverage(
+    root: &Path,
+    output_path: &Path,
+) -> Result<BTreeMap<String, FileCoverage>, String> {
+    run_coverage_export(root, output_path)?;
+    load_coverage_file(root, output_path)
+}
+
+fn run_coverage_export(root: &Path, output_path: &Path) -> Result<(), String> {
     let output = run_command(
-        &options.root,
+        root,
         "cargo",
         &[
             "llvm-cov",
@@ -1355,26 +1945,37 @@ fn acquire_coverage(options: &Options) -> Result<CoverageData, String> {
             &output_path.to_string_lossy(),
         ],
     )?;
-    if output.status != 0 {
-        return Err(format!(
-            "cargo llvm-cov failed (exit {}): {}",
-            output.status,
-            error_detail(&output.stderr)
-        ));
+    check_coverage_export(&output)
+}
+
+fn check_coverage_export(output: &CommandOutput) -> Result<(), String> {
+    if output.status == 0 {
+        return Ok(());
     }
-    let text = fs::read_to_string(&output_path).map_err(|error| {
+    Err(format!(
+        "cargo llvm-cov failed (exit {}): {}",
+        output.status,
+        error_detail(&output.stderr)
+    ))
+}
+
+fn load_coverage_file(
+    root: &Path,
+    output_path: &Path,
+) -> Result<BTreeMap<String, FileCoverage>, String> {
+    let value = read_coverage_value(output_path)?;
+    parse_coverage_value(&value, root)
+}
+
+fn read_coverage_value(output_path: &Path) -> Result<Value, String> {
+    let text = fs::read_to_string(output_path).map_err(|error| {
         format!(
             "cargo llvm-cov did not produce {}: {error}",
             output_path.display()
         )
     })?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("cannot parse cargo llvm-cov JSON: {error}"))?;
-    let files = parse_coverage_value(&value, &options.root)?;
-    Ok(CoverageData {
-        source: CoverageSource::LlvmCov,
-        files,
-    })
+    serde_json::from_str(&text)
+        .map_err(|error| format!("cannot parse cargo llvm-cov JSON: {error}"))
 }
 
 fn cargo_llvm_cov_available(root: &Path) -> bool {
@@ -1390,54 +1991,78 @@ fn parse_coverage_value(
     value: &Value,
     root: &Path,
 ) -> Result<BTreeMap<String, FileCoverage>, String> {
-    let data = value
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "coverage JSON is missing the data[] array".to_string())?;
-
+    let data = coverage_data_array(value)?;
     let mut files: BTreeMap<String, FileCoverage> = BTreeMap::new();
     let mut file_entries = 0usize;
-
     for entry in data {
-        let Some(entry_files) = entry.get("files").and_then(Value::as_array) else {
-            continue;
-        };
-        for file in entry_files {
-            let Some(filename) = file.get("filename").and_then(Value::as_str) else {
-                continue;
-            };
-            let mut coverage = FileCoverage::default();
-            if let Some(segments) = file.get("segments").and_then(Value::as_array) {
-                for segment in segments {
-                    let Some(segment) = segment.as_array() else {
-                        continue;
-                    };
-                    if segment.len() < 4 {
-                        continue;
-                    }
-                    let Some(line) = json_usize(&segment[0]) else {
-                        continue;
-                    };
-                    let has_count = json_bool(&segment[3]).unwrap_or(false);
-                    if !has_count || line == 0 {
-                        continue;
-                    }
-                    let count = json_f64(&segment[2]).unwrap_or(0.0);
-                    coverage.executable.insert(line);
-                    if count > 0.0 {
-                        coverage.covered.insert(line);
-                    }
-                }
-            }
-            file_entries += 1;
-            add_coverage_aliases(&mut files, filename, &coverage, root);
-        }
+        file_entries += collect_entry_files(entry, root, &mut files);
     }
-
     if file_entries == 0 {
         return Err("coverage JSON contains no file entries".to_string());
     }
     Ok(files)
+}
+
+fn coverage_data_array(value: &Value) -> Result<&[Value], String> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| "coverage JSON is missing the data[] array".to_string())
+}
+
+fn collect_entry_files(
+    entry: &Value,
+    root: &Path,
+    files: &mut BTreeMap<String, FileCoverage>,
+) -> usize {
+    let Some(entry_files) = entry.get("files").and_then(Value::as_array) else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for file in entry_files {
+        count += collect_file_coverage(file, root, files);
+    }
+    count
+}
+
+fn collect_file_coverage(
+    file: &Value,
+    root: &Path,
+    files: &mut BTreeMap<String, FileCoverage>,
+) -> usize {
+    let Some(filename) = file.get("filename").and_then(Value::as_str) else {
+        return 0;
+    };
+    let mut coverage = FileCoverage::default();
+    if let Some(segments) = file.get("segments").and_then(Value::as_array) {
+        for segment in segments {
+            add_segment(&mut coverage, segment);
+        }
+    }
+    add_coverage_aliases(files, filename, &coverage, root);
+    1
+}
+
+fn add_segment(coverage: &mut FileCoverage, segment: &Value) {
+    let Some(segment) = segment.as_array() else {
+        return;
+    };
+    if segment.len() < 4 {
+        return;
+    }
+    let Some(line) = json_usize(&segment[0]) else {
+        return;
+    };
+    let has_count = json_bool(&segment[3]).unwrap_or(false);
+    if !has_count || line == 0 {
+        return;
+    }
+    let count = json_f64(&segment[2]).unwrap_or(0.0);
+    coverage.executable.insert(line);
+    if count > 0.0 {
+        coverage.covered.insert(line);
+    }
 }
 
 fn json_usize(value: &Value) -> Option<usize> {
@@ -1698,118 +2323,240 @@ fn report(
     coverage: &CoverageData,
     baseline: Option<&Baseline>,
 ) -> i32 {
-    let tests = tests_label(options, coverage.source);
     if !options.json {
-        println!(
+        print_report_header(options, mode, measurement, coverage, baseline);
+    }
+    let classification = classify_rows(options, measurement, coverage.source, baseline);
+    if options.json {
+        print_json_report(options, measurement, &classification, baseline);
+        return exit_code(&classification);
+    }
+    print_text_report(&classification)
+}
+
+fn print_report_header(
+    options: &Options,
+    mode: &str,
+    measurement: &Measurement,
+    coverage: &CoverageData,
+    baseline: Option<&Baseline>,
+) {
+    let tests = tests_label(options, coverage.source);
+    println!(
         "CRAP gate: mode={mode} tests={tests} files={} functions={} line_coverage={:.1}% threshold={} coverage={} baseline={}",
         measurement.measured_files.len(),
         measurement.rows.len(),
         measurement.line_coverage * 100.0,
         options.threshold,
         coverage.source.label(),
-            baseline
-                .map(Baseline::label)
-                .unwrap_or_else(|| "none (absolute threshold)".to_string())
-        );
+        baseline
+            .map(Baseline::label)
+            .unwrap_or_else(|| "none (absolute threshold)".to_string())
+    );
+    print_coverage_warnings(measurement, coverage.source);
+}
 
-        match coverage.source {
-            CoverageSource::Unmeasured => {
-                println!(
-                    "CRAP gate: coverage unmeasured (--skip-tests without --coverage); function and line coverage are reported as 0%"
-                );
-            }
-            CoverageSource::External | CoverageSource::LlvmCov => {
-                if !measurement.missing_files.is_empty() {
-                    println!(
-                        "CRAP gate: coverage missing line data for {} of {} measured file(s); those functions are reported as 0%",
-                        measurement.missing_files.len(),
-                        measurement.measured_files.len()
-                    );
-                }
-                if !measurement.files_without_lines.is_empty() {
-                    println!(
-                        "CRAP gate: coverage has no executable lines for {} measured file(s); those functions are reported as 0%",
-                        measurement.files_without_lines.len()
-                    );
-                }
-                if measurement.functions_without_line_data > 0 {
-                    println!(
-                        "CRAP gate: coverage has no line data for {} selected function(s); those functions are reported as 0%",
-                        measurement.functions_without_line_data
-                    );
-                }
-                if measurement.total_executable == 0 {
-                    println!(
-                        "CRAP gate: coverage contains no executable line data for the measured files; line coverage is reported as 0%"
-                    );
-                }
-            }
-        }
+fn print_coverage_warnings(measurement: &Measurement, source: CoverageSource) {
+    for line in coverage_warning_lines(measurement, source) {
+        println!("{line}");
     }
-    let unmeasured = coverage.source == CoverageSource::Unmeasured;
-    let mut violations: Vec<(&Row, &'static str, Option<f64>)> = Vec::new();
-    let mut new_count = 0usize;
-    let mut worsened_count = 0usize;
-    for row in &measurement.rows {
-        let current = if unmeasured {
-            crap(row.cc, 0.0)
-        } else {
-            row.crap
-        };
-        let baseline_value = baseline.and_then(|baseline| baseline.metric(&row.key, unmeasured));
-        let (reason, enforce) = match (baseline, baseline_value) {
-            (None, _) => ("absolute", true),
-            (Some(_), None) => {
-                new_count += 1;
-                ("new", true)
-            }
-            (Some(_), Some(previous)) if current > previous + 1e-9 => {
-                worsened_count += 1;
-                ("worse", true)
-            }
-            (Some(_), Some(_)) => ("grandfathered", false),
-        };
-        if enforce && current > options.threshold {
-            violations.push((row, reason, baseline_value));
-        }
+}
+
+fn coverage_warning_lines(measurement: &Measurement, source: CoverageSource) -> Vec<String> {
+    if source == CoverageSource::Unmeasured {
+        return vec![
+            "CRAP gate: coverage unmeasured (--skip-tests without --coverage); function and line coverage are reported as 0%".to_string(),
+        ];
     }
-    if options.json {
-        let rows: Vec<Value> = violations
-            .iter()
-            .map(|(row, reason, previous)| {
-                serde_json::json!({
-                    "key": row.key,
-                    "file": row.display,
-                    "name": row.name,
-                    "line": row.line,
-                    "cc": row.cc,
-                    "coverage": row.coverage,
-                    "crap": row.crap,
-                    "baseline_crap": previous,
-                    "reason": reason
-                })
-            })
-            .collect();
-        let output = serde_json::json!({
-            "threshold": options.threshold,
-            "functions": measurement.rows.len(),
-            "line_coverage": measurement.line_coverage,
-            "new": new_count,
-            "worsened": worsened_count,
-            "baseline": baseline.map(Baseline::label),
-            "violations": rows
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+    measured_coverage_warning_lines(measurement)
+}
+
+fn measured_coverage_warning_lines(measurement: &Measurement) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !measurement.missing_files.is_empty() {
+        lines.push(format!(
+            "CRAP gate: coverage missing line data for {} of {} measured file(s); those functions are reported as 0%",
+            measurement.missing_files.len(),
+            measurement.measured_files.len()
+        ));
+    }
+    if !measurement.files_without_lines.is_empty() {
+        lines.push(format!(
+            "CRAP gate: coverage has no executable lines for {} measured file(s); those functions are reported as 0%",
+            measurement.files_without_lines.len()
+        ));
+    }
+    if measurement.functions_without_line_data > 0 {
+        lines.push(format!(
+            "CRAP gate: coverage has no line data for {} selected function(s); those functions are reported as 0%",
+            measurement.functions_without_line_data
+        ));
+    }
+    if measurement.total_executable == 0 {
+        lines.push(
+            "CRAP gate: coverage contains no executable line data for the measured files; line coverage is reported as 0%".to_string(),
         );
-        return if violations.is_empty() { 0 } else { 1 };
     }
-    if violations.is_empty() {
+    lines
+}
+
+#[derive(Default)]
+struct Classification<'a> {
+    violations: Vec<Violation<'a>>,
+    new_count: usize,
+    worsened_count: usize,
+    incremental: bool,
+}
+
+#[derive(Clone)]
+struct Violation<'a> {
+    row: &'a Row,
+    reason: &'static str,
+    previous: Option<f64>,
+}
+
+struct RowClassification {
+    reason: &'static str,
+    previous: Option<f64>,
+    new: bool,
+    worsened: bool,
+    violate: bool,
+}
+
+impl<'a> Classification<'a> {
+    fn record(&mut self, row: &'a Row, result: RowClassification) {
+        self.new_count += usize::from(result.new);
+        self.worsened_count += usize::from(result.worsened);
+        if result.violate {
+            self.violations.push(Violation {
+                row,
+                reason: result.reason,
+                previous: result.previous,
+            });
+        }
+    }
+}
+
+fn classify_rows<'a>(
+    options: &Options,
+    measurement: &'a Measurement,
+    source: CoverageSource,
+    baseline: Option<&Baseline>,
+) -> Classification<'a> {
+    let unmeasured = source == CoverageSource::Unmeasured;
+    let mut classification = Classification {
+        incremental: baseline.is_some(),
+        ..Classification::default()
+    };
+    for row in &measurement.rows {
+        let result = classify_row(options, row, unmeasured, baseline);
+        classification.record(row, result);
+    }
+    classification
+}
+
+fn classify_row(
+    options: &Options,
+    row: &Row,
+    unmeasured: bool,
+    baseline: Option<&Baseline>,
+) -> RowClassification {
+    let current = current_crap(row, unmeasured);
+    let Some(baseline) = baseline else {
+        return row_classification("absolute", current > options.threshold, None, false, false);
+    };
+    let previous = baseline.metric(&row.key, unmeasured);
+    match previous {
+        None => row_classification("new", current > options.threshold, None, true, false),
+        Some(previous) if current > previous + 1e-9 => row_classification(
+            "worse",
+            current > options.threshold,
+            Some(previous),
+            false,
+            true,
+        ),
+        Some(previous) => row_classification("grandfathered", false, Some(previous), false, false),
+    }
+}
+
+fn row_classification(
+    reason: &'static str,
+    violate: bool,
+    previous: Option<f64>,
+    new: bool,
+    worsened: bool,
+) -> RowClassification {
+    RowClassification {
+        reason,
+        previous,
+        new,
+        worsened,
+        violate,
+    }
+}
+
+fn current_crap(row: &Row, unmeasured: bool) -> f64 {
+    if unmeasured {
+        crap(row.cc, 0.0)
+    } else {
+        row.crap
+    }
+}
+
+fn exit_code(classification: &Classification) -> i32 {
+    if classification.violations.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
+fn print_json_report(
+    options: &Options,
+    measurement: &Measurement,
+    classification: &Classification,
+    baseline: Option<&Baseline>,
+) {
+    let rows: Vec<Value> = classification
+        .violations
+        .iter()
+        .map(|violation| {
+            serde_json::json!({
+                "key": violation.row.key,
+                "file": violation.row.display,
+                "name": violation.row.name,
+                "line": violation.row.line,
+                "cc": violation.row.cc,
+                "coverage": violation.row.coverage,
+                "crap": violation.row.crap,
+                "baseline_crap": violation.previous,
+                "reason": violation.reason
+            })
+        })
+        .collect();
+    let output = serde_json::json!({
+        "threshold": options.threshold,
+        "functions": measurement.rows.len(),
+        "line_coverage": measurement.line_coverage,
+        "new": classification.new_count,
+        "worsened": classification.worsened_count,
+        "baseline": baseline.map(Baseline::label),
+        "violations": rows
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
+            .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+    );
+}
+
+fn print_text_report(classification: &Classification) -> i32 {
+    if classification.violations.is_empty() {
         println!(
-            "CRAP gate: OK (new={new_count}, worsened={worsened_count}, baseline={})",
-            if baseline.is_some() {
+            "CRAP gate: OK (new={}, worsened={}, baseline={})",
+            classification.new_count,
+            classification.worsened_count,
+            if classification.incremental {
                 "incremental"
             } else {
                 "absolute"
@@ -1818,54 +2565,69 @@ fn report(
         return 0;
     }
 
-    violations.sort_by(|left, right| {
-        right
-            .0
-            .crap
-            .partial_cmp(&left.0.crap)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.display.cmp(&right.0.display))
-            .then_with(|| left.0.line.cmp(&right.0.line))
-            .then_with(|| left.0.name.cmp(&right.0.name))
-    });
-
+    let mut violations = classification.violations.clone();
+    violations.sort_by(compare_violations);
     println!(
-        "Violations: {} (new={new_count}, worsened={worsened_count}, top {MAX_VIOLATIONS})",
-        violations.len()
+        "Violations: {} (new={}, worsened={}, top {MAX_VIOLATIONS})",
+        violations.len(),
+        classification.new_count,
+        classification.worsened_count
     );
     println!(
         "{:>8} {:>8} {:>4} {:>7}  reason location",
         "CRAP", "BASE", "CC", "Cov"
     );
-    for (row, reason, previous) in violations.iter().take(MAX_VIOLATIONS) {
-        let base = previous
-            .map(|value| format!("{value:.2}"))
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:>8.2} {:>8} {:>4} {:>7.1}%  {} {}:{} {}",
-            row.crap,
-            base,
-            row.cc,
-            row.coverage * 100.0,
-            reason,
-            row.display,
-            row.line,
-            row.name
-        );
+    for violation in violations.iter().take(MAX_VIOLATIONS) {
+        println!("{}", violation_line(violation));
     }
     println!("CRAP gate: FAIL");
     1
+}
+
+fn violation_line(violation: &Violation) -> String {
+    let base = violation
+        .previous
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "{:>8.2} {:>8} {:>4} {:>7.1}%  {} {}:{} {}",
+        violation.row.crap,
+        base,
+        violation.row.cc,
+        violation.row.coverage * 100.0,
+        violation.reason,
+        violation.row.display,
+        violation.row.line,
+        violation.row.name
+    )
+}
+
+fn compare_violations(left: &Violation, right: &Violation) -> std::cmp::Ordering {
+    right
+        .row
+        .crap
+        .partial_cmp(&left.row.crap)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.row.display.cmp(&right.row.display))
+        .then_with(|| left.row.line.cmp(&right.row.line))
+        .then_with(|| left.row.name.cmp(&right.row.name))
+}
+
+impl CoverageSource {
+    fn tests_label(self) -> &'static str {
+        if self == CoverageSource::LlvmCov {
+            "llvm-cov"
+        } else {
+            "skipped"
+        }
+    }
 }
 
 fn tests_label(options: &Options, source: CoverageSource) -> &'static str {
     if options.skip_tests {
         return "skipped";
     }
-    match source {
-        CoverageSource::LlvmCov => "llvm-cov",
-        CoverageSource::External => "skipped",
-        CoverageSource::Unmeasured => "skipped",
-    }
+    source.tests_label()
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,11 +2705,15 @@ fn print_error_detail(output: &CommandOutput) {
     let detail = error_detail(&output.stderr);
     if !detail.is_empty() {
         eprintln!("{detail}");
-    } else {
-        let detail = error_detail(&output.stdout);
-        if !detail.is_empty() {
-            eprintln!("{detail}");
-        }
+        return;
+    }
+    print_stdout_detail(&output.stdout);
+}
+
+fn print_stdout_detail(stdout: &[u8]) {
+    let detail = error_detail(stdout);
+    if !detail.is_empty() {
+        eprintln!("{detail}");
     }
 }
 
@@ -2226,5 +2992,399 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ";
         assert_eq!(test_summary(stdout), Some("2 passed, 0 failed".to_string()));
         assert_eq!(test_summary(b"no test output"), None);
+    }
+    #[test]
+    fn tokenizer_tracks_lines_through_comments_literals_and_raw_idents() {
+        let source = r###"
+// line comment
+/* outer /* nested */ end */
+fn f<'a>(x: &'a str) -> char {
+    let text = "a\"b";
+    let raw = r#"raw "quoted" text"#;
+    let simple_raw = r"simple";
+    let bytes = b"bytes";
+    let raw_bytes = br#"raw bytes"#;
+    let c_string = c"c string";
+    let hex = '\x41';
+    let unicode = '\u{1F600}';
+    let quoted = '"';
+    let newline = '\n';
+    let byte_char = b'B';
+    let number = 42usize;
+    let r#type = number;
+    match number {
+        0 => 1,
+        _ => 2,
+    }
+}
+"###;
+        let tokens = tokenize(source);
+        let function = tokens
+            .iter()
+            .find(|token| token.text == "f")
+            .expect("function token");
+        assert_eq!(function.line, 4);
+        assert_eq!(tokens.last().expect("closing brace").line, 22);
+        assert!(tokens.iter().any(|token| token.text == "r#type"));
+        let spans = scan_source_functions(source);
+        assert_eq!(spans.len(), 1);
+        assert_eq!((spans[0].start, spans[0].end), (4, 22));
+
+        assert!(tokenize("/* unterminated").is_empty());
+        assert!(tokenize("\"unterminated").is_empty());
+        assert!(tokenize("'").is_empty());
+        assert_eq!(tokenize("r#foo")[0].text, "r#foo");
+    }
+
+    #[test]
+    fn source_spans_handle_generics_and_block_closures() {
+        let source = "\
+fn generic<T>(value: T) -> T {
+    consume(|item| { item });
+    value
+}
+fn plain() {}
+";
+        let functions = parse_functions(source);
+        let names: Vec<&str> = functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["generic", "plain"]);
+        assert_eq!((functions[0].start, functions[0].end), (1, 4));
+        assert_eq!((functions[1].start, functions[1].end), (5, 5));
+    }
+
+    #[test]
+    fn parse_hunk_header_accepts_implicit_counts_and_rejects_bad_headers() {
+        assert_eq!(parse_hunk_header("@@ -1,0 +2,2 @@"), Some((2, 3)));
+        assert_eq!(parse_hunk_header("@@ -7 +8 @@"), Some((8, 8)));
+        assert_eq!(parse_hunk_header("@@ -1,2 +3 @@"), Some((3, 3)));
+        assert_eq!(parse_hunk_header("@@ 7 +8 @@"), None);
+        assert_eq!(parse_hunk_header("@@ bad"), None);
+        assert_eq!(parse_hunk_header("@@"), None);
+    }
+
+    #[test]
+    fn parse_options_accepts_values_in_both_forms() {
+        let options = parse_options(&[
+            "--threshold=5".to_string(),
+            "--base".to_string(),
+            "HEAD".to_string(),
+            "--coverage".to_string(),
+            "cov.json".to_string(),
+            "--baseline=base.json".to_string(),
+            "--root".to_string(),
+            ".".to_string(),
+            "--all".to_string(),
+            "--skip-tests".to_string(),
+            "--always-test".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("valid options")
+        .expect("help was not requested");
+        assert_eq!(options.root, PathBuf::from("."));
+        assert_eq!(options.threshold, 5.0);
+        assert_eq!(options.base, "HEAD");
+        assert_eq!(options.coverage, Some(PathBuf::from("cov.json")));
+        assert_eq!(options.baseline, Some(PathBuf::from("base.json")));
+        assert!(options.all);
+        assert!(options.skip_tests);
+        assert!(options.always_test);
+        assert!(options.json);
+        assert!(!options.update_baseline);
+        assert!(!options.no_baseline);
+    }
+
+    #[test]
+    fn parse_options_rejects_invalid_combinations_and_inline_flags() {
+        assert!(parse_options(&["--help".to_string()])
+            .expect("help parses")
+            .is_none());
+        assert!(parse_options(&["-h".to_string()])
+            .expect("help parses")
+            .is_none());
+
+        let inline_flag = parse_options(&["--all=1".to_string()]).expect_err("inline flag");
+        assert!(inline_flag.contains("unrecognized argument: --all"));
+
+        let missing = parse_options(&["--threshold".to_string()]).expect_err("missing value");
+        assert!(missing.contains("--threshold requires a value"));
+
+        let invalid = parse_options(&["--threshold".to_string(), "nope".to_string()])
+            .expect_err("invalid threshold");
+        assert!(invalid.contains("invalid --threshold value"));
+
+        let infinite = parse_options(&["--threshold".to_string(), "inf".to_string()])
+            .expect_err("infinite threshold");
+        assert!(infinite.contains("finite"));
+
+        let exclusive =
+            parse_options(&["--update-baseline".to_string(), "--no-baseline".to_string()])
+                .expect_err("mutually exclusive");
+        assert!(exclusive.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn revision_candidates_filter_invalid_values() {
+        assert_eq!(
+            base_candidates("HEAD"),
+            vec![
+                "HEAD".to_string(),
+                DEFAULT_BASE.to_string(),
+                "main".to_string(),
+                "HEAD~1".to_string()
+            ]
+        );
+        assert_eq!(
+            base_candidates(DEFAULT_BASE),
+            vec![
+                DEFAULT_BASE.to_string(),
+                "main".to_string(),
+                "HEAD~1".to_string()
+            ]
+        );
+        assert!(valid_revision("v1.0"));
+        assert!(valid_revision("HEAD~1"));
+        assert!(!valid_revision(""));
+        assert!(!valid_revision("-x"));
+        assert!(!valid_revision("a\tb"));
+        assert!(!usable_candidate(""));
+        assert!(!usable_candidate("0000"));
+        assert!(!usable_candidate("-x"));
+        assert!(!usable_candidate("a b"));
+        assert!(usable_candidate("main"));
+    }
+
+    fn run_git_ok(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=CRAP Test",
+                "-c",
+                "user.email=crap@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn changed_ranges_and_resolve_base_inspect_a_git_repository() {
+        let directory = tempfile::TempDir::new().expect("temporary repository");
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").expect("write source");
+        run_git_ok(root, &["init", "-q"]);
+        run_git_ok(root, &["add", "src/lib.rs"]);
+        run_git_ok(root, &["commit", "-q", "-m", "initial"]);
+
+        assert_eq!(
+            git_repo_root(root).expect("repository root"),
+            canonical_or_lexical(root)
+        );
+        assert_eq!(
+            resolve_base(root, "HEAD").expect("resolve base"),
+            Some("HEAD".to_string())
+        );
+
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}\npub fn b() {}\n")
+            .expect("modify tracked source");
+        fs::write(root.join("src/untracked.rs"), "pub fn c() {}\n").expect("write untracked");
+        fs::write(root.join("src/notes.txt"), "not rust\n").expect("write non-rust");
+
+        let changes = changed_ranges(root, "HEAD").expect("changed ranges");
+        let tracked = canonical_or_lexical(&root.join("src/lib.rs"));
+        let ranges = changes.get(&tracked).expect("tracked changes");
+        assert!(ranges.contains(&(2, 2)), "ranges: {ranges:?}");
+        let untracked = canonical_or_lexical(&root.join("src/untracked.rs"));
+        assert_eq!(changes.get(&untracked), Some(&vec![(1, usize::MAX)]));
+        assert!(!changes.contains_key(&canonical_or_lexical(&root.join("src/notes.txt"))));
+
+        assert!(changed_ranges(root, "does-not-exist").is_err());
+        let plain = tempfile::TempDir::new().expect("plain directory");
+        assert!(git_repo_root(plain.path()).is_err());
+        assert_eq!(
+            resolve_base(plain.path(), "HEAD").expect("no repository"),
+            None
+        );
+    }
+
+    #[test]
+    fn untracked_paths_are_filtered_to_rust_files_under_src() {
+        let directory = tempfile::TempDir::new().expect("root");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        let mut changes = BTreeMap::new();
+        add_untracked_paths(
+            "src/keep.rs\nsrc/notes.txt\n../outside.rs\n",
+            directory.path(),
+            directory.path(),
+            &mut changes,
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(changes
+            .keys()
+            .next()
+            .expect("one path")
+            .ends_with("src/keep.rs"));
+    }
+
+    fn empty_measurement() -> Measurement {
+        Measurement {
+            rows: Vec::new(),
+            measured_files: BTreeSet::new(),
+            line_coverage: 0.0,
+            functions_without_line_data: 0,
+            missing_files: Vec::new(),
+            files_without_lines: Vec::new(),
+            total_executable: 1,
+        }
+    }
+
+    #[test]
+    fn coverage_warnings_reflect_measurement_state() {
+        let unmeasured = coverage_warning_lines(&empty_measurement(), CoverageSource::Unmeasured);
+        assert_eq!(unmeasured.len(), 1);
+        assert!(unmeasured[0].contains("coverage unmeasured"));
+        assert!(coverage_warning_lines(&empty_measurement(), CoverageSource::External).is_empty());
+
+        let mut measurement = empty_measurement();
+        measurement.functions_without_line_data = 2;
+        measurement
+            .missing_files
+            .push(PathBuf::from("src/missing.rs"));
+        measurement
+            .files_without_lines
+            .push(PathBuf::from("src/empty.rs"));
+        measurement
+            .measured_files
+            .insert(PathBuf::from("src/missing.rs"));
+        measurement.total_executable = 0;
+        let lines = coverage_warning_lines(&measurement, CoverageSource::LlvmCov);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("missing line data for 1 of 1"));
+        assert!(lines[1].contains("no executable lines for 1"));
+        assert!(lines[2].contains("no line data for 2"));
+        assert!(lines[3].contains("no executable line data"));
+
+        assert_eq!(CoverageSource::LlvmCov.tests_label(), "llvm-cov");
+        assert_eq!(CoverageSource::External.tests_label(), "skipped");
+        assert_eq!(CoverageSource::Unmeasured.tests_label(), "skipped");
+    }
+
+    #[test]
+    fn parse_coverage_skips_malformed_segments_and_rejects_missing_data() {
+        assert!(parse_coverage_value(&serde_json::json!({}), Path::new(".")).is_err());
+        assert!(parse_coverage_value(&serde_json::json!({"data": []}), Path::new(".")).is_err());
+
+        let value = serde_json::json!({
+            "data": [
+                {"no_files": true},
+                {"files": [
+                    {"filename": "src/lib.rs", "segments": ["oops", [1], [2, 1, 0]]},
+                    {"no_filename": true},
+                    {"filename": "src/other.rs"}
+                ]}
+            ]
+        });
+        let root = std::env::current_dir().expect("current directory");
+        let files = parse_coverage_value(&value, &root).expect("valid coverage");
+        let data = CoverageData {
+            source: CoverageSource::External,
+            files,
+        };
+        assert!(data
+            .lookup(Path::new("src/other.rs"), &root)
+            .expect("file entry")
+            .executable
+            .is_empty());
+    }
+
+    fn options_for(root: PathBuf) -> Options {
+        Options {
+            root,
+            threshold: DEFAULT_THRESHOLD,
+            all: true,
+            base: DEFAULT_BASE.to_string(),
+            skip_tests: true,
+            always_test: false,
+            coverage: None,
+            baseline: None,
+            update_baseline: false,
+            no_baseline: false,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn baseline_selection_honors_flags_and_implicit_file() {
+        let directory = tempfile::TempDir::new().expect("root");
+        let mut options = options_for(directory.path().to_path_buf());
+        assert!(explicit_or_implicit_baseline(&options).is_none());
+        fs::write(directory.path().join(DEFAULT_BASELINE), "{}").expect("baseline");
+        assert_eq!(
+            explicit_or_implicit_baseline(&options),
+            Some(directory.path().join(DEFAULT_BASELINE))
+        );
+        let explicit = PathBuf::from("/tmp/explicit-baseline.json");
+        options.baseline = Some(explicit.clone());
+        assert_eq!(explicit_or_implicit_baseline(&options), Some(explicit));
+        options.no_baseline = true;
+        assert!(explicit_or_implicit_baseline(&options).is_none());
+    }
+
+    #[test]
+    fn json_report_lists_violations_and_absolute_success() {
+        let directory = tempfile::TempDir::new().expect("root");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::write(
+            directory.path().join("src/lib.rs"),
+            "pub fn branchy(value: bool) -> i32 { if value { 1 } else { 2 } }\n",
+        )
+        .expect("write source");
+        let root = directory.path().to_string_lossy().into_owned();
+        let failing = vec![
+            "--root".to_string(),
+            root.clone(),
+            "--all".to_string(),
+            "--skip-tests".to_string(),
+            "--no-baseline".to_string(),
+            "--json".to_string(),
+            "--threshold".to_string(),
+            "3".to_string(),
+        ];
+        assert_eq!(cli(&failing), 1);
+        let passing = vec![
+            "--root".to_string(),
+            root,
+            "--all".to_string(),
+            "--skip-tests".to_string(),
+            "--no-baseline".to_string(),
+            "--json".to_string(),
+            "--threshold".to_string(),
+            "6".to_string(),
+        ];
+        assert_eq!(cli(&passing), 0);
+    }
+
+    #[test]
+    fn no_change_test_messages_include_and_omit_summary() {
+        assert_eq!(
+            tests_passed_message("HEAD", b"test result: ok. 3 passed; 0 failed"),
+            "CRAP gate: no changed production functions vs HEAD; tests passed (3 passed, 0 failed)"
+        );
+        assert_eq!(
+            tests_passed_message("HEAD", b"no summary"),
+            "CRAP gate: no changed production functions vs HEAD; tests passed"
+        );
     }
 }

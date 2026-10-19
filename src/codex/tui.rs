@@ -1841,6 +1841,7 @@ fn executable_path(command: &str) -> Option<String> {
 
 /// Nonblocking UNIX connect with the original two second upstream deadline.
 fn connect_unix_stream(path: &Path, timeout: Duration) -> Result<UnixStream> {
+    crate::codex::rpc::validate_socket(&path.display().to_string())?;
     let fd = open_upstream_socket()?;
     let result = connect_socket(fd, path, timeout);
     finish_connect(fd, result)

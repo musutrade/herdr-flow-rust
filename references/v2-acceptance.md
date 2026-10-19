@@ -27,10 +27,12 @@ App checks or real gate coverage. No source was merged to production or policy
 migrated as part of this development.
 
 The 2026-10-18 follow-up audit fixes and the 2026-10-19 security hardening were
-verified with the full Rust test suite (
-`cargo test --all-targets`). This includes the six
-ownership/publication/conflict/rebase regressions, the related intake, repair and
-direct-observer validation guards, and the command/path/JSON boundary tests.
+verified by the **upstream Python** suite (428 tests at that snapshot). The Rust
+port has 206 tests and does **not** contain equivalent regressions for all six
+ownership/publication/conflict/rebase fixes; the 2026-10-19 Rust audit identified
+unported batch repair/rebase gaps. The Rust tests do cover the related intake,
+repair and direct-observer validation guards and the command/path/JSON boundary
+tests. Do not read the Python 428-test result as Rust acceptance.
 Among the earlier nonblocking improvements in `v2-review-feedback.md`, configurable
 verifier timeout and fully configurable Git identity remain outstanding; Git
 diagnostics and Check suite-window bounds are addressed.

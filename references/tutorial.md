@@ -35,7 +35,7 @@ export GUARD_DIR=/absolute/state/coordinator-guard
 export QUEUE_DIR=/absolute/state/queue
 export PANE=REPLACE_PANE
 export SESSION=REPLACE_CODEX_SESSION_UUID
-export TRANSCRIPT=/absolute/transrc/REPLACE_ROLLOUT.jsonl
+export TRANSCRIPT=/absolute/transcripts/REPLACE_ROLLOUT.jsonl
 export TASK=owner/repo#REPLACE_ISSUE
 ```
 

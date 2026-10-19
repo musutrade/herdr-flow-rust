@@ -1,5 +1,11 @@
 # V1 basic single-PR loop
 
+> **Evidence caveat (2026-10-19 Rust audit):** the live observations below were
+> produced on 2026-10-17 by the upstream **Python** implementation, before the
+> Rust port existed. They are retained as historical reference and do **not**
+> constitute Rust live acceptance. No Rust-specific live Herdr/Codex/GitHub run
+> exists; the Rust suite uses fakes. See `AUDIT_REPORT_2026-10-19.md`.
+
 V1 combines durable result application, explicit successor takeover, local PR
 provenance and required-job decisions. External publication still uses an
 authorized publisher; these tools do not push, create PRs or merge them.

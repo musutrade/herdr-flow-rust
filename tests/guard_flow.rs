@@ -550,3 +550,31 @@ fn fingerprint_binds_untracked_bytes_from_a_subdirectory() {
     assert_ne!(before, after);
     let _ = SHA;
 }
+
+#[test]
+fn watch_unmanaged_environment_persists_needs_attention() {
+    let h = Harness::new();
+    let result = guard::watch(&h.root, None, true);
+    assert!(result.is_ok(), "{result:?}");
+    let state = h.state();
+    assert_eq!(
+        model::string(&state, "phase").as_deref(),
+        Some("needs_attention"),
+        "{state}"
+    );
+    assert!(model::string(&state, "error").is_some());
+}
+
+#[test]
+fn watch_parked_state_does_not_require_the_adapter() {
+    let h = Harness::new();
+    let mut state = h.state();
+    state["phase"] = json!("parked");
+    util::atomic_write_json(&h.root.join("state.json"), &state).unwrap();
+    let result = guard::watch(&h.root, None, true);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        model::string(&h.state(), "phase").as_deref(),
+        Some("parked")
+    );
+}

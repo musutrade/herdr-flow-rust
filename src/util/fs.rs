@@ -71,11 +71,20 @@ fn push_component(normalized: &mut PathBuf, component: Component<'_>) {
     match component {
         Component::RootDir | Component::Prefix(_) => {}
         Component::CurDir => {}
-        Component::ParentDir => {
-            normalized.pop();
-        }
+        Component::ParentDir => pop_resolved(normalized),
         Component::Normal(name) => normalized.push(name),
     }
+}
+
+fn pop_resolved(path: &mut PathBuf) {
+    // Python `Path.resolve` follows symlinks before applying `..`: for
+    // `link/../child` with `link -> elsewhere/inner`, the result is
+    // `elsewhere/child`, not `child` next to the lexical link.
+    let current = path.canonicalize().unwrap_or_else(|_| path.clone());
+    *path = current
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"));
 }
 
 fn split_missing(mut cursor: PathBuf) -> (PathBuf, Vec<std::ffi::OsString>) {
@@ -240,28 +249,37 @@ pub fn atomic_write_json_compact(path: &Path, value: &Value) -> Result<()> {
 }
 
 pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
-    // Python `open('x')` reservation semantics.
+    // Python `open('x')` reservation semantics: create only if absent, and
+    // never expose a partially written document to a concurrent reader.
     let parent = path
         .parent()
         .ok_or_else(|| FlowError::io("write target has no parent directory"))?;
     fs::create_dir_all(parent)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                FlowError::io(format!("{} already exists", path.display()))
-            } else {
-                FlowError::io(format!("cannot create {}: {error}", path.display()))
-            }
-        })?;
     let mut text = serde_json::to_string_pretty(value)
         .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
     text.push('\n');
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
+    let mut temporary = Builder::new()
+        .prefix(".new-")
+        .tempfile_in(parent)
+        .map_err(|error| FlowError::io(format!("cannot create temporary file: {error}")))?;
+    temporary
+        .as_file_mut()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temporary
+        .as_file_mut()
+        .write_all(text.as_bytes())
+        .map_err(|error| FlowError::io(format!("cannot write temporary file: {error}")))?;
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .map_err(|error| FlowError::io(format!("cannot fsync temporary file: {error}")))?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            FlowError::io(format!("{} already exists", path.display()))
+        } else {
+            FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
+        }
+    })?;
     Ok(())
 }
 
@@ -484,6 +502,20 @@ mod tests {
     }
 
     #[test]
+    fn resolve_path_applies_parent_after_symlink_resolution() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let target = base.join("elsewhere").join("inner");
+        fs::create_dir_all(&target).unwrap();
+        let link = base.join("link");
+        symlink(&target, &link).unwrap();
+        assert_eq!(
+            resolve_path(&link.join("..").join("child")),
+            base.join("elsewhere").join("child")
+        );
+    }
+
+    #[test]
     fn atomic_writes_are_private_and_reject_symlink_parents() {
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("nested");
@@ -538,5 +570,24 @@ mod tests {
         fs::write(&file, b"x").unwrap();
         remove_file_if_exists(&file).unwrap();
         remove_file_if_exists(&file).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod audit_write_tests {
+    use super::*;
+
+    #[test]
+    fn write_new_file_never_exposes_partial_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reservation.json");
+        write_new_file(&path, &serde_json::json!({"value": 1})).unwrap();
+        assert!(write_new_file(&path, &serde_json::json!({"value": 2})).is_err());
+        let value = read_json(&path).unwrap();
+        assert_eq!(value["value"], 1);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

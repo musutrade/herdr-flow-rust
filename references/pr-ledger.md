@@ -130,8 +130,10 @@ observer configuration/wait for the new SHA and resume the blocked task through
 
 Tests use real temporary Git repositories, atomic queue files and result/ACK/
 application/takeover transitions with an injected read-only GitHub adapter.
-They cover normal merge observation, same-PR failure repair, publication and
-dispatch interruption, duplicate/head/attempt/base boundaries, isolated writers,
-attempt limits and inherited source ranges. They do not establish a live GitHub
-publication, repair, auto-merge, trusted Check or running-watcher reload. A fresh
-session reuses unchanged evidence; raw logs and task state stay outside the repo.
+They cover a happy-path prepare/observe/reconcile flow, repair-intent units and
+some writer/head/base boundaries. They do **not** cover same-PR failure repair,
+publication or dispatch interruption, duplicate/head/attempt recovery or the full
+V1 regression set; the Rust audit found these unported. They do not establish a
+live GitHub publication, repair, auto-merge, trusted Check or running-watcher
+reload. A fresh session reuses unchanged evidence; raw logs and task state stay
+outside the repo.

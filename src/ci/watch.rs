@@ -371,7 +371,13 @@ fn job_name_strings(items: &[J]) -> Result<Vec<String>> {
 }
 
 fn validate_workflow_decision(spec: &J, jobs: &[String]) -> Result<()> {
-    let decision = model::string_or(spec, "decision", "workflow");
+    let decision = match model::get(spec, "decision") {
+        None => "workflow".to_string(),
+        Some(value) => value
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| watch_error("decision must be workflow or required_jobs"))?,
+    };
     require_known_decision(&decision)?;
     require_required_job_shape(&decision, jobs)
 }
@@ -1132,7 +1138,7 @@ fn ready_watch_state(
 ) -> Result<WatchState> {
     let meta = observer_identity(&root, &config_hash, &config)?;
     // Ready means this exact process owns the lock and the identity matches.
-    notifier.notify(json!({"ready": true}));
+    notifier.notify(json!({"ready": true, "pid": std::process::id()}));
     Ok(watch_state_from_parts(
         config,
         config_hash,
@@ -1258,7 +1264,7 @@ fn confirm_background_ready(child: &mut BackgroundChild) -> Result<()> {
 }
 
 fn acceptable_background_pid(ready_pid: i64, pid: u32) -> bool {
-    ready_pid == 0 || ready_pid == pid as i64
+    ready_pid == pid as i64
 }
 
 fn reject_background_child<T>(child: &mut BackgroundChild, ready: &J) -> Result<T> {

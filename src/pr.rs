@@ -70,7 +70,13 @@ fn provenance_repo(spec: &J) -> Result<(String, String)> {
     {
         return Err(FlowError::progress("explicit owner/repo required"));
     }
-    let host = model::string_or(spec, "host", "github.com");
+    let host = match model::get(spec, "host") {
+        None => "github.com".to_string(),
+        Some(value) => value
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| FlowError::progress("invalid PR host"))?,
+    };
     if !regex::Regex::new(r"^[A-Za-z0-9.-]+$")
         .expect("static host regex")
         .is_match(&host)
@@ -168,7 +174,7 @@ fn provenance_record(
     merges: String,
 ) -> Result<J> {
     let own = provenance_lines(&own);
-    let expected = provenance_expected(spec);
+    let expected = provenance_expected(spec)?;
     if provenance_invalid(&own, expected.as_ref(), &merges) {
         return Err(FlowError::progress(
             "own_commits must exactly match the nonempty ordered linear original_base..head range (max 256)",
@@ -185,14 +191,19 @@ fn provenance_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn provenance_expected(spec: &J) -> Option<Vec<String>> {
-    model::array_field(spec, "own_commits").map(|items| {
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToString::to_string)
-            .collect()
-    })
+fn provenance_expected(spec: &J) -> Result<Option<Vec<String>>> {
+    let Some(items) = model::array_field(spec, "own_commits") else {
+        return Ok(None);
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| FlowError::progress("own_commits entries must be full SHAs"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
 }
 
 fn provenance_invalid(own: &[String], expected: Option<&Vec<String>>, merges: &str) -> bool {
@@ -480,7 +491,7 @@ fn dependency_landing_changed(info: &DependencyInfo, r: &J) -> bool {
         model::string(&info.landing, "head") != model::string(&info.dep, "head"),
         model::string(&info.landing, "base_ref") != model::string(r, "base_ref"),
         model::string(&info.landing, "repo") != model::string(r, "repo"),
-        model::string(&info.landing, "number") != model::string(&info.dr, "number"),
+        model::int(&info.landing, "number") != model::int(&info.dr, "number"),
     ]
     .into_iter()
     .any(|changed| changed)
@@ -834,16 +845,16 @@ fn publication_dependencies(
     s: &mut J,
     now: f64,
     t: J,
-    r: J,
+    mut r: J,
     authorization: String,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    publication_require_dependencies(s, &r, api)?;
+    publication_require_dependencies(s, &mut r, api)?;
     publication_kind(s, now, t, r, authorization, api)
 }
 
-fn publication_require_dependencies(s: &J, r: &J, api: &dyn GitHubApi) -> Result<()> {
-    let dependency = dependency_state(s, &mut r.clone(), Some(api), None)?;
+fn publication_require_dependencies(s: &J, r: &mut J, api: &dyn GitHubApi) -> Result<()> {
+    let dependency = dependency_state(s, r, Some(api), None)?;
     publication_no_dependency(dependency)
 }
 

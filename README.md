@@ -2,7 +2,7 @@
 
 通过 Herdr 编排 issue 开发，以任务交接和独立 CI 监控减少 agent 长会话。
 
-本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个静态二进制 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 1.19.3 仅作为监控阶段适配器。
+本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 1.19.3 仅作为监控阶段适配器。
 
 ## 当前功能
 
@@ -129,7 +129,7 @@ herdr-flow queue metrics --state-dir /absolute/queue --json
 - **命令与路径**：原生 Codex 的 Herdr 客户端和 shell 插值路径拒绝元字符；batch Git 仅允许白名单命令、拒绝全局配置覆盖并设置超时；工作区须为绝对路径且不得重叠。
 - **文件与传输**：状态/交接文件原子替换并限制为 0600，父目录不能是符号链接；app-server socket 必须属于当前用户且非全局可写；JSON-RPC 限制消息大小与嵌套深度，外部 Checks 清单最多 32 项，超过 1000 个 Check suite 时拒绝判定；错误输出会脱敏。
 - **平台与能力**：上下文守护/自动换班仅在 Linux 验证；缺少 `/proc`、Unix socket 或 app-server 方法时明确失败。
-- 历史 Python 审计快照见 [SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)；该报告是时点记录，Rust 实现以当前源码和测试为准。
+- 历史 Python 审计快照见 [SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)；Rust 移植的审计（含 live 验收缺口、CRAP 门禁口径和未修复项）见 [AUDIT_REPORT_2026-10-19.md](AUDIT_REPORT_2026-10-19.md)。
 
 ## 验证
 
@@ -148,7 +148,7 @@ Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `carg
 - 每个函数的 `CRAP = CC² × (1 - coverage)³ + CC` 必须不超过 10。
 - CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。
 - 高复杂度函数必须拆分为小函数；低覆盖函数需要补测试。
-- 当前全库 3817 个函数均通过绝对阈值检查，行覆盖约 63%。
+- 当前门禁测量 4,065 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 65.9%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
 
 ```bash
 # 需要先安装 cargo-llvm-cov

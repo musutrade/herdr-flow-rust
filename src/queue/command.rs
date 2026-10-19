@@ -299,12 +299,14 @@ fn claim_writer_reserved(s: &mut J, mut t: J, cwd: &str, session: &str) -> Resul
 
 fn claim_after_accept(s: &mut J, t: J, cwd: &str, session: &str, invocation: &str) -> Result<()> {
     let t = claim_writer(s, t, cwd, session)?;
-    claim_store(s, t, invocation);
-    Ok(())
+    claim_store(s, t, invocation)
 }
 
-fn claim_store(s: &mut J, mut t: J, invocation: &str) {
-    t["writer"]["evidence"] = json!(invocation);
+fn claim_store(s: &mut J, mut t: J, invocation: &str) -> Result<()> {
+    let writer = model::get_mut(&mut t, "writer")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| queue_error("managed command writer must be a JSON object"))?;
+    writer.insert("evidence".to_string(), json!(invocation));
     t["phase"] = json!("executing");
     let version = model::int(&t, "state_version").unwrap_or(0) + 1;
     t["state_version"] = json!(version);
@@ -316,6 +318,7 @@ fn claim_store(s: &mut J, mut t: J, invocation: &str) {
     );
     let task_name = model::string(&t, "task").unwrap_or_default();
     s["tasks"][&task_name] = t;
+    Ok(())
 }
 
 fn reserve(
@@ -347,7 +350,7 @@ fn reserve(
     Ok((folder, record))
 }
 
-fn execute(folder: &Path, argv: &[String], cwd: &str, record: J) -> (String, String) {
+fn execute(folder: &Path, argv: &[String], cwd: &str, record: J) -> Result<(String, String)> {
     let (logs, error) = open_logs(folder);
     if let Some(error) = error {
         return record_start_failure(folder, record, error);
@@ -377,15 +380,15 @@ fn open_logs(folder: &Path) -> (Option<(File, File)>, Option<String>) {
     (logs, error)
 }
 
-fn record_start_failure(folder: &Path, mut record: J, error: String) -> (String, String) {
+fn record_start_failure(folder: &Path, mut record: J, error: String) -> Result<(String, String)> {
     record["error"] = json!("LogError");
     record["error_detail"] = json!(error);
     record["finished_at"] = json!(util::now());
-    let _ = util::atomic_write_json(&folder.join("result.json"), &record);
-    (
+    util::atomic_write_json(&folder.join("result.json"), &record)?;
+    Ok((
         "decision".to_string(),
         "Command could not start; inspect retained invocation and result".to_string(),
-    )
+    ))
 }
 
 fn execute_spawn(
@@ -395,7 +398,7 @@ fn execute_spawn(
     record: J,
     stdout: File,
     stderr: File,
-) -> (String, String) {
+) -> Result<(String, String)> {
     let mut command = Command::new(&argv[0]);
     command
         .args(&argv[1..])
@@ -411,17 +414,21 @@ fn execute_spawn(
     execute_child(folder, record, &mut child)
 }
 
-fn record_spawn_failure(folder: &Path, mut record: J, kind: String) -> (String, String) {
+fn record_spawn_failure(folder: &Path, mut record: J, kind: String) -> Result<(String, String)> {
     record["error"] = json!(kind);
     record["finished_at"] = json!(util::now());
-    let _ = util::atomic_write_json(&folder.join("result.json"), &record);
-    (
+    util::atomic_write_json(&folder.join("result.json"), &record)?;
+    Ok((
         "decision".to_string(),
         "Command could not start; inspect retained invocation and result".to_string(),
-    )
+    ))
 }
 
-fn execute_child(folder: &Path, record: J, child: &mut std::process::Child) -> (String, String) {
+fn execute_child(
+    folder: &Path,
+    record: J,
+    child: &mut std::process::Child,
+) -> Result<(String, String)> {
     let mut record = record;
     record["child_pid"] = json!(child.id());
     let _ = util::atomic_write_json(&folder.join("process.json"), &record);
@@ -444,27 +451,27 @@ fn record_wait_success(
     folder: &Path,
     mut record: J,
     status: std::process::ExitStatus,
-) -> (String, String) {
+) -> Result<(String, String)> {
     let code = exit_code(status);
     record["exit_code"] = json!(code);
     record["finished_at"] = json!(util::now());
-    let _ = util::atomic_write_json(&folder.join("result.json"), &record);
+    util::atomic_write_json(&folder.join("result.json"), &record)?;
     let outcome = if code == 0 { "complete" } else { "failed" };
-    (
+    Ok((
         outcome.to_string(),
         format!("Command exited with status {code}; this is execution status, not review approval"),
-    )
+    ))
 }
 
-fn record_wait_failure(folder: &Path, mut record: J, detail: String) -> (String, String) {
+fn record_wait_failure(folder: &Path, mut record: J, detail: String) -> Result<(String, String)> {
     record["error"] = json!("WaitError");
     record["error_detail"] = json!(detail);
     record["finished_at"] = json!(util::now());
-    let _ = util::atomic_write_json(&folder.join("result.json"), &record);
-    (
+    util::atomic_write_json(&folder.join("result.json"), &record)?;
+    Ok((
         "decision".to_string(),
         "Command could not be awaited; inspect retained invocation and result".to_string(),
-    )
+    ))
 }
 
 fn signal_result(root: &Path, wait_id: &str, outcome: &str, message: &str, folder: &Path) {
@@ -509,7 +516,7 @@ pub fn run_command(root: &Path, wait_id: &str, argv_spec: &J, cwd: &str) -> Resu
             session.as_deref(),
         )?
     };
-    let (outcome, message) = execute(&folder, &argv, &cwd, record);
+    let (outcome, message) = execute(&folder, &argv, &cwd, record)?;
     signal_result(root, wait_id, &outcome, &message, &folder);
     Ok(if outcome == "complete" { 0 } else { 1 })
 }

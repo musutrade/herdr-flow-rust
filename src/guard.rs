@@ -709,8 +709,12 @@ fn transcript_state_parse(
 
 fn transcript_consume(data: &[u8], start: usize, state: &mut J) -> Result<usize> {
     let mut offset = start;
-    data[start..]
-        .split_inclusive(|byte| *byte == b'\n')
+    let Some(tail) = data.get(start..) else {
+        return Err(guard_error(
+            "transcript cursor exceeds file size; rescan required",
+        ));
+    };
+    tail.split_inclusive(|byte| *byte == b'\n')
         .take_while(|line| line.ends_with(b"\n"))
         .try_for_each(|line| {
             transcript_scan_line(line, state)?;
@@ -2855,6 +2859,32 @@ fn guarded_once_error(root: &Path, h: &mut dyn GuardAdapter, notify: bool, error
     guard_failure(root, h, notify, &error)
 }
 
+fn guard_failure_without_adapter(root: &Path, error: &FlowError) -> J {
+    let mut s = read_state_or_empty(root);
+    if guard_failure_attention(&s) {
+        return s;
+    }
+    let transient = guard_failure_transient(error);
+    let message = guard_failure_message(error);
+    guard_failure_log(&s, error, transient);
+    let phase = model::string(&s, "phase").unwrap_or_default();
+    if guard_failure_observed(transient, &phase) {
+        let count = model::u64_field(&s, "transient_errors").unwrap_or(0) + 1;
+        s["transient_errors"] = json!(count);
+        s["last_transient_error"] = json!(message);
+        if count < TRANSIENT_LIMIT {
+            let _ = save(root, &mut s);
+            return s;
+        }
+    }
+    s["error"] = json!(message);
+    s["phase_before_error"] = json!(phase);
+    s["phase"] = json!("needs_attention");
+    model::remove(&mut s, "transient_errors");
+    let _ = save(root, &mut s);
+    s
+}
+
 pub fn watch(root: &Path, ready_fd: Option<std::os::fd::RawFd>, one: bool) -> Result<()> {
     let root = util::resolve_path(root);
     watch_service::run(
@@ -2874,14 +2904,36 @@ pub fn watch(root: &Path, ready_fd: Option<std::os::fd::RawFd>, one: bool) -> Re
             if model::string(&state, "phase").as_deref() == Some("released") {
                 return Ok(true);
             }
-            let mut h = Herdr::new(&state)?;
+            let phase = model::string(&state, "phase").unwrap_or_default();
+            if matches!(phase.as_str(), "parked" | "needs_attention") {
+                if one {
+                    print_watch_state(&state)?;
+                }
+                return Ok(false);
+            }
+            if phase == "review_config_sending" {
+                let error = guard_error(
+                    "review configuration is ambiguous; inspect then review-reconcile without replay",
+                );
+                let s = guard_failure_without_adapter(&root, &error);
+                if one {
+                    print_watch_state(&s)?;
+                }
+                return Ok(false);
+            }
+            let mut h = match Herdr::new(&state) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    let s = guard_failure_without_adapter(&root, &error);
+                    if one {
+                        print_watch_state(&s)?;
+                    }
+                    return Ok(false);
+                }
+            };
             let s = guarded_once(&root, &mut h, true);
             if one {
-                println!(
-                    "{}",
-                    serde_json::to_string(&s)
-                        .map_err(|error| FlowError::new(ErrorKind::Json, error.to_string()))?
-                );
+                print_watch_state(&s)?;
             }
             Ok(false)
         },
@@ -2890,6 +2942,15 @@ pub fn watch(root: &Path, ready_fd: Option<std::os::fd::RawFd>, one: bool) -> Re
         ready_fd,
         one,
     )
+}
+
+fn print_watch_state(s: &J) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(s)
+            .map_err(|error| FlowError::new(ErrorKind::Json, error.to_string()))?
+    );
+    Ok(())
 }
 
 fn bind_runtime(
