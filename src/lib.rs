@@ -4,8 +4,6 @@
 //! intentionally keep the JSON shapes of the original implementation so
 //! existing integrations keep working.
 
-#![allow(clippy::too_many_arguments)]
-
 pub mod batch;
 pub mod ci;
 pub mod codex;
@@ -13,6 +11,7 @@ pub mod crap;
 pub mod error;
 pub mod guard;
 pub mod herdr;
+pub mod lint_policy;
 pub mod logging;
 pub mod metrics;
 pub mod model;

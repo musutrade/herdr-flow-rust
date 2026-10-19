@@ -3148,46 +3148,24 @@ fn bind_runtime_snapshot(s: &mut J, h: &mut Herdr) -> Result<J> {
     Ok(s.clone())
 }
 
-struct InitRequest<'a> {
-    root: &'a Path,
-    pane: &'a str,
-    session: &'a str,
-    transcript_path: &'a Path,
-    task: &'a str,
-    epoch: i64,
-    role: &'a str,
-    sessions_dir: &'a Path,
-    app_socket: Option<&'a str>,
-    codex_binary: Option<&'a str>,
+/// Registration identity, transcript and runtime settings for one guard.
+pub struct InitRequest<'a> {
+    pub root: &'a Path,
+    pub pane: &'a str,
+    pub session: &'a str,
+    pub transcript_path: &'a Path,
+    pub task: &'a str,
+    pub epoch: i64,
+    pub role: &'a str,
+    pub sessions_dir: &'a Path,
+    pub app_socket: Option<&'a str>,
+    pub codex_binary: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn init(
-    root: &Path,
-    pane: &str,
-    session: &str,
-    transcript_path: &Path,
-    task: &str,
-    epoch: i64,
-    role: &str,
-    sessions_dir: &Path,
-    app_socket: Option<&str>,
-    codex_binary: Option<&str>,
-) -> Result<J> {
-    let request = InitRequest {
-        root,
-        pane,
-        session,
-        transcript_path,
-        task,
-        epoch,
-        role,
-        sessions_dir,
-        app_socket,
-        codex_binary,
-    };
-    init_session(&request)?;
-    init_transcript(&request)
+/// Validate and initialize a guard using an explicit registration request.
+pub fn init(request: &InitRequest<'_>) -> Result<J> {
+    init_session(request)?;
+    init_transcript(request)
 }
 
 fn init_session(request: &InitRequest<'_>) -> Result<()> {
@@ -3442,18 +3420,18 @@ fn cmd_init_run(args: &Args, root: &Path, inputs: &CmdInitInputs<'_>) -> Result<
 }
 
 fn cmd_init_create(args: &Args, root: &Path, inputs: &CmdInitInputs<'_>) -> Result<J> {
-    init(
+    init(&InitRequest {
         root,
-        inputs.pane,
-        inputs.session,
-        inputs.transcript,
-        inputs.task,
-        args.epoch,
-        &args.role,
-        &args.sessions_dir,
-        args.app_server_socket.as_deref(),
-        args.codex_binary.as_deref(),
-    )
+        pane: inputs.pane,
+        session: inputs.session,
+        transcript_path: inputs.transcript,
+        task: inputs.task,
+        epoch: args.epoch,
+        role: &args.role,
+        sessions_dir: &args.sessions_dir,
+        app_socket: args.app_server_socket.as_deref(),
+        codex_binary: args.codex_binary.as_deref(),
+    })
 }
 
 fn cmd_init_save(args: &Args, root: &Path, mut s: J) -> Result<J> {

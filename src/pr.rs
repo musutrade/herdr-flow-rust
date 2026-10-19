@@ -16,6 +16,39 @@ use crate::progress;
 use crate::util;
 use crate::util::pyjson::{sha256_json_sorted, urlencode_query};
 
+struct RepairEvidence<'a> {
+    expected: &'a J,
+    evidence: &'a str,
+    evidence_path: &'a Path,
+}
+
+struct ObservationState {
+    working: J,
+    source: PathBuf,
+    result: J,
+    digest: String,
+}
+
+struct WorkflowIdentity<'a> {
+    file: &'a str,
+    event: &'a str,
+}
+
+struct PullRequestState {
+    task: J,
+    record: J,
+}
+
+struct PreparationPolicy {
+    issue: i64,
+    max_repairs: i64,
+}
+
+struct RepositoryIdentity {
+    repo: String,
+    host: String,
+}
+
 pub fn sha(value: Option<&J>) -> Result<String> {
     let value = value.and_then(Value::as_str).unwrap_or_default();
     if !model::is_full_sha(value) {
@@ -108,66 +141,71 @@ pub fn provenance(spec: &J) -> Result<J> {
 
 fn provenance_with_checkout(spec: &J, cwd: PathBuf) -> Result<J> {
     let (repo, host) = provenance_repo(spec)?;
-    provenance_with_origin(spec, cwd, repo, host)
+    provenance_with_origin(spec, cwd, RepositoryIdentity { repo, host })
 }
 
-fn provenance_with_origin(spec: &J, cwd: PathBuf, repo: String, host: String) -> Result<J> {
-    provenance_origin(&cwd, &repo, &host)?;
-    provenance_base(spec, cwd, repo, host)
+fn provenance_with_origin(
+    spec: &J,
+    cwd: PathBuf,
+    repository_identity: RepositoryIdentity,
+) -> Result<J> {
+    provenance_origin(&cwd, &repository_identity.repo, &repository_identity.host)?;
+    provenance_base(spec, cwd, repository_identity)
 }
 
-fn provenance_base(spec: &J, cwd: PathBuf, repo: String, host: String) -> Result<J> {
+fn provenance_base(spec: &J, cwd: PathBuf, repository_identity: RepositoryIdentity) -> Result<J> {
     let base = sha(model::get(spec, "original_base"))?;
-    provenance_head(spec, cwd, repo, host, base)
+    provenance_head(spec, cwd, repository_identity, base)
 }
 
-fn provenance_head(spec: &J, cwd: PathBuf, repo: String, host: String, base: String) -> Result<J> {
+fn provenance_head(
+    spec: &J,
+    cwd: PathBuf,
+    repository_identity: RepositoryIdentity,
+    base: String,
+) -> Result<J> {
     let head = sha(model::get(spec, "head"))?;
-    provenance_ancestor(spec, cwd, repo, host, base, head)
+    provenance_ancestor(spec, cwd, repository_identity, base, head)
 }
 
 fn provenance_ancestor(
     spec: &J,
     cwd: PathBuf,
-    repo: String,
-    host: String,
+    repository_identity: RepositoryIdentity,
     base: String,
     head: String,
 ) -> Result<J> {
     git(&cwd, &["merge-base", "--is-ancestor", &base, &head])?;
-    provenance_commits(spec, cwd, repo, host, base, head)
+    provenance_commits(spec, cwd, repository_identity, base, head)
 }
 
 fn provenance_commits(
     spec: &J,
     cwd: PathBuf,
-    repo: String,
-    host: String,
+    repository_identity: RepositoryIdentity,
     base: String,
     head: String,
 ) -> Result<J> {
     let own = git(&cwd, &["rev-list", "--reverse", &format!("{base}..{head}")])?;
-    provenance_merges(spec, cwd, repo, host, base, head, own)
+    provenance_merges(spec, cwd, repository_identity, base, head, own)
 }
 
 fn provenance_merges(
     spec: &J,
     cwd: PathBuf,
-    repo: String,
-    host: String,
+    repository_identity: RepositoryIdentity,
     base: String,
     head: String,
     own: String,
 ) -> Result<J> {
     let merges = git(&cwd, &["rev-list", "--merges", &format!("{base}..{head}")])?;
-    provenance_record(spec, cwd, repo, host, base, head, own, merges)
+    provenance_record(spec, cwd, repository_identity, base, head, own, merges)
 }
 
 fn provenance_record(
     spec: &J,
     cwd: PathBuf,
-    repo: String,
-    host: String,
+    repository_identity: RepositoryIdentity,
     base: String,
     head: String,
     own: String,
@@ -180,7 +218,13 @@ fn provenance_record(
             "own_commits must exactly match the nonempty ordered linear original_base..head range (max 256)",
         ));
     }
-    Ok(provenance_document(cwd, repo, host, base, head, own))
+    Ok(provenance_document(
+        cwd,
+        repository_identity,
+        base,
+        head,
+        own,
+    ))
 }
 
 fn provenance_lines(text: &str) -> Vec<String> {
@@ -219,16 +263,15 @@ fn provenance_invalid(own: &[String], expected: Option<&Vec<String>>, merges: &s
 
 fn provenance_document(
     cwd: PathBuf,
-    repo: String,
-    host: String,
+    repository_identity: RepositoryIdentity,
     original_base: String,
     head: String,
     own_commits: Vec<String>,
 ) -> J {
     json!({
         "checkout": cwd.display().to_string(),
-        "repo": repo,
-        "host": host,
+        "repo": repository_identity.repo,
+        "host": repository_identity.host,
         "original_base": original_base,
         "head": head,
         "own_commits": own_commits
@@ -596,7 +639,14 @@ fn prepare_max_repairs(s: &mut J, spec: &J, now: f64, t: J, record: J, issue: i6
     if !(1..=10).contains(&max_repairs) {
         return Err(FlowError::progress("max_repairs must be 1..10"));
     }
-    prepare_dependencies(s, spec, now, t, record, issue, max_repairs)
+    prepare_dependencies(
+        s,
+        spec,
+        now,
+        t,
+        record,
+        PreparationPolicy { issue, max_repairs },
+    )
 }
 
 fn prepare_max_repairs_value(spec: &J) -> i64 {
@@ -619,11 +669,10 @@ fn prepare_dependencies(
     now: f64,
     t: J,
     record: J,
-    issue: i64,
-    max_repairs: i64,
+    preparation_policy: PreparationPolicy,
 ) -> Result<J> {
     let resolved = prepare_resolve_dependencies(s, spec, &record, &t)?;
-    prepare_target_base(s, spec, now, t, record, resolved, issue, max_repairs)
+    prepare_target_base(s, spec, now, t, record, resolved, preparation_policy)
 }
 
 fn prepare_resolve_dependencies(s: &J, spec: &J, record: &J, t: &J) -> Result<Vec<J>> {
@@ -760,11 +809,10 @@ fn prepare_target_base(
     t: J,
     record: J,
     resolved: Vec<J>,
-    issue: i64,
-    max_repairs: i64,
+    preparation_policy: PreparationPolicy,
 ) -> Result<J> {
     let target_base = sha(model::get(spec, "target_base"))?;
-    prepare_assemble(s, now, t, record, resolved, issue, max_repairs, target_base)
+    prepare_assemble(s, now, t, record, resolved, preparation_policy, target_base)
 }
 
 fn prepare_assemble(
@@ -773,14 +821,13 @@ fn prepare_assemble(
     mut t: J,
     mut record: J,
     resolved: Vec<J>,
-    issue: i64,
-    max_repairs: i64,
+    preparation_policy: PreparationPolicy,
     target_base: String,
 ) -> Result<J> {
-    record["issue"] = json!(issue);
+    record["issue"] = json!(preparation_policy.issue);
     record["dependencies"] = Value::Array(resolved);
     record["number"] = Value::Null;
-    record["max_repairs"] = json!(max_repairs);
+    record["max_repairs"] = json!(preparation_policy.max_repairs);
     record["repairs"] = json!({});
     record["versions"] = json!([]);
     record["phase"] = json!("publication_prepared");
@@ -806,17 +853,22 @@ fn publication_record(s: &mut J, spec: &J, now: f64, t: J) -> Result<J> {
     let r = model::get(&t, "pr")
         .cloned()
         .ok_or_else(|| FlowError::progress("PR provenance is unavailable"))?;
-    publication_authorization(s, spec, now, t, r)
+    publication_authorization(s, spec, now, PullRequestState { task: t, record: r })
 }
 
-fn publication_authorization(s: &mut J, spec: &J, now: f64, t: J, r: J) -> Result<J> {
+fn publication_authorization(
+    s: &mut J,
+    spec: &J,
+    now: f64,
+    pull_request_state: PullRequestState,
+) -> Result<J> {
     let authorization = model::string(spec, "authorization").unwrap_or_default();
-    if !publication_authorized(&t, &authorization) {
+    if !publication_authorized(&pull_request_state.task, &authorization) {
         return Err(FlowError::progress(
             "publication requires an existing explicit publication authorization",
         ));
     }
-    publication_phase(s, now, t, r, authorization)
+    publication_phase(s, now, pull_request_state, authorization)
 }
 
 fn publication_authorized(t: &J, authorization: &str) -> bool {
@@ -825,32 +877,41 @@ fn publication_authorized(t: &J, authorization: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn publication_phase(s: &mut J, now: f64, t: J, r: J, authorization: String) -> Result<J> {
-    let op_phase = model::dig_str(&r, &["publication", "phase"]);
+fn publication_phase(
+    s: &mut J,
+    now: f64,
+    pull_request_state: PullRequestState,
+    authorization: String,
+) -> Result<J> {
+    let op_phase = model::dig_str(&pull_request_state.record, &["publication", "phase"]);
     if op_phase.as_deref() != Some("prepared") {
         return Err(FlowError::progress(
             "publication may already have executed; reconcile, never replay",
         ));
     }
-    publication_check_inputs(s, now, t, r, authorization)
+    publication_check_inputs(s, now, pull_request_state, authorization)
 }
 
-fn publication_check_inputs(s: &mut J, now: f64, t: J, r: J, authorization: String) -> Result<J> {
-    let api = GitHub::new(r.clone());
-    publication_check(s, &t, now, Some(&api))?;
-    publication_dependencies(s, now, t, r, authorization, &api)
+fn publication_check_inputs(
+    s: &mut J,
+    now: f64,
+    pull_request_state: PullRequestState,
+    authorization: String,
+) -> Result<J> {
+    let api = GitHub::new(pull_request_state.record.clone());
+    publication_check(s, &pull_request_state.task, now, Some(&api))?;
+    publication_dependencies(s, now, pull_request_state, authorization, &api)
 }
 
 fn publication_dependencies(
     s: &mut J,
     now: f64,
-    t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     authorization: String,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    publication_require_dependencies(s, &mut r, api)?;
-    publication_kind(s, now, t, r, authorization, api)
+    publication_require_dependencies(s, &mut pull_request_state.record, api)?;
+    publication_kind(s, now, pull_request_state, authorization, api)
 }
 
 fn publication_require_dependencies(s: &J, r: &mut J, api: &dyn GitHubApi) -> Result<()> {
@@ -870,40 +931,38 @@ fn publication_no_dependency(dependency: Option<String>) -> Result<()> {
 fn publication_kind(
     s: &mut J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     authorization: String,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let kind = model::dig_str(&r, &["publication", "kind"]).unwrap_or_else(|| "create".to_string());
-    publication_update(s, now, t, r, authorization, api, kind)
+    let kind = model::dig_str(&pull_request_state.record, &["publication", "kind"])
+        .unwrap_or_else(|| "create".to_string());
+    publication_update(s, now, pull_request_state, authorization, api, kind)
 }
 
 fn publication_update(
     s: &mut J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     authorization: String,
     api: &dyn GitHubApi,
     kind: String,
 ) -> Result<J> {
     if kind == "update" {
-        return publication_update_checked(s, now, t, r, authorization, api);
+        return publication_update_checked(s, now, pull_request_state, authorization, api);
     }
-    publication_commit(s, now, t, authorization)
+    publication_commit(s, now, pull_request_state.task, authorization)
 }
 
 fn publication_update_checked(
     s: &mut J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     authorization: String,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    publication_check_update(&r, api)?;
-    publication_commit(s, now, t, authorization)
+    publication_check_update(&pull_request_state.record, api)?;
+    publication_commit(s, now, pull_request_state.task, authorization)
 }
 
 fn publication_check_update(r: &J, api: &dyn GitHubApi) -> Result<()> {
@@ -1258,46 +1317,61 @@ fn reconcile_started(s: &mut J, now: f64, api: Option<&dyn GitHubApi>, t: J) -> 
     let r = model::get(&t, "pr")
         .cloned()
         .ok_or_else(|| FlowError::progress("PR provenance is unavailable"))?;
-    reconcile_api(s, now, api, t, r)
+    reconcile_api(s, now, api, PullRequestState { task: t, record: r })
 }
 
-fn reconcile_api(s: &mut J, now: f64, api: Option<&dyn GitHubApi>, t: J, r: J) -> Result<J> {
+fn reconcile_api(
+    s: &mut J,
+    now: f64,
+    api: Option<&dyn GitHubApi>,
+    pull_request_state: PullRequestState,
+) -> Result<J> {
     if let Some(api) = api {
-        return reconcile_lookup(s, now, api, t, r);
+        return reconcile_lookup(s, now, api, pull_request_state);
     }
-    let owned = GitHub::new(r.clone());
-    reconcile_lookup(s, now, &owned, t, r)
+    let owned = GitHub::new(pull_request_state.record.clone());
+    reconcile_lookup(s, now, &owned, pull_request_state)
 }
 
-fn reconcile_lookup(s: &mut J, now: f64, api: &dyn GitHubApi, t: J, r: J) -> Result<J> {
-    let Some(pr) = recover_pr(api, &r)? else {
-        return reconcile_not_found(s, now, t, r);
+fn reconcile_lookup(
+    s: &mut J,
+    now: f64,
+    api: &dyn GitHubApi,
+    pull_request_state: PullRequestState,
+) -> Result<J> {
+    let Some(pr) = recover_pr(api, &pull_request_state.record)? else {
+        return reconcile_not_found(s, now, pull_request_state);
     };
-    reconcile_found(s, now, api, t, r, pr)
+    reconcile_found(s, now, api, pull_request_state, pr)
 }
 
-fn reconcile_not_found(s: &mut J, now: f64, mut t: J, mut r: J) -> Result<J> {
-    r["phase"] = json!("publication_unconfirmed");
-    t["pr"] = r;
-    store(s, t, now, "pr_not_found")
+fn reconcile_not_found(s: &mut J, now: f64, mut pull_request_state: PullRequestState) -> Result<J> {
+    pull_request_state.record["phase"] = json!("publication_unconfirmed");
+    pull_request_state.task["pr"] = pull_request_state.record;
+    store(s, pull_request_state.task, now, "pr_not_found")
 }
 
-fn reconcile_found(s: &mut J, now: f64, api: &dyn GitHubApi, t: J, r: J, pr: J) -> Result<J> {
+fn reconcile_found(
+    s: &mut J,
+    now: f64,
+    api: &dyn GitHubApi,
+    pull_request_state: PullRequestState,
+    pr: J,
+) -> Result<J> {
     let actual = sha(model::get(&pr, "head").and_then(|head| head.get("sha")))?;
-    reconcile_found_remote(s, now, api, t, r, pr, actual)
+    reconcile_found_remote(s, now, api, pull_request_state, pr, actual)
 }
 
 fn reconcile_found_remote(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     pr: J,
     actual: String,
 ) -> Result<J> {
     let remote = reconcile_remote(&pr, &actual, now)?;
-    reconcile_dependency(s, now, api, t, r, pr, actual, remote)
+    reconcile_dependency(s, now, api, pull_request_state, pr, actual, remote)
 }
 
 fn reconcile_remote(pr: &J, actual: &str, now: f64) -> Result<J> {
@@ -1318,49 +1392,59 @@ fn reconcile_dependency(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     pr: J,
     actual: String,
     remote: J,
 ) -> Result<J> {
-    r["remote"] = remote;
-    r["observation"] = Value::Null;
-    let remote_base = model::dig_str(&r, &["remote", "base"]);
-    let dependency = dependency_state(s, &mut r, Some(api), remote_base.as_deref())?;
-    reconcile_decision(s, now, api, t, r, pr, actual, dependency)
+    pull_request_state.record["remote"] = remote;
+    pull_request_state.record["observation"] = Value::Null;
+    let remote_base = model::dig_str(&pull_request_state.record, &["remote", "base"]);
+    let dependency = dependency_state(
+        s,
+        &mut pull_request_state.record,
+        Some(api),
+        remote_base.as_deref(),
+    )?;
+    reconcile_decision(s, now, api, pull_request_state, pr, actual, dependency)
 }
 
 fn reconcile_decision(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    mut t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     pr: J,
     actual: String,
     dependency: Option<String>,
 ) -> Result<J> {
     if let Some(dependency) = dependency {
-        r["phase"] = json!(dependency);
-        t["pr"] = r;
-        return store(s, t, now, "pr_dependency_decision");
+        pull_request_state.record["phase"] = json!(dependency);
+        pull_request_state.task["pr"] = pull_request_state.record;
+        return store(s, pull_request_state.task, now, "pr_dependency_decision");
     }
-    reconcile_classify(s, now, api, t, r, pr, actual)
+    reconcile_classify(s, now, api, pull_request_state, pr, actual)
 }
 
 fn reconcile_classify(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    mut t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     pr: J,
     actual: String,
 ) -> Result<J> {
-    classify_pr(s, &t, &mut r, &pr, &actual, now, api)?;
-    t["pr"] = r;
-    store(s, t, now, "pr_reconciled")
+    classify_pr(
+        s,
+        &pull_request_state.task,
+        &mut pull_request_state.record,
+        &pr,
+        &actual,
+        now,
+        api,
+    )?;
+    pull_request_state.task["pr"] = pull_request_state.record;
+    store(s, pull_request_state.task, now, "pr_reconciled")
 }
 
 type ObserverData = (PathBuf, J, J, String);
@@ -1510,12 +1594,7 @@ impl WorkflowScan {
     }
 }
 
-fn inspect_workflows(
-    api: &dyn GitHubApi,
-    r: &J,
-    config: &J,
-    result: &J,
-) -> Result<(Vec<J>, Vec<J>)> {
+fn inspect_workflows(api: &dyn GitHubApi, r: &J, config: &J, result: &J) -> Result<WorkflowScan> {
     let workflows = model::array_field(config, "workflows")
         .cloned()
         .unwrap_or_default();
@@ -1524,7 +1603,7 @@ fn inspect_workflows(
         .try_fold(WorkflowScan::new(), |scan, workflow| {
             inspect_workflow(api, r, result, scan, workflow)
         })?;
-    Ok((scan.failures, scan.runs_seen))
+    Ok(scan)
 }
 
 fn inspect_workflow(
@@ -1536,29 +1615,45 @@ fn inspect_workflow(
 ) -> Result<WorkflowScan> {
     let file = model::string(&workflow, "file").unwrap_or_default();
     let event = model::string(&workflow, "event").unwrap_or_default();
-    let rows = inspect_workflow_rows(result, &file, &event);
+    let rows = inspect_workflow_rows(
+        result,
+        &WorkflowIdentity {
+            file: &file,
+            event: &event,
+        },
+    );
     if !inspect_workflow_exact(&rows, &workflow) {
         return Err(FlowError::progress(
             "repair observation requires exact required_jobs inventory",
         ));
     }
-    inspect_workflow_row(api, r, scan, &workflow, &file, &event, &rows)
+    inspect_workflow_row(
+        api,
+        r,
+        scan,
+        &workflow,
+        &WorkflowIdentity {
+            file: &file,
+            event: &event,
+        },
+        &rows,
+    )
 }
 
-fn inspect_workflow_rows(result: &J, file: &str, event: &str) -> Vec<J> {
+fn inspect_workflow_rows(result: &J, workflow_identity: &WorkflowIdentity<'_>) -> Vec<J> {
     model::array_field(result, "workflows")
         .map(|rows| {
             rows.iter()
-                .filter(|row| inspect_workflow_row_matches(row, file, event))
+                .filter(|row| inspect_workflow_row_matches(row, workflow_identity))
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn inspect_workflow_row_matches(row: &J, file: &str, event: &str) -> bool {
-    model::string(row, "file").as_deref() == Some(file)
-        && model::string(row, "event").as_deref() == Some(event)
+fn inspect_workflow_row_matches(row: &J, workflow_identity: &WorkflowIdentity<'_>) -> bool {
+    model::string(row, "file").as_deref() == Some(workflow_identity.file)
+        && model::string(row, "event").as_deref() == Some(workflow_identity.event)
 }
 
 fn inspect_workflow_exact(rows: &[J], workflow: &J) -> bool {
@@ -1570,19 +1665,22 @@ fn inspect_workflow_row(
     r: &J,
     scan: WorkflowScan,
     workflow: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
     rows: &[J],
 ) -> Result<WorkflowScan> {
     let row = &rows[0];
-    let scan = inspect_workflow_seen(scan, row, file, event);
-    inspect_workflow_run(api, r, scan, workflow, row, file, event)
+    let scan = inspect_workflow_seen(scan, row, workflow_identity);
+    inspect_workflow_run(api, r, scan, workflow, row, workflow_identity)
 }
 
-fn inspect_workflow_seen(mut scan: WorkflowScan, row: &J, file: &str, event: &str) -> WorkflowScan {
+fn inspect_workflow_seen(
+    mut scan: WorkflowScan,
+    row: &J,
+    workflow_identity: &WorkflowIdentity<'_>,
+) -> WorkflowScan {
     scan.runs_seen.push(json!({
-        "workflow": file,
-        "event": event,
+        "workflow": workflow_identity.file,
+        "event": workflow_identity.event,
         "run": row.get("run_id").cloned().unwrap_or(Value::Null),
         "attempt": row.get("attempt").cloned().unwrap_or(Value::Null)
     }));
@@ -1595,13 +1693,12 @@ fn inspect_workflow_run(
     scan: WorkflowScan,
     workflow: &J,
     row: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
 ) -> Result<WorkflowScan> {
     if let Some(run_id) = model::int(row, "run_id") {
-        return inspect_workflow_verify_run(api, r, scan, workflow, row, file, event, run_id);
+        return inspect_workflow_verify_run(api, r, scan, workflow, row, workflow_identity, run_id);
     }
-    inspect_workflow_jobs(scan, workflow, row, file, event)
+    inspect_workflow_jobs(scan, workflow, row, workflow_identity)
 }
 
 fn inspect_workflow_verify_run(
@@ -1610,35 +1707,33 @@ fn inspect_workflow_verify_run(
     scan: WorkflowScan,
     workflow: &J,
     row: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
     run_id: i64,
 ) -> Result<WorkflowScan> {
     let head = model::string(r, "head").unwrap_or_default();
-    let query = urlencode_query(&[("head_sha", &head), ("event", event)]);
+    let query = urlencode_query(&[("head_sha", &head), ("event", workflow_identity.event)]);
     let runs = api.pages(
-        &format!("actions/workflows/{file}/runs?{query}"),
+        &format!("actions/workflows/{}/runs?{query}", workflow_identity.file),
         "workflow_runs",
     )?;
-    inspect_workflow_verify_attempt(scan, workflow, row, file, event, run_id, &runs, &head)
+    inspect_workflow_verify_attempt(scan, workflow, row, workflow_identity, run_id, &runs, &head)
 }
 
 fn inspect_workflow_verify_attempt(
     scan: WorkflowScan,
     workflow: &J,
     row: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
     run_id: i64,
     runs: &[J],
     head: &str,
 ) -> Result<WorkflowScan> {
-    if inspect_workflow_attempt_changed(row, event, runs, run_id, head) {
+    if inspect_workflow_attempt_changed(row, workflow_identity.event, runs, run_id, head) {
         return Err(FlowError::progress(
             "CI run/attempt changed; refresh the existing observer",
         ));
     }
-    inspect_workflow_jobs(scan, workflow, row, file, event)
+    inspect_workflow_jobs(scan, workflow, row, workflow_identity)
 }
 
 fn inspect_workflow_attempt_changed(
@@ -1675,14 +1770,13 @@ fn inspect_workflow_jobs(
     scan: WorkflowScan,
     workflow: &J,
     row: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
 ) -> Result<WorkflowScan> {
     let required = inspect_workflow_required_jobs(workflow);
     let jobs = model::array_field(row, "jobs").cloned().unwrap_or_default();
     let mut scan = scan;
     for job in jobs {
-        scan = inspect_workflow_job(scan, &required, &job, row, file, event);
+        scan = inspect_workflow_job(scan, &required, &job, row, workflow_identity);
     }
     Ok(scan)
 }
@@ -1704,14 +1798,13 @@ fn inspect_workflow_job(
     required: &std::collections::BTreeSet<String>,
     job: &J,
     row: &J,
-    file: &str,
-    event: &str,
+    workflow_identity: &WorkflowIdentity<'_>,
 ) -> WorkflowScan {
     let name = model::string(job, "name").unwrap_or_default();
     if inspect_workflow_job_failed(required, job, &name) {
         scan.failures.push(json!({
-            "workflow": file,
-            "event": event,
+            "workflow": workflow_identity.file,
+            "event": workflow_identity.event,
             "run": row.get("run_id").cloned().unwrap_or(Value::Null),
             "attempt": row.get("attempt").cloned().unwrap_or(Value::Null),
             "job": job.get("id").cloned().unwrap_or(Value::Null),
@@ -1881,7 +1974,14 @@ fn observe_task(
     let r = model::get(&t, "pr")
         .cloned()
         .ok_or_else(|| FlowError::progress("PR provenance is unavailable"))?;
-    observe_api(s, spec, now, api, working, t, r)
+    observe_api(
+        s,
+        spec,
+        now,
+        api,
+        working,
+        PullRequestState { task: t, record: r },
+    )
 }
 
 fn observe_api(
@@ -1890,14 +1990,13 @@ fn observe_api(
     now: f64,
     api: Option<&dyn GitHubApi>,
     working: J,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
 ) -> Result<J> {
     if let Some(api) = api {
-        return observe_eligible(s, spec, now, api, working, t, r);
+        return observe_eligible(s, spec, now, api, working, pull_request_state);
     }
-    let owned = GitHub::new(r.clone());
-    observe_eligible(s, spec, now, &owned, working, t, r)
+    let owned = GitHub::new(pull_request_state.record.clone());
+    observe_eligible(s, spec, now, &owned, working, pull_request_state)
 }
 
 fn observe_eligible(
@@ -1906,13 +2005,12 @@ fn observe_eligible(
     now: f64,
     api: &dyn GitHubApi,
     working: J,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
 ) -> Result<J> {
-    if !observe_phase_eligible(&r) {
-        return observe_early(s, t);
+    if !observe_phase_eligible(&pull_request_state.record) {
+        return observe_early(s, pull_request_state.task);
     }
-    observe_collect(s, spec, now, api, working, t, r)
+    observe_collect(s, spec, now, api, working, pull_request_state)
 }
 
 fn observe_phase_eligible(r: &J) -> bool {
@@ -1933,28 +2031,51 @@ fn observe_collect(
     now: f64,
     api: &dyn GitHubApi,
     working: J,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
 ) -> Result<J> {
-    let (source, result, config, digest) = load_observer(spec, &t, &r, now)?;
-    observe_workflows(s, now, api, working, t, r, source, result, config, digest)
+    let (source, result, config, digest) = load_observer(
+        spec,
+        &pull_request_state.task,
+        &pull_request_state.record,
+        now,
+    )?;
+    observe_workflows(
+        s,
+        now,
+        api,
+        ObservationState {
+            working,
+            source,
+            result,
+            digest,
+        },
+        pull_request_state,
+        config,
+    )
 }
 
 fn observe_workflows(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    working: J,
-    t: J,
-    r: J,
-    source: PathBuf,
-    result: J,
+    observation_state: ObservationState,
+    pull_request_state: PullRequestState,
     config: J,
-    digest: String,
 ) -> Result<J> {
-    let (failures, runs_seen) = inspect_workflows(api, &r, &config, &result)?;
+    let scan = inspect_workflows(
+        api,
+        &pull_request_state.record,
+        &config,
+        &observation_state.result,
+    )?;
     observe_checks(
-        s, now, api, working, t, r, source, result, config, digest, failures, runs_seen,
+        s,
+        now,
+        api,
+        observation_state,
+        pull_request_state,
+        config,
+        scan,
     )
 }
 
@@ -1962,51 +2083,56 @@ fn observe_checks(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    working: J,
-    t: J,
-    r: J,
-    source: PathBuf,
-    result: J,
+    observation_state: ObservationState,
+    pull_request_state: PullRequestState,
     config: J,
-    digest: String,
-    mut failures: Vec<J>,
-    mut runs_seen: Vec<J>,
+    mut scan: WorkflowScan,
 ) -> Result<J> {
-    let (check_failures, check_runs) = inspect_checks(api, &r, &config, &result)?;
-    failures.extend(check_failures);
-    runs_seen.extend(check_runs);
+    let (check_failures, check_runs) = inspect_checks(
+        api,
+        &pull_request_state.record,
+        &config,
+        &observation_state.result,
+    )?;
+    scan.failures.extend(check_failures);
+    scan.runs_seen.extend(check_runs);
     Ok(observe_record(
-        s, working, t, r, now, source, result, digest, failures, runs_seen,
+        s,
+        observation_state,
+        pull_request_state,
+        now,
+        scan,
     ))
 }
 
 fn observe_record(
     s: &mut J,
-    mut working: J,
-    mut t: J,
-    mut r: J,
+    mut observation_state: ObservationState,
+    mut pull_request_state: PullRequestState,
     now: f64,
-    source: PathBuf,
-    result: J,
-    digest: String,
-    mut failures: Vec<J>,
-    mut runs_seen: Vec<J>,
+    mut scan: WorkflowScan,
 ) -> J {
-    observe_sort(&mut failures, &mut runs_seen);
-    let token = observe_token(&r, &runs_seen, &digest);
-    r["observation"] = json!({
+    observe_sort(&mut scan.failures, &mut scan.runs_seen);
+    let token = observe_token(
+        &pull_request_state.record,
+        &scan.runs_seen,
+        &observation_state.digest,
+    );
+    pull_request_state.record["observation"] = json!({
         "token": token,
         "at": now,
-        "state": result.get("state").cloned().unwrap_or(Value::Null),
-        "failures": failures,
-        "source": source.join("status.json").display().to_string(),
-        "config_hash": digest
+        "state": observation_state.result.get("state").cloned().unwrap_or(Value::Null),
+        "failures": scan.failures,
+        "source": observation_state.source.join("status.json").display().to_string(),
+        "config_hash": observation_state.digest
     });
-    observe_set_phase(&mut r, &result);
-    t["pr"] = r;
-    working["tasks"][&model::string(&t, "task").unwrap_or_default()] = t.clone();
-    s["tasks"] = working["tasks"].clone();
-    t
+    observe_set_phase(&mut pull_request_state.record, &observation_state.result);
+    pull_request_state.task["pr"] = pull_request_state.record;
+    observation_state.working["tasks"]
+        [&model::string(&pull_request_state.task, "task").unwrap_or_default()] =
+        pull_request_state.task.clone();
+    s["tasks"] = observation_state.working["tasks"].clone();
+    pull_request_state.task
 }
 
 fn observe_sort(failures: &mut [J], runs_seen: &mut [J]) {
@@ -2170,9 +2296,11 @@ fn repair_intent_evidence(
         &observation,
         event,
         now,
-        &expected,
-        &evidence,
-        &evidence_path,
+        &RepairEvidence {
+            expected: &expected,
+            evidence: &evidence,
+            evidence_path: &evidence_path,
+        },
     ) {
         return Err(FlowError::progress(
             "repair requires current exact PR/head/base/required failure and matching received CI event",
@@ -2196,17 +2324,15 @@ fn repair_intent_mismatch(
     observation: &J,
     event: &J,
     now: f64,
-    expected: &J,
-    evidence: &str,
-    evidence_path: &Path,
+    repair_evidence: &RepairEvidence<'_>,
 ) -> bool {
     [
         model::string(r, "phase").as_deref() != Some("repair_needed"),
-        binding != expected,
+        binding != repair_evidence.expected,
         !(0.0..=120.0).contains(&(now - model::number(observation, "at").unwrap_or(0.0))),
         model::string(event, "outcome").as_deref() != Some("failed"),
-        evidence.is_empty(),
-        evidence_path.display().to_string()
+        repair_evidence.evidence.is_empty(),
+        repair_evidence.evidence_path.display().to_string()
             != model::string(observation, "source").unwrap_or_default(),
     ]
     .into_iter()
@@ -2668,20 +2794,25 @@ fn update_record(s: &mut J, spec: &J, now: f64, t: J) -> Result<J> {
     let r = model::get(&t, "pr")
         .cloned()
         .ok_or_else(|| FlowError::progress("PR provenance is unavailable"))?;
-    update_check(s, spec, now, t, r)
+    update_check(s, spec, now, PullRequestState { task: t, record: r })
 }
 
-fn update_check(s: &mut J, spec: &J, now: f64, t: J, r: J) -> Result<J> {
+fn update_check(s: &mut J, spec: &J, now: f64, pull_request_state: PullRequestState) -> Result<J> {
     let operation = model::string(spec, "operation").unwrap_or_default();
     let event_id = model::string(spec, "event").unwrap_or_default();
-    let op = model::dig(&t, &["operations", &operation]).cloned();
+    let op = model::dig(&pull_request_state.task, &["operations", &operation]).cloned();
     let event = model::dig(s, &["events", &event_id]).cloned();
-    if update_invalid(&t, &r, &op, &event) {
+    if update_invalid(
+        &pull_request_state.task,
+        &pull_request_state.record,
+        &op,
+        &event,
+    ) {
         return Err(FlowError::progress(
             "repair update requires applied exact accepted repair result and inspected writer release",
         ));
     }
-    update_used(s, spec, now, t, r, operation, op)
+    update_used(s, spec, now, pull_request_state, operation, op)
 }
 
 fn update_invalid(t: &J, r: &J, op: &Option<J>, event: &Option<J>) -> bool {
@@ -2736,20 +2867,19 @@ fn update_used(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     operation: String,
     op: Option<J>,
 ) -> Result<J> {
     let op = op.unwrap_or(Value::Null);
     let token = model::dig_str(&op, &["intent", "pr_repair", "token"]).unwrap_or_default();
-    let used = model::dig(&r, &["repairs", &token]).cloned();
-    if !update_used_ok(used.as_ref(), &operation, &r) {
+    let used = model::dig(&pull_request_state.record, &["repairs", &token]).cloned();
+    if !update_used_ok(used.as_ref(), &operation, &pull_request_state.record) {
         return Err(FlowError::progress(
             "repair update has no matching consumed failure intent",
         ));
     }
-    update_candidate(s, spec, now, t, r, operation, op)
+    update_candidate(s, spec, now, pull_request_state, operation, op)
 }
 
 fn update_used_ok(used: Option<&J>, operation: &str, r: &J) -> bool {
@@ -2768,13 +2898,12 @@ fn update_candidate(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     operation: String,
     op: J,
 ) -> Result<J> {
-    let candidate = update_provenance(spec, &r)?;
-    update_candidate_check(s, spec, now, t, r, operation, op, candidate)
+    let candidate = update_provenance(spec, &pull_request_state.record)?;
+    update_candidate_check(s, spec, now, pull_request_state, operation, op, candidate)
 }
 
 fn update_provenance(spec: &J, r: &J) -> Result<J> {
@@ -2797,18 +2926,17 @@ fn update_candidate_check(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     operation: String,
     op: J,
     candidate: J,
 ) -> Result<J> {
-    if update_append_invalid(&r, &candidate) {
+    if update_append_invalid(&pull_request_state.record, &candidate) {
         return Err(FlowError::progress(
             "repair must append to the registered own commits, not replace inherited changes",
         ));
     }
-    update_workspace_check(s, spec, now, t, r, operation, op, candidate)
+    update_workspace_check(s, spec, now, pull_request_state, operation, op, candidate)
 }
 
 fn update_append_invalid(r: &J, candidate: &J) -> bool {
@@ -2833,8 +2961,7 @@ fn update_workspace_check(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     operation: String,
     op: J,
     candidate: J,
@@ -2844,15 +2971,14 @@ fn update_workspace_check(
             "repair candidate must come from the accepted isolated workspace",
         ));
     }
-    update_evidence(s, spec, now, t, r, operation, candidate)
+    update_evidence(s, spec, now, pull_request_state, operation, candidate)
 }
 
 fn update_evidence(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    r: J,
+    pull_request_state: PullRequestState,
     operation: String,
     candidate: J,
 ) -> Result<J> {
@@ -2861,23 +2987,24 @@ fn update_evidence(
         "repair verification evidence",
         1000,
     )?;
-    update_versions(s, now, t, r, operation, candidate, evidence)
+    update_versions(s, now, pull_request_state, operation, candidate, evidence)
 }
 
 fn update_versions(
     s: &mut J,
     now: f64,
-    t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     operation: String,
     candidate: J,
     evidence: String,
 ) -> Result<J> {
-    let entry = update_version_entry(&r);
-    if let Some(versions) = model::get_mut(&mut r, "versions").and_then(Value::as_array_mut) {
+    let entry = update_version_entry(&pull_request_state.record);
+    if let Some(versions) =
+        model::get_mut(&mut pull_request_state.record, "versions").and_then(Value::as_array_mut)
+    {
         versions.push(entry);
     }
-    update_assign(s, now, t, r, operation, candidate, evidence)
+    update_assign(s, now, pull_request_state, operation, candidate, evidence)
 }
 
 fn update_version_entry(r: &J) -> J {
@@ -2891,18 +3018,18 @@ fn update_version_entry(r: &J) -> J {
 fn update_assign(
     s: &mut J,
     now: f64,
-    mut t: J,
-    mut r: J,
+    mut pull_request_state: PullRequestState,
     operation: String,
     candidate: J,
     evidence: String,
 ) -> Result<J> {
-    let previous = model::string(&r, "head").unwrap_or_default();
-    r["head"] = candidate.get("head").cloned().unwrap_or(Value::Null);
-    r["own_commits"] = candidate.get("own_commits").cloned().unwrap_or(Value::Null);
-    r["observation"] = Value::Null;
-    r["phase"] = json!("publication_prepared");
-    r["publication"] = json!({
+    let previous = model::string(&pull_request_state.record, "head").unwrap_or_default();
+    pull_request_state.record["head"] = candidate.get("head").cloned().unwrap_or(Value::Null);
+    pull_request_state.record["own_commits"] =
+        candidate.get("own_commits").cloned().unwrap_or(Value::Null);
+    pull_request_state.record["observation"] = Value::Null;
+    pull_request_state.record["phase"] = json!("publication_prepared");
+    pull_request_state.record["publication"] = json!({
         "kind": "update",
         "phase": "prepared",
         "previous_head": previous,
@@ -2911,10 +3038,10 @@ fn update_assign(
         "operation": operation,
         "evidence": evidence
     });
-    t["candidate"] = candidate.get("head").cloned().unwrap_or(Value::Null);
-    update_acceptance_reset(&mut t);
-    t["pr"] = r;
-    store(s, t, now, "pr_repair_update_prepared")
+    pull_request_state.task["candidate"] = candidate.get("head").cloned().unwrap_or(Value::Null);
+    update_acceptance_reset(&mut pull_request_state.task);
+    pull_request_state.task["pr"] = pull_request_state.record;
+    store(s, pull_request_state.task, now, "pr_repair_update_prepared")
 }
 
 fn update_acceptance_reset(t: &mut J) {

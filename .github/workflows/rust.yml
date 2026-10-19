@@ -20,8 +20,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Reject Clippy suppressions
+        run: cargo run --locked -- lint-policy
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Test
         run: cargo test --all-targets
       - name: Release build

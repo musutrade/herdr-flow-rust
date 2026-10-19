@@ -15,6 +15,12 @@ use crate::logging;
 use crate::model::{self, J};
 use crate::util;
 
+struct IntegrationContext<'a, 'callback> {
+    batch: &'a mut J,
+    bare: &'a Path,
+    checkpoint: &'a mut (dyn FnMut(&J) -> Result<()> + 'callback),
+}
+
 const ALLOWED_COMMANDS: &[&str] = &[
     "apply",
     "cat-file",
@@ -516,36 +522,28 @@ pub fn integrate(
     checkpoint: &mut dyn FnMut(&J) -> Result<()>,
 ) -> Result<()> {
     let bare = prepare(batch, record, checkpoint)?;
-    integrate_drive(batch, &bare, checkpoint)
+    integrate_drive(&mut IntegrationContext {
+        batch: &mut *(batch),
+        bare: &bare,
+        checkpoint: &mut *(checkpoint),
+    })
 }
 
-fn integrate_drive(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
-) -> Result<()> {
-    let limit = integration_limit(batch);
-    (0..=limit).try_for_each(|_| integrate_step_once(batch, bare, checkpoint).map(|_| ()))?;
-    integrate_finalize_if_complete(batch, bare, checkpoint)
+fn integrate_drive(integration_context: &mut IntegrationContext<'_, '_>) -> Result<()> {
+    let limit = integration_limit(integration_context.batch);
+    (0..=limit).try_for_each(|_| integrate_step_once(integration_context).map(|_| ()))?;
+    integrate_finalize_if_complete(integration_context)
 }
 
-fn integrate_step_once(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
-) -> Result<bool> {
-    if integrate_finished(batch) {
+fn integrate_step_once(integration_context: &mut IntegrationContext<'_, '_>) -> Result<bool> {
+    if integrate_finished(integration_context.batch) {
         return Ok(false);
     }
-    integrate_advance(batch, bare, checkpoint)
+    integrate_advance(integration_context)
 }
 
-fn integrate_advance(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
-) -> Result<bool> {
-    integrate_iteration(batch, bare, checkpoint)?;
+fn integrate_advance(integration_context: &mut IntegrationContext<'_, '_>) -> Result<bool> {
+    integrate_iteration(integration_context)?;
     Ok(true)
 }
 
@@ -571,28 +569,22 @@ fn integrate_offset_done(batch: &J) -> bool {
 }
 
 fn integrate_finalize_if_complete(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
 ) -> Result<()> {
-    if integrate_complete(batch) {
-        return integrate_finish(batch, bare, checkpoint);
+    if integrate_complete(integration_context.batch) {
+        return integrate_finish(integration_context);
     }
     Ok(())
 }
 
-fn integrate_finish(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
-) -> Result<()> {
+fn integrate_finish(integration_context: &mut IntegrationContext<'_, '_>) -> Result<()> {
     let integrated = output(
-        bare,
+        integration_context.bare,
         &["rev-parse".to_string(), "refs/herdr/candidate".to_string()],
     )?;
-    batch["phase"] = json!("integrated");
-    batch["integrated"] = json!(integrated);
-    checkpoint(batch)
+    integration_context.batch["phase"] = json!("integrated");
+    integration_context.batch["integrated"] = json!(integrated);
+    (integration_context.checkpoint)(integration_context.batch)
 }
 
 fn integration_limit(batch: &J) -> usize {
@@ -658,53 +650,44 @@ fn member_steps(member: &J) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn integrate_iteration(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
-) -> Result<()> {
-    let steps = integration_steps(batch);
-    let offset = integration_offset(batch);
+fn integrate_iteration(integration_context: &mut IntegrationContext<'_, '_>) -> Result<()> {
+    let steps = integration_steps(integration_context.batch);
+    let offset = integration_offset(integration_context.batch);
     let (task, source) = steps[offset].clone();
-    let parent = integration_parent(batch);
+    let parent = integration_parent(integration_context.batch);
     let actual = output(
-        bare,
+        integration_context.bare,
         &["rev-parse".to_string(), "refs/herdr/candidate".to_string()],
     )?;
-    integrate_choose(
-        batch, bare, checkpoint, offset, &task, &source, &parent, actual,
-    )
+    integrate_choose(integration_context, offset, &task, &source, &parent, actual)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_choose(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
     parent: &str,
     actual: String,
 ) -> Result<()> {
-    let journal = model::dig(batch, &["integration", "current"])
+    let journal = model::dig(integration_context.batch, &["integration", "current"])
         .cloned()
         .filter(|value| !value.is_null());
     if let Some(journal) = journal {
         return integrate_recover(
-            batch, bare, checkpoint, offset, source, parent, &actual, journal,
+            integration_context,
+            offset,
+            source,
+            parent,
+            &actual,
+            journal,
         );
     }
-    integrate_apply_step(
-        batch, bare, checkpoint, offset, task, source, parent, &actual,
-    )
+    integrate_apply_step(integration_context, offset, task, source, parent, &actual)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     source: &str,
     parent: &str,
@@ -716,7 +699,7 @@ fn integrate_recover(
             "integration journal no longer matches the frozen plan",
         ));
     }
-    integrate_recover_ref(batch, bare, checkpoint, offset, actual, parent, journal)
+    integrate_recover_ref(integration_context, offset, actual, parent, journal)
 }
 
 fn journal_mismatch(journal: &J, source: &str, parent: &str) -> bool {
@@ -724,11 +707,8 @@ fn journal_mismatch(journal: &J, source: &str, parent: &str) -> bool {
         || model::string(journal, "parent") != Some(parent.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_ref(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     actual: &str,
     parent: &str,
@@ -741,9 +721,7 @@ fn integrate_recover_ref(
         ));
     }
     integrate_recover_update(
-        batch,
-        bare,
-        checkpoint,
+        integration_context,
         offset,
         actual,
         parent,
@@ -756,11 +734,8 @@ fn integration_ref_matches(actual: &str, parent: &str, integrated: &str) -> bool
     actual == parent || actual == integrated
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_update(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     actual: &str,
     parent: &str,
@@ -768,25 +743,25 @@ fn integrate_recover_update(
     integrated: &str,
 ) -> Result<()> {
     if actual == parent {
-        return integrate_recover_move(
-            batch, bare, checkpoint, offset, parent, journal, integrated,
-        );
+        return integrate_recover_move(integration_context, offset, parent, journal, integrated);
     }
-    integrate_recover_record(batch, checkpoint, offset, journal)
+    integrate_recover_record(
+        integration_context.batch,
+        integration_context.checkpoint,
+        offset,
+        journal,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_move(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     parent: &str,
     journal: J,
     integrated: &str,
 ) -> Result<()> {
     run(
-        bare,
+        integration_context.bare,
         &[
             "update-ref".to_string(),
             "refs/herdr/candidate".to_string(),
@@ -798,7 +773,12 @@ fn integrate_recover_move(
         &BTreeMap::new(),
         false,
     )?;
-    integrate_recover_record(batch, checkpoint, offset, journal)
+    integrate_recover_record(
+        integration_context.batch,
+        integration_context.checkpoint,
+        offset,
+        journal,
+    )
 }
 
 fn integrate_recover_record(
@@ -822,11 +802,8 @@ fn push_integration_mapping(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_apply_step(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -838,38 +815,30 @@ fn integrate_apply_step(
             "unaccounted integration ref; inspect without replay",
         ));
     }
-    integrate_read_tree(batch, bare, checkpoint, offset, task, source, parent)
+    integrate_read_tree(integration_context, offset, task, source, parent)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_read_tree(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
     parent: &str,
 ) -> Result<()> {
-    let index = integration_index(batch);
+    let index = integration_index(integration_context.batch);
     run(
-        bare,
+        integration_context.bare,
         &["read-tree".to_string(), parent.to_string()],
         None,
         Some(&index),
         &BTreeMap::new(),
         false,
     )?;
-    integrate_diff(
-        batch, bare, checkpoint, offset, task, source, parent, &index,
-    )
+    integrate_diff(integration_context, offset, task, source, parent, &index)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_diff(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -877,7 +846,7 @@ fn integrate_diff(
     index: &Path,
 ) -> Result<()> {
     let patch = run(
-        bare,
+        integration_context.bare,
         &[
             "diff-tree".to_string(),
             "--root".to_string(),
@@ -896,15 +865,18 @@ fn integrate_diff(
     )?
     .stdout;
     integrate_apply(
-        batch, bare, checkpoint, offset, task, source, parent, index, patch,
+        integration_context,
+        offset,
+        task,
+        source,
+        parent,
+        index,
+        patch,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_apply(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -913,7 +885,7 @@ fn integrate_apply(
     patch: Vec<u8>,
 ) -> Result<()> {
     let applied = run(
-        bare,
+        integration_context.bare,
         &[
             "apply".to_string(),
             "--cached".to_string(),
@@ -927,15 +899,18 @@ fn integrate_apply(
         true,
     )?;
     integrate_applied(
-        batch, bare, checkpoint, offset, task, source, parent, index, applied,
+        integration_context,
+        offset,
+        task,
+        source,
+        parent,
+        index,
+        applied,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_applied(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -944,9 +919,16 @@ fn integrate_applied(
     applied: util::process::CommandOutput,
 ) -> Result<()> {
     if applied.status != 0 {
-        return integrate_conflict(batch, checkpoint, offset, task, source, parent);
+        return integrate_conflict(
+            integration_context.batch,
+            integration_context.checkpoint,
+            offset,
+            task,
+            source,
+            parent,
+        );
     }
-    integrate_tree(batch, bare, checkpoint, offset, task, source, parent, index)
+    integrate_tree(integration_context, offset, task, source, parent, index)
 }
 
 fn integrate_conflict(
@@ -967,26 +949,20 @@ fn integrate_conflict(
     checkpoint(batch)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_tree(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
     parent: &str,
     index: &Path,
 ) -> Result<()> {
-    let tree = output_index(bare, index)?;
-    integrate_date(batch, bare, checkpoint, offset, task, source, parent, tree)
+    let tree = output_index(integration_context.bare, index)?;
+    integrate_date(integration_context, offset, task, source, parent, tree)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_date(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -994,7 +970,7 @@ fn integrate_date(
     tree: String,
 ) -> Result<()> {
     let date = output(
-        bare,
+        integration_context.bare,
         &[
             "show".to_string(),
             "-s".to_string(),
@@ -1003,15 +979,18 @@ fn integrate_date(
         ],
     )?;
     integrate_create(
-        batch, bare, checkpoint, offset, task, source, parent, tree, &date,
+        integration_context,
+        offset,
+        task,
+        source,
+        parent,
+        tree,
+        &date,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_create(
-    batch: &mut J,
-    bare: &Path,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    integration_context: &mut IntegrationContext<'_, '_>,
     offset: usize,
     task: &str,
     source: &str,
@@ -1021,13 +1000,13 @@ fn integrate_create(
 ) -> Result<()> {
     let message = format!(
         "Integrate {task}\n\nHerdr-Batch: {}\nHerdr-Source: {source}\nHerdr-Offset: {offset}\n",
-        model::string(batch, "id").unwrap_or_default()
+        model::string(integration_context.batch, "id").unwrap_or_default()
     );
     let mut env = BTreeMap::new();
     env.insert("GIT_AUTHOR_DATE".to_string(), format!("@{date} +0000"));
     env.insert("GIT_COMMITTER_DATE".to_string(), format!("@{date} +0000"));
     let commit = run(
-        bare,
+        integration_context.bare,
         &[
             "commit-tree".to_string(),
             tree.clone(),
@@ -1042,7 +1021,15 @@ fn integrate_create(
     .stdout_text()
     .trim()
     .to_string();
-    integrate_record(batch, checkpoint, task, source, parent, tree, commit)
+    integrate_record(
+        integration_context.batch,
+        integration_context.checkpoint,
+        task,
+        source,
+        parent,
+        tree,
+        commit,
+    )
 }
 
 fn integrate_record(

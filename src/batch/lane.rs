@@ -17,6 +17,70 @@ use crate::progress;
 use crate::util;
 use crate::util::pyjson::{sha256_json_sorted, uuid_hex};
 
+struct RepairRef {
+    actual: String,
+    parent: String,
+    head: String,
+}
+
+struct RepairBinding {
+    expected: J,
+    token: String,
+}
+
+struct RepairRange {
+    parent: String,
+    head: String,
+    evidence: String,
+}
+
+struct RepairAssignment {
+    operation: String,
+    record: J,
+}
+
+struct BatchLanding {
+    pull_request: J,
+    landing: J,
+}
+
+struct SnapshotPublication {
+    own_commits: Vec<String>,
+    previous_pr: Option<J>,
+}
+
+struct SnapshotStatus {
+    root: String,
+    status: String,
+}
+
+struct CandidateSource {
+    bare: PathBuf,
+    checkout: PathBuf,
+    head: String,
+}
+
+struct DependencyTask {
+    name: String,
+    task: J,
+}
+
+struct OfferedSource {
+    source: J,
+    checks: Vec<J>,
+}
+
+struct LaneState {
+    task: J,
+    lane: J,
+}
+
+struct BatchState {
+    task: J,
+    lane: J,
+    batch: J,
+}
+
 fn idle(t: &J) -> Result<()> {
     validation::idle(t)
 }
@@ -699,10 +763,20 @@ fn dependency_task(
     let dt = model::dig(s, &["tasks", &dep_task])
         .cloned()
         .unwrap_or_else(|| json!({}));
-    dependency_head(lane, source, mt, dep, accepted, resolved, dep_task, dt)
+    dependency_head(
+        lane,
+        source,
+        mt,
+        dep,
+        accepted,
+        resolved,
+        DependencyTask {
+            name: dep_task,
+            task: dt,
+        },
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dependency_head(
     lane: &J,
     source: &J,
@@ -710,10 +784,9 @@ fn dependency_head(
     dep: &J,
     accepted: &std::collections::BTreeMap<String, J>,
     resolved: &[J],
-    dep_task: String,
-    dt: J,
+    dependency_task: DependencyTask,
 ) -> Result<J> {
-    let state = dependency_state(dt, accepted, &dep_task)?;
+    let state = dependency_state(dependency_task.task, accepted, &dependency_task.name)?;
     dependency_sha(lane, source, mt, dep, state, resolved)
 }
 
@@ -964,39 +1037,41 @@ fn offer_member_acceptance(
     source: J,
 ) -> Result<J> {
     let checks = offer_checks(&m, &mt)?;
-    offer_member_dependencies(s, now, t, lane, m, mt, source, checks)
+    offer_member_dependencies(
+        s,
+        now,
+        LaneState { task: t, lane },
+        m,
+        mt,
+        OfferedSource { source, checks },
+    )
 }
 
 fn offer_member_dependencies(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
+    lane_state: LaneState,
     m: J,
     mt: J,
-    source: J,
-    checks: Vec<J>,
+    offered_source: OfferedSource,
 ) -> Result<J> {
     let dependencies = offer_dependencies(
         s,
-        &lane,
-        &source,
+        &lane_state.lane,
+        &offered_source.source,
         &mt,
         model::get(&m, "dependencies").and_then(Value::as_array),
     )?;
-    offer_member_evidence(s, now, t, lane, m, mt, source, checks, dependencies)
+    offer_member_evidence(s, now, lane_state, m, mt, offered_source, dependencies)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn offer_member_evidence(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
+    lane_state: LaneState,
     m: J,
     mt: J,
-    source: J,
-    checks: Vec<J>,
+    offered_source: OfferedSource,
     dependencies: Vec<J>,
 ) -> Result<J> {
     let evidence = progress::text(
@@ -1004,32 +1079,45 @@ fn offer_member_evidence(
         "completed task handoff evidence",
         1000,
     )?;
-    offer_member_store(s, now, t, lane, mt, source, checks, dependencies, evidence)
+    offer_member_store(
+        s,
+        now,
+        lane_state,
+        mt,
+        offered_source,
+        dependencies,
+        evidence,
+    )
 }
 
 fn offer_member_store(
     s: &mut J,
     now: f64,
-    t: J,
-    mut lane: J,
+    mut lane_state: LaneState,
     mut mt: J,
-    source: J,
-    checks: Vec<J>,
+    offered_source: OfferedSource,
     dependencies: Vec<J>,
     evidence: String,
 ) -> Result<J> {
-    let member = offer_member_value(&mt, &source, checks, dependencies, &evidence, now);
-    offer_member_push(&mut lane, &member);
-    let owner = model::string(&t, "task").unwrap_or_default();
+    let member = offer_member_value(
+        &mt,
+        &offered_source.source,
+        offered_source.checks,
+        dependencies,
+        &evidence,
+        now,
+    );
+    offer_member_push(&mut lane_state.lane, &member);
+    let owner = model::string(&lane_state.task, "task").unwrap_or_default();
     mt["batch_delivery"] = json!({
         "owner": owner,
-        "head": source.get("head").cloned().unwrap_or(Value::Null),
-        "own_commits": source.get("own_commits").cloned().unwrap_or(Value::Null),
+        "head": offered_source.source.get("head").cloned().unwrap_or(Value::Null),
+        "own_commits": offered_source.source.get("own_commits").cloned().unwrap_or(Value::Null),
         "phase": "accepted",
         "accepted_at": now
     });
     save(s, mt, now, "batch_member_accepted")?;
-    offer_commit(s, t, now, lane)
+    offer_commit(s, lane_state.task, now, lane_state.lane)
 }
 
 fn offer_member_value(
@@ -1156,31 +1244,38 @@ fn freeze_build(
         "corrections": [],
         "versions": []
     });
-    freeze_dependencies(s, now, api, t, lane, batch)
+    freeze_dependencies(
+        s,
+        now,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn freeze_dependencies(
     s: &mut J,
     now: f64,
     api: &dyn GitHubApi,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, api)?;
-    freeze_activate(s, now, t, lane, batch)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, api)?;
+    freeze_activate(s, now, batch_state)
 }
 
-fn freeze_activate(s: &mut J, now: f64, t: J, mut lane: J, batch: J) -> Result<J> {
-    lane["active"] = batch.clone();
-    lane["pending"] = json!([]);
-    let members = model::array_field(&batch, "members")
+fn freeze_activate(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
+    batch_state.lane["active"] = batch_state.batch.clone();
+    batch_state.lane["pending"] = json!([]);
+    let members = model::array_field(&batch_state.batch, "members")
         .cloned()
         .unwrap_or_default();
     members
         .iter()
-        .try_for_each(|member| freeze_member(s, member, &batch, now))?;
-    freeze_finish(s, now, t, lane, batch)
+        .try_for_each(|member| freeze_member(s, member, &batch_state.batch, now))?;
+    freeze_finish(s, now, batch_state)
 }
 
 fn freeze_member(s: &mut J, member: &J, batch: &J, now: f64) -> Result<()> {
@@ -1195,18 +1290,21 @@ fn freeze_member(s: &mut J, member: &J, batch: &J, now: f64) -> Result<()> {
     Ok(())
 }
 
-fn freeze_finish(s: &mut J, now: f64, mut t: J, lane: J, batch: J) -> Result<J> {
-    candidate(&mut t, &model::string(&batch, "base").unwrap_or_default())?;
+fn freeze_finish(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
+    candidate(
+        &mut batch_state.task,
+        &model::string(&batch_state.batch, "base").unwrap_or_default(),
+    )?;
     block(
-        &mut t,
+        &mut batch_state.task,
         "frozen batch ready for isolated integration",
         &format!(
             "batch-integrate for {}",
-            model::string(&batch, "id").unwrap_or_default()
+            model::string(&batch_state.batch, "id").unwrap_or_default()
         ),
     );
-    t["lane"] = lane;
-    save(s, t, now, "batch_members_and_base_frozen")
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_members_and_base_frozen")
 }
 
 pub fn freeze(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
@@ -1267,7 +1365,17 @@ fn integrate_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    integrate_phase(s, now, checkpoint, api, t, lane, batch)
+    integrate_phase(
+        s,
+        now,
+        checkpoint,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn integrate_phase(
@@ -1275,12 +1383,10 @@ fn integrate_phase(
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if integrate_ready(&batch) {
-        integrate_api(s, now, checkpoint, api, t, lane, batch)
+    if integrate_ready(&batch_state.batch) {
+        integrate_api(s, now, checkpoint, api, batch_state)
     } else {
         Err(FlowError::progress(
             "batch is not ready for integration; inspect its current phase",
@@ -1309,71 +1415,67 @@ fn integrate_api(
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
     let owned;
     let api: &dyn GitHubApi = if let Some(api) = api {
         api
     } else {
-        owned = GitHub::new(lane.clone());
+        owned = GitHub::new(batch_state.lane.clone());
         &owned
     };
-    integrate_deps(s, now, checkpoint, t, lane, batch, api)
+    integrate_deps(s, now, checkpoint, batch_state, api)
 }
 
 fn integrate_deps(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, api)?;
-    integrate_latest(s, now, checkpoint, t, lane, batch, api)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, api)?;
+    integrate_latest(s, now, checkpoint, batch_state, api)
 }
 
 fn integrate_latest(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let latest = validation::latest(&lane, api)?;
-    integrate_target(s, now, checkpoint, t, lane, batch, &latest)
+    let latest = validation::latest(&batch_state.lane, api)?;
+    integrate_target(s, now, checkpoint, batch_state, &latest)
 }
 
 fn integrate_target(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     latest: &str,
 ) -> Result<J> {
-    if latest != model::string(&batch, "base").unwrap_or_default() {
+    if latest != model::string(&batch_state.batch, "base").unwrap_or_default() {
         return Err(FlowError::progress(
             "target changed before integration; explicitly rebase this frozen batch",
         ));
     }
-    integrate_run(s, now, checkpoint, t, lane, batch)
+    integrate_run(s, now, checkpoint, batch_state)
 }
 
 fn integrate_run(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    mut t: J,
-    lane: J,
-    mut batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
+    let BatchState {
+        task: mut t,
+        lane,
+        mut batch,
+    } = batch_state;
+
     batch["phase"] = json!("integrating");
     let mut persist = |batch: &J| -> Result<()> {
         if model::string(batch, "phase").as_deref() == Some("integration_conflict") {
@@ -1429,7 +1531,17 @@ fn snapshot_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    snapshot_phase(s, spec, now, api, t, lane, batch)
+    snapshot_phase(
+        s,
+        spec,
+        now,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn snapshot_phase(
@@ -1437,12 +1549,10 @@ fn snapshot_phase(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if snapshot_ready(&batch) {
-        snapshot_api(s, spec, now, api, t, lane, batch)
+    if snapshot_ready(&batch_state.batch) {
+        snapshot_api(s, spec, now, api, batch_state)
     } else {
         Err(FlowError::progress(
             "freeze the final snapshot only after all frozen members are integrated",
@@ -1464,62 +1574,54 @@ fn snapshot_api(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
     let owned;
     let api: &dyn GitHubApi = if let Some(api) = api {
         api
     } else {
-        owned = GitHub::new(lane.clone());
+        owned = GitHub::new(batch_state.lane.clone());
         &owned
     };
-    snapshot_deps(s, spec, now, t, lane, batch, api)
+    snapshot_deps(s, spec, now, batch_state, api)
 }
 
 fn snapshot_deps(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, api)?;
-    snapshot_latest(s, spec, now, t, lane, batch, api)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, api)?;
+    snapshot_latest(s, spec, now, batch_state, api)
 }
 
 fn snapshot_latest(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let latest = validation::latest(&lane, api)?;
-    snapshot_target(s, spec, now, t, lane, batch, &latest)
+    let latest = validation::latest(&batch_state.lane, api)?;
+    snapshot_target(s, spec, now, batch_state, &latest)
 }
 
 fn snapshot_target(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     latest: &str,
 ) -> Result<J> {
-    if latest != model::string(&batch, "base").unwrap_or_default() {
+    if latest != model::string(&batch_state.batch, "base").unwrap_or_default() {
         return Err(FlowError::progress(
             "target changed before snapshot freeze; rebase this frozen batch",
         ));
     }
-    let bare = snapshot_bare(&batch);
-    snapshot_head(s, spec, now, t, lane, batch, bare)
+    let bare = snapshot_bare(&batch_state.batch);
+    snapshot_head(s, spec, now, batch_state, bare)
 }
 
 fn snapshot_bare(batch: &J) -> PathBuf {
@@ -1530,13 +1632,11 @@ fn snapshot_head(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     bare: PathBuf,
 ) -> Result<J> {
     let head = snapshot_candidate_ref(&bare)?;
-    snapshot_tree(s, spec, now, t, lane, batch, bare, head)
+    snapshot_tree(s, spec, now, batch_state, bare, head)
 }
 
 fn snapshot_candidate_ref(bare: &Path) -> Result<String> {
@@ -1550,15 +1650,24 @@ fn snapshot_tree(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     bare: PathBuf,
     head: String,
 ) -> Result<J> {
     let tree = snapshot_tree_ref(&bare, &head)?;
-    let checkout = snapshot_checkout_path(&batch);
-    snapshot_checkout(s, spec, now, t, lane, batch, bare, checkout, head, tree)
+    let checkout = snapshot_checkout_path(&batch_state.batch);
+    snapshot_checkout(
+        s,
+        spec,
+        now,
+        batch_state,
+        CandidateSource {
+            bare,
+            checkout,
+            head,
+        },
+        tree,
+    )
 }
 
 fn snapshot_tree_ref(bare: &Path, head: &str) -> Result<String> {
@@ -1572,64 +1681,47 @@ fn snapshot_checkout_path(batch: &J) -> PathBuf {
     Path::new(&model::string(batch, "workspace").unwrap_or_default()).join("snapshot")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_checkout(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
 ) -> Result<J> {
-    if checkout.exists() {
-        snapshot_reuse(s, spec, now, t, lane, batch, bare, checkout, head, tree)
+    if candidate_source.checkout.exists() {
+        snapshot_reuse(s, spec, now, batch_state, candidate_source, tree)
     } else {
-        snapshot_create(s, spec, now, t, lane, batch, bare, checkout, head, tree)
+        snapshot_create(s, spec, now, batch_state, candidate_source, tree)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
 ) -> Result<J> {
     let root = git::output(
-        &checkout,
+        &candidate_source.checkout,
         &["rev-parse".to_string(), "--show-toplevel".to_string()],
     )?;
-    snapshot_reuse_status(
-        s, spec, now, t, lane, batch, bare, checkout, head, tree, root,
-    )
+    snapshot_reuse_status(s, spec, now, batch_state, candidate_source, tree, root)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_status(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
     root: String,
 ) -> Result<J> {
     let status = git::output(
-        &checkout,
+        &candidate_source.checkout,
         &[
             "status".to_string(),
             "--porcelain".to_string(),
@@ -1637,137 +1729,133 @@ fn snapshot_reuse_status(
         ],
     )?;
     snapshot_reuse_guard(
-        s, spec, now, t, lane, batch, bare, checkout, head, tree, root, status,
+        s,
+        spec,
+        now,
+        batch_state,
+        candidate_source,
+        tree,
+        SnapshotStatus { root, status },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_guard(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
-    root: String,
-    status: String,
+    snapshot_status: SnapshotStatus,
 ) -> Result<J> {
-    if checkout_dirty(&root, &checkout, &status) {
+    if checkout_dirty(
+        &snapshot_status.root,
+        &candidate_source.checkout,
+        &snapshot_status.status,
+    ) {
         return Err(FlowError::progress(
             "snapshot checkout has unaccounted changes; inspect without reset",
         ));
     }
-    snapshot_reuse_checkout(s, spec, now, t, lane, batch, bare, checkout, head, tree)
+    snapshot_reuse_checkout(s, spec, now, batch_state, candidate_source, tree)
 }
 
 fn checkout_dirty(root: &str, checkout: &Path, status: &str) -> bool {
     root != checkout.display().to_string() || !status.is_empty()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_checkout(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
 ) -> Result<J> {
     git::run(
-        &checkout,
-        &["checkout".to_string(), "--detach".to_string(), head.clone()],
-        None,
-        None,
-        &std::collections::BTreeMap::new(),
-        false,
-    )?;
-    snapshot_candidate(s, spec, now, t, lane, batch, bare, checkout, head, tree)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn snapshot_create(
-    s: &mut J,
-    spec: &J,
-    now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
-    tree: String,
-) -> Result<J> {
-    git::run(
-        &bare,
+        &candidate_source.checkout,
         &[
-            "worktree".to_string(),
-            "add".to_string(),
+            "checkout".to_string(),
             "--detach".to_string(),
-            checkout.display().to_string(),
-            head.clone(),
+            candidate_source.head.clone(),
         ],
         None,
         None,
         &std::collections::BTreeMap::new(),
         false,
     )?;
-    snapshot_candidate(s, spec, now, t, lane, batch, bare, checkout, head, tree)
+    snapshot_candidate(s, spec, now, batch_state, candidate_source, tree)
 }
 
-#[allow(clippy::too_many_arguments)]
+fn snapshot_create(
+    s: &mut J,
+    spec: &J,
+    now: f64,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
+    tree: String,
+) -> Result<J> {
+    git::run(
+        &candidate_source.bare,
+        &[
+            "worktree".to_string(),
+            "add".to_string(),
+            "--detach".to_string(),
+            candidate_source.checkout.display().to_string(),
+            candidate_source.head.clone(),
+        ],
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+        false,
+    )?;
+    snapshot_candidate(s, spec, now, batch_state, candidate_source, tree)
+}
+
 fn snapshot_candidate(
     s: &mut J,
     spec: &J,
     now: f64,
-    mut t: J,
-    lane: J,
-    mut batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    mut batch_state: BatchState,
+    candidate_source: CandidateSource,
     tree: String,
 ) -> Result<J> {
-    candidate(&mut t, &head)?;
-    let revision = model::int(&batch, "revision").unwrap_or(0) + 1;
-    batch["revision"] = json!(revision);
-    batch["snapshot"] =
-        json!({"head": head.clone(), "tree": tree.clone(), "frozen_at": now, "revision": revision});
-    batch["gate"] = Value::Null;
-    batch["phase"] = json!("snapshot_frozen");
-    batch["progress_deadline"] =
-        json!(now + model::number(&lane, "progress_timeout").unwrap_or(600.0));
-    let prior_pr = model::get(&batch, "previous_pr").cloned();
-    model::remove(&mut t, "pr");
-    snapshot_own(
-        s, spec, now, t, lane, batch, bare, checkout, head, tree, prior_pr,
-    )
+    candidate(&mut batch_state.task, &candidate_source.head)?;
+    let revision = model::int(&batch_state.batch, "revision").unwrap_or(0) + 1;
+    batch_state.batch["revision"] = json!(revision);
+    batch_state.batch["snapshot"] = json!({"head": candidate_source.head.clone(), "tree": tree.clone(), "frozen_at": now, "revision": revision});
+    batch_state.batch["gate"] = Value::Null;
+    batch_state.batch["phase"] = json!("snapshot_frozen");
+    batch_state.batch["progress_deadline"] =
+        json!(now + model::number(&batch_state.lane, "progress_timeout").unwrap_or(600.0));
+    let prior_pr = model::get(&batch_state.batch, "previous_pr").cloned();
+    model::remove(&mut batch_state.task, "pr");
+    snapshot_own(s, spec, now, batch_state, candidate_source, tree, prior_pr)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_own(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    bare: PathBuf,
-    checkout: PathBuf,
-    head: String,
+    batch_state: BatchState,
+    candidate_source: CandidateSource,
     _tree: String,
     prior_pr: Option<J>,
 ) -> Result<J> {
-    let base = model::string(&batch, "base").unwrap_or_default();
-    let own = snapshot_own_commits(&bare, &base, &head)?;
-    snapshot_prepare(s, spec, now, t, lane, batch, checkout, head, own, prior_pr)
+    let base = model::string(&batch_state.batch, "base").unwrap_or_default();
+    let own = snapshot_own_commits(&candidate_source.bare, &base, &candidate_source.head)?;
+    snapshot_prepare(
+        s,
+        spec,
+        now,
+        batch_state,
+        candidate_source.checkout,
+        candidate_source.head,
+        SnapshotPublication {
+            own_commits: own,
+            previous_pr: prior_pr,
+        },
+    )
 }
 
 fn snapshot_own_commits(bare: &Path, base: &str, head: &str) -> Result<Vec<String>> {
@@ -1786,19 +1874,21 @@ fn snapshot_own_commits(bare: &Path, base: &str, head: &str) -> Result<Vec<Strin
     .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_prepare(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     checkout: PathBuf,
     head: String,
-    own: Vec<String>,
-    prior_pr: Option<J>,
+    snapshot_publication: SnapshotPublication,
 ) -> Result<J> {
+    let BatchState {
+        task: t,
+        lane,
+        batch,
+    } = batch_state;
+
     let mut working = s.clone();
     let task_name = model::string(&t, "task").unwrap_or_default();
     working["tasks"][&task_name] = t.clone();
@@ -1811,7 +1901,7 @@ fn snapshot_prepare(
         "issue": spec.get("issue").cloned().unwrap_or(Value::Null),
         "original_base": batch.get("base").cloned().unwrap_or(Value::Null),
         "head": head,
-        "own_commits": own,
+        "own_commits": snapshot_publication.own_commits,
         "dependencies": [],
         "target_base": batch.get("base").cloned().unwrap_or(Value::Null),
         "base_ref": lane.get("base_ref").cloned().unwrap_or(Value::Null),
@@ -1820,22 +1910,30 @@ fn snapshot_prepare(
     });
     ledger::prepare(&mut working, &prepare_spec, now)?;
     let t = working["tasks"][&task_name].clone();
-    snapshot_prior(s, spec, now, t, lane, batch, prior_pr)
+    snapshot_prior(
+        s,
+        spec,
+        now,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+        snapshot_publication.previous_pr,
+    )
 }
 
 fn snapshot_prior(
     s: &mut J,
     spec: &J,
     now: f64,
-    mut t: J,
-    lane: J,
-    batch: J,
+    mut batch_state: BatchState,
     prior_pr: Option<J>,
 ) -> Result<J> {
     if let Some(prior) = prior_pr {
-        snapshot_apply_prior(&mut t, &prior, spec, now);
+        snapshot_apply_prior(&mut batch_state.task, &prior, spec, now);
     }
-    snapshot_finish(s, now, t, lane, batch)
+    snapshot_finish(s, now, batch_state)
 }
 
 fn snapshot_apply_prior(t: &mut J, prior: &J, spec: &J, now: f64) {
@@ -1861,15 +1959,15 @@ fn snapshot_apply_prior(t: &mut J, prior: &J, spec: &J, now: f64) {
     });
 }
 
-fn snapshot_finish(s: &mut J, now: f64, mut t: J, mut lane: J, batch: J) -> Result<J> {
+fn snapshot_finish(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
     block(
-        &mut t,
+        &mut batch_state.task,
         "final snapshot frozen",
         "batch-gate-begin followed by trusted gate verification",
     );
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t, now, "batch_final_snapshot_frozen")
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_final_snapshot_frozen")
 }
 
 pub fn gate_begin(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
@@ -1898,7 +1996,17 @@ fn gate_begin_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    gate_begin_phase(s, spec, now, api, t, lane, batch)
+    gate_begin_phase(
+        s,
+        spec,
+        now,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn gate_begin_phase(
@@ -1906,12 +2014,10 @@ fn gate_begin_phase(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if gate_begin_ready(&batch) {
-        gate_begin_api(s, spec, now, api, t, lane, batch)
+    if gate_begin_ready(&batch_state.batch) {
+        gate_begin_api(s, spec, now, api, batch_state)
     } else {
         Err(FlowError::progress(
             "gate may already have executed; inspect its existing operation instead of replaying",
@@ -1933,79 +2039,69 @@ fn gate_begin_api(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
     let owned;
     let api: &dyn GitHubApi = if let Some(api) = api {
         api
     } else {
-        owned = GitHub::new(lane.clone());
+        owned = GitHub::new(batch_state.lane.clone());
         &owned
     };
-    gate_begin_deps(s, spec, now, t, lane, batch, api)
+    gate_begin_deps(s, spec, now, batch_state, api)
 }
 
 fn gate_begin_deps(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, api)?;
-    gate_begin_latest(s, spec, now, t, lane, batch, api)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, api)?;
+    gate_begin_latest(s, spec, now, batch_state, api)
 }
 
 fn gate_begin_latest(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let latest = validation::latest(&lane, api)?;
-    gate_begin_target(s, spec, now, t, lane, batch, &latest)
+    let latest = validation::latest(&batch_state.lane, api)?;
+    gate_begin_target(s, spec, now, batch_state, &latest)
 }
 
 fn gate_begin_target(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     latest: &str,
 ) -> Result<J> {
-    if latest != model::string(&batch, "base").unwrap_or_default() {
+    if latest != model::string(&batch_state.batch, "base").unwrap_or_default() {
         return Err(FlowError::progress(
             "target changed; old snapshot cannot start final validation",
         ));
     }
-    gate_begin_wait(s, spec, now, t, lane, batch)
+    gate_begin_wait(s, spec, now, batch_state)
 }
 
-fn gate_begin_wait(s: &mut J, spec: &J, now: f64, t: J, lane: J, batch: J) -> Result<J> {
-    let wait = progress::wait_for(s, model::get(spec, "wait"), &t)?;
-    gate_begin_wait_check(s, spec, now, t, lane, batch, wait)
+fn gate_begin_wait(s: &mut J, spec: &J, now: f64, batch_state: BatchState) -> Result<J> {
+    let wait = progress::wait_for(s, model::get(spec, "wait"), &batch_state.task)?;
+    gate_begin_wait_check(s, spec, now, batch_state, wait)
 }
 
 fn gate_begin_wait_check(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     wait: J,
 ) -> Result<J> {
     if gate_wait_ok(s, &wait, now) {
-        gate_begin_operation(s, spec, now, t, lane, batch, wait)
+        gate_begin_operation(s, spec, now, batch_state, wait)
     } else {
         Err(FlowError::progress(
             "gate execution requires a fresh pinned result wait with an unexpired deadline",
@@ -2043,21 +2139,17 @@ fn gate_begin_operation(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     wait: J,
 ) -> Result<J> {
     let operation = progress::text(model::get(spec, "operation"), "gate operation", 128)?;
-    gate_begin_duplicate(s, now, t, lane, batch, wait, operation)
+    gate_begin_duplicate(s, now, batch_state, wait, operation)
 }
 
 fn gate_begin_duplicate(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     wait: J,
     operation: String,
 ) -> Result<J> {
@@ -2066,7 +2158,7 @@ fn gate_begin_duplicate(
             "gate operation ID already used; recover it rather than replaying",
         ));
     }
-    gate_begin_count(s, now, t, lane, batch, wait, operation)
+    gate_begin_count(s, now, batch_state, wait, operation)
 }
 
 fn gate_operation_duplicate(s: &J, operation: &str) -> bool {
@@ -2083,19 +2175,17 @@ fn gate_operation_duplicate(s: &J, operation: &str) -> bool {
 fn gate_begin_count(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     wait: J,
     operation: String,
 ) -> Result<J> {
-    let operation_count = gate_operation_count(&lane);
+    let operation_count = gate_operation_count(&batch_state.lane);
     if operation_count >= 256 {
         return Err(FlowError::progress(
             "lane reached 256 gate operations; preserve unresolved state and use a new bounded contract",
         ));
     }
-    gate_begin_bind(s, now, t, lane, batch, wait, operation)
+    gate_begin_bind(s, now, batch_state, wait, operation)
 }
 
 fn gate_operation_count(lane: &J) -> usize {
@@ -2108,49 +2198,46 @@ fn gate_operation_count(lane: &J) -> usize {
 fn gate_begin_bind(
     s: &mut J,
     now: f64,
-    t: J,
-    mut lane: J,
-    batch: J,
+    mut batch_state: BatchState,
     wait: J,
     operation: String,
 ) -> Result<J> {
-    lane["gate_operations"][&operation] = gate::binding(&lane, &batch)?;
-    gate_begin_state(s, now, t, lane, batch, wait, operation)
+    batch_state.lane["gate_operations"][&operation] =
+        gate::binding(&batch_state.lane, &batch_state.batch)?;
+    gate_begin_state(s, now, batch_state, wait, operation)
 }
 
 fn gate_begin_state(
     s: &mut J,
     now: f64,
-    mut t: J,
-    mut lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     wait: J,
     operation: String,
 ) -> Result<J> {
-    batch["gate"] = json!({
+    batch_state.batch["gate"] = json!({
         "operation": operation,
         "phase": "sending",
         "started_at": now,
         "receipt": null
     });
-    batch["phase"] = json!("gate_uncertain");
-    batch["progress_deadline"] =
-        json!(now + model::number(&lane, "progress_timeout").unwrap_or(600.0));
+    batch_state.batch["phase"] = json!("gate_uncertain");
+    batch_state.batch["progress_deadline"] =
+        json!(now + model::number(&batch_state.lane, "progress_timeout").unwrap_or(600.0));
     let wait_id = model::string(&wait, "id").unwrap_or_default();
     let wait_owner = model::string(&wait, "owner").unwrap_or_default();
     let wait_condition = model::string(&wait, "condition").unwrap_or_default();
-    t["phase"] = json!("waiting");
-    t["wait"] = json!(wait_id);
-    t["owner"] = json!(wait_owner);
-    t["next_action"] = json!({
+    batch_state.task["phase"] = json!("waiting");
+    batch_state.task["wait"] = json!(wait_id);
+    batch_state.task["owner"] = json!(wait_owner);
+    batch_state.task["next_action"] = json!({
         "kind": "wait",
         "wait": wait_id,
         "owner": wait_owner,
         "condition": wait_condition
     });
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t, now, "batch_gate_started")
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_gate_started")
 }
 
 pub fn gate_record(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
@@ -2179,7 +2266,17 @@ fn gate_record_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    gate_record_phase(s, spec, now, api, t, lane, batch)
+    gate_record_phase(
+        s,
+        spec,
+        now,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn gate_record_phase(
@@ -2187,12 +2284,10 @@ fn gate_record_phase(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if gate_record_ready(&batch) {
-        gate_record_api(s, spec, now, api, t, lane, batch)
+    if gate_record_ready(&batch_state.batch) {
+        gate_record_api(s, spec, now, api, batch_state)
     } else {
         Err(FlowError::progress(
             "batch has no existing gate operation to reconcile",
@@ -2221,84 +2316,79 @@ fn gate_record_api(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
     let owned;
     let api: &dyn GitHubApi = if let Some(api) = api {
         api
     } else {
-        owned = GitHub::new(lane.clone());
+        owned = GitHub::new(batch_state.lane.clone());
         &owned
     };
-    gate_record_deps(s, spec, now, t, lane, batch, api)
+    gate_record_deps(s, spec, now, batch_state, api)
 }
 
 fn gate_record_deps(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, api)?;
-    gate_record_latest(s, spec, now, t, lane, batch, api)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, api)?;
+    gate_record_latest(s, spec, now, batch_state, api)
 }
 
 fn gate_record_latest(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let latest = validation::latest(&lane, api)?;
-    gate_record_target(s, spec, now, t, lane, batch, &latest)
+    let latest = validation::latest(&batch_state.lane, api)?;
+    gate_record_target(s, spec, now, batch_state, &latest)
 }
 
 fn gate_record_target(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     latest: &str,
 ) -> Result<J> {
-    if latest != model::string(&batch, "base").unwrap_or_default() {
+    if latest != model::string(&batch_state.batch, "base").unwrap_or_default() {
         return Err(FlowError::progress(
             "target changed; refuse results for the old snapshot",
         ));
     }
-    gate_record_query(s, spec, now, t, lane, batch)
+    gate_record_query(s, spec, now, batch_state)
 }
 
-fn gate_record_query(s: &mut J, spec: &J, now: f64, t: J, lane: J, batch: J) -> Result<J> {
+fn gate_record_query(s: &mut J, spec: &J, now: f64, batch_state: BatchState) -> Result<J> {
     let reference = model::get(spec, "reference").cloned();
-    let receipt = gate::query(&lane, &batch, reference.as_ref(), now)?;
-    gate_record_identity(s, now, t, lane, batch, receipt, reference)
+    let receipt = gate::query(
+        &batch_state.lane,
+        &batch_state.batch,
+        reference.as_ref(),
+        now,
+    )?;
+    gate_record_identity(s, now, batch_state, receipt, reference)
 }
 
 fn gate_record_identity(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     receipt: J,
     reference: Option<J>,
 ) -> Result<J> {
-    if gate_receipt_identity_changed(&batch, &receipt) {
+    if gate_receipt_identity_changed(&batch_state.batch, &receipt) {
         return Err(FlowError::progress(
             "gate run identity changed; inspect instead of replacing a receipt",
         ));
     }
-    gate_record_apply(s, now, t, lane, batch, receipt, reference)
+    gate_record_apply(s, now, batch_state, receipt, reference)
 }
 
 fn gate_receipt_identity_changed(batch: &J, receipt: &J) -> bool {
@@ -2321,26 +2411,24 @@ fn gate_receipt_run_changed(previous: &J, receipt: &J) -> bool {
 fn gate_record_apply(
     s: &mut J,
     now: f64,
-    mut t: J,
-    mut lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     receipt: J,
     reference: Option<J>,
 ) -> Result<J> {
-    batch["gate"]["phase"] = json!("observed");
-    batch["gate"]["reference"] = reference.unwrap_or(Value::Null);
-    batch["gate"]["receipt"] = receipt.clone();
+    batch_state.batch["gate"]["phase"] = json!("observed");
+    batch_state.batch["gate"]["reference"] = reference.unwrap_or(Value::Null);
+    batch_state.batch["gate"]["receipt"] = receipt.clone();
     let decision = model::string(&receipt, "decision").unwrap_or_default();
-    batch["phase"] = json!(gate_phase_label(&decision));
-    batch["failure_token"] = gate_failure_token(&batch, &decision);
+    batch_state.batch["phase"] = json!(gate_phase_label(&decision));
+    batch_state.batch["failure_token"] = gate_failure_token(&batch_state.batch, &decision);
     block(
-        &mut t,
+        &mut batch_state.task,
         &format!("trusted gate {decision}"),
         gate_condition(&decision),
     );
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t, now, "batch_gate_result_verified")
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_gate_result_verified")
 }
 
 fn gate_phase_label(decision: &str) -> &'static str {
@@ -2423,7 +2511,16 @@ fn reconcile_run(s: &mut J, spec: &J, now: f64, api: &dyn GitHubApi) -> Result<J
 fn reconcile_state(working: &mut J, s: &mut J, t: J, ctx: ReconcileCtx<'_>) -> Result<J> {
     let lane = reconcile_lane(&t);
     let batch = reconcile_batch(&lane)?;
-    reconcile_pr(working, s, t, lane, batch, ctx)
+    reconcile_pr(
+        working,
+        s,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+        ctx,
+    )
 }
 
 fn reconcile_lane(t: &J) -> J {
@@ -2440,13 +2537,11 @@ fn reconcile_batch(lane: &J) -> Result<J> {
 fn reconcile_pr(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    let r = reconcile_pr_value(&t)?;
-    reconcile_phase(working, s, t, lane, batch, r, ctx)
+    let r = reconcile_pr_value(&batch_state.task)?;
+    reconcile_phase(working, s, batch_state, r, ctx)
 }
 
 fn reconcile_pr_value(t: &J) -> Result<J> {
@@ -2458,68 +2553,68 @@ fn reconcile_pr_value(t: &J) -> Result<J> {
 fn reconcile_phase(
     working: &mut J,
     s: &mut J,
-    mut t: J,
-    lane: J,
-    batch: J,
+    mut batch_state: BatchState,
     r: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
     if model::string(&r, "phase").as_deref() != Some("merged") {
         block(
-            &mut t,
+            &mut batch_state.task,
             &format!(
                 "batch PR {}",
                 model::string(&r, "phase").unwrap_or_default()
             ),
             "observe the existing PR and its exact trusted Check",
         );
-        s["tasks"][&model::string(&t, "task").unwrap_or_default()] = t.clone();
-        return Ok(t);
+        s["tasks"][&model::string(&batch_state.task, "task").unwrap_or_default()] =
+            batch_state.task.clone();
+        return Ok(batch_state.task);
     }
-    reconcile_merged(working, s, t, lane, batch, r, ctx)
+    reconcile_merged(working, s, batch_state, r, ctx)
 }
 
 fn reconcile_merged(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     r: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    validation::dependencies(s, &lane, &batch, ctx.api)?;
-    reconcile_landing(working, s, t, lane, batch, r, ctx)
+    validation::dependencies(s, &batch_state.lane, &batch_state.batch, ctx.api)?;
+    reconcile_landing(working, s, batch_state, r, ctx)
 }
 
 fn reconcile_landing(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     r: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
     let landing = model::get(&r, "landing")
         .cloned()
         .ok_or_else(|| FlowError::progress("PR landing is unavailable"))?;
-    reconcile_receipt(working, s, t, lane, batch, r, landing, ctx)
+    reconcile_receipt(
+        working,
+        s,
+        batch_state,
+        BatchLanding {
+            pull_request: r,
+            landing,
+        },
+        ctx,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_receipt(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    let receipt = reconcile_receipt_value(&batch)?;
-    reconcile_receipt_decision(working, s, t, lane, batch, r, landing, receipt, ctx)
+    let receipt = reconcile_receipt_value(&batch_state.batch)?;
+    reconcile_receipt_decision(working, s, batch_state, batch_landing, receipt, ctx)
 }
 
 fn reconcile_receipt_value(batch: &J) -> Result<J> {
@@ -2533,15 +2628,11 @@ fn reconcile_receipt_value(batch: &J) -> Result<J> {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_receipt_decision(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     receipt: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
@@ -2550,24 +2641,20 @@ fn reconcile_receipt_decision(
             "merged batch has no complete verified trusted gate result; retain the slot",
         ));
     }
-    reconcile_checks(working, s, t, lane, batch, r, landing, receipt, ctx)
+    reconcile_checks(working, s, batch_state, batch_landing, receipt, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_checks(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     receipt: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    let config = reconcile_check_config(&batch, &lane, &receipt);
+    let config = reconcile_check_config(&batch_state.batch, &batch_state.lane, &receipt);
     let checks = crate::ci::checks::run_rows(&config, ctx.api)?;
-    reconcile_check_state(working, s, t, lane, batch, r, landing, checks, ctx)
+    reconcile_check_state(working, s, batch_state, batch_landing, checks, ctx)
 }
 
 fn reconcile_check_config(batch: &J, lane: &J, receipt: &J) -> J {
@@ -2581,15 +2668,11 @@ fn reconcile_check_config(batch: &J, lane: &J, receipt: &J) -> J {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_check_state(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     checks: Vec<J>,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
@@ -2598,7 +2681,7 @@ fn reconcile_check_state(
             "merged batch trusted Check is missing, superseded or revoked; retain the slot",
         ));
     }
-    reconcile_commit(working, s, t, lane, batch, r, landing, ctx)
+    reconcile_commit(working, s, batch_state, batch_landing, ctx)
 }
 
 fn reconcile_checks_ok(checks: &[J]) -> bool {
@@ -2614,67 +2697,57 @@ fn reconcile_checks_ok(checks: &[J]) -> bool {
     .all(|ok| ok)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
     let commit = ctx.api.get(&format!(
         "git/commits/{}",
-        model::string(&landing, "commit").unwrap_or_default()
+        model::string(&batch_landing.landing, "commit").unwrap_or_default()
     ))?;
-    reconcile_commit_tree(working, s, t, lane, batch, r, landing, commit, ctx)
+    reconcile_commit_tree(working, s, batch_state, batch_landing, commit, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_tree(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     commit: J,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
     let actual = ledger::sha(model::get(&commit, "tree").and_then(|tree| tree.get("sha")))?;
-    reconcile_commit_compare(working, s, t, lane, batch, r, landing, actual, ctx)
+    reconcile_commit_compare(working, s, batch_state, batch_landing, actual, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_compare(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     actual: String,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    let expected = ledger::sha(model::dig(&batch, &["snapshot", "tree"]))?;
+    let expected = ledger::sha(model::dig(&batch_state.batch, &["snapshot", "tree"]))?;
     reconcile_commit_guard(
-        working, s, t, lane, batch, r, landing, actual, expected, ctx,
+        working,
+        s,
+        batch_state,
+        batch_landing,
+        actual,
+        expected,
+        ctx,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_guard(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     actual: String,
     expected: String,
     ctx: ReconcileCtx<'_>,
@@ -2684,27 +2757,29 @@ fn reconcile_commit_guard(
             "merged content differs from the validated final snapshot; retain the slot",
         ));
     }
-    reconcile_members(working, s, t, lane, batch, r, landing, ctx)
+    reconcile_members(working, s, batch_state, batch_landing, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_members(
     working: &mut J,
     s: &mut J,
-    t: J,
-    lane: J,
-    batch: J,
-    r: J,
-    landing: J,
+    batch_state: BatchState,
+    batch_landing: BatchLanding,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    let members = model::array_field(&batch, "members")
+    let members = model::array_field(&batch_state.batch, "members")
         .cloned()
         .unwrap_or_default();
-    members
-        .iter()
-        .try_for_each(|member| reconcile_member(working, member, &batch, &landing, ctx))?;
-    reconcile_land(working, s, t, lane, batch, r, landing, ctx)
+    members.iter().try_for_each(|member| {
+        reconcile_member(
+            working,
+            member,
+            &batch_state.batch,
+            &batch_landing.landing,
+            ctx,
+        )
+    })?;
+    reconcile_land(working, s, batch_state, batch_landing, ctx)
 }
 
 fn reconcile_member(
@@ -2738,29 +2813,25 @@ fn reconcile_member(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_land(
     working: &mut J,
     s: &mut J,
-    mut t: J,
-    mut lane: J,
-    mut batch: J,
-    r: J,
-    landing: J,
+    mut batch_state: BatchState,
+    batch_landing: BatchLanding,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
-    batch["phase"] = json!("landed");
-    batch["landing"] = landing;
-    batch["pr"] = r;
-    batch["landed_at"] = json!(ctx.now);
-    push_history(&mut lane, &batch);
-    lane["active"] = Value::Null;
-    model::remove(&mut t, "pr");
-    t["lane"] = lane.clone();
-    if lane_has_pending(&lane) {
-        reconcile_freeze(working, s, t, lane, ctx)
+    batch_state.batch["phase"] = json!("landed");
+    batch_state.batch["landing"] = batch_landing.landing;
+    batch_state.batch["pr"] = batch_landing.pull_request;
+    batch_state.batch["landed_at"] = json!(ctx.now);
+    push_history(&mut batch_state.lane, &batch_state.batch);
+    batch_state.lane["active"] = Value::Null;
+    model::remove(&mut batch_state.task, "pr");
+    batch_state.task["lane"] = batch_state.lane.clone();
+    if lane_has_pending(&batch_state.lane) {
+        reconcile_freeze(working, s, batch_state.task, batch_state.lane, ctx)
     } else {
-        reconcile_idle_landing(working, s, t, ctx)
+        reconcile_idle_landing(working, s, batch_state.task, ctx)
     }
 }
 
@@ -3027,7 +3098,6 @@ fn repair_intent_diagnosis(
     repair_intent_kind(t, action, now, lane, batch, expected, diagnosis)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_kind(
     t: &mut J,
     action: &J,
@@ -3097,7 +3167,6 @@ fn repair_limit_hit(
         || same_batch >= model::int(lane, "max_repairs").unwrap_or(0) as usize
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_workspace(
     t: &mut J,
     action: &J,
@@ -3112,18 +3181,24 @@ fn repair_intent_workspace(
         "batch repair workspace",
         1000,
     )?));
-    repair_intent_isolation(t, action, now, lane, batch, expected, token, workspace)
+    repair_intent_isolation(
+        t,
+        action,
+        now,
+        lane,
+        batch,
+        RepairBinding { expected, token },
+        workspace,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_isolation(
     t: &mut J,
     action: &J,
     now: f64,
     lane: J,
     batch: J,
-    expected: J,
-    token: String,
+    repair_binding: RepairBinding,
     workspace: PathBuf,
 ) -> Result<()> {
     let lane_root_text = model::string(&lane, "workspace_root").unwrap_or_default();
@@ -3134,7 +3209,15 @@ fn repair_intent_isolation(
             "batch repair must use an isolated checkout",
         ));
     }
-    repair_intent_store(t, action, now, lane, batch, expected, token)
+    repair_intent_store(
+        t,
+        action,
+        now,
+        lane,
+        batch,
+        repair_binding.expected,
+        repair_binding.token,
+    )
 }
 
 fn repair_workspace_conflict(workspace: &Path, lane_root: &Path, member_checkout: bool) -> bool {
@@ -3259,36 +3342,51 @@ fn repair_idle(s: &mut J, spec: &J, now: f64, t: J, lane: J) -> Result<J> {
 
 fn repair_active(s: &mut J, spec: &J, now: f64, t: J, lane: J) -> Result<J> {
     let batch = active(&lane, spec)?;
-    repair_inputs(s, spec, now, t, lane, batch)
+    repair_inputs(
+        s,
+        spec,
+        now,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
-fn repair_inputs(s: &mut J, spec: &J, now: f64, t: J, lane: J, batch: J) -> Result<J> {
+fn repair_inputs(s: &mut J, spec: &J, now: f64, batch_state: BatchState) -> Result<J> {
     let operation = model::string(spec, "operation").unwrap_or_default();
     let event_id = model::string(spec, "event").unwrap_or_default();
-    let op = model::dig(&t, &["operations", &operation]).cloned();
+    let op = model::dig(&batch_state.task, &["operations", &operation]).cloned();
     let event = model::dig(s, &["events", &event_id]).cloned();
-    repair_validate(s, spec, now, t, lane, batch, operation, op, event)
+    repair_validate(s, spec, now, batch_state, operation, op, event)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_validate(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     operation: String,
     op: Option<J>,
     event: Option<J>,
 ) -> Result<J> {
-    if !repair_operation_valid(&t, &op, &event) {
+    if !repair_operation_valid(&batch_state.task, &op, &event) {
         return Err(FlowError::progress(
             "batch repair requires applied exact accepted result and inspected writer release",
         ));
     }
     let op = op.unwrap_or(Value::Null);
-    repair_checkout(s, spec, now, t, lane, batch, operation, op)
+    repair_checkout(
+        s,
+        spec,
+        now,
+        batch_state,
+        RepairAssignment {
+            operation,
+            record: op,
+        },
+    )
 }
 
 fn repair_operation_valid(t: &J, op: &Option<J>, event: &Option<J>) -> bool {
@@ -3340,19 +3438,15 @@ fn repair_assignment_ok(t: &J, op: &Option<J>) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_checkout(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
 ) -> Result<J> {
     let checkout = repair_workspace_path(spec)?;
-    repair_workspace_check(s, spec, now, t, lane, batch, operation, op, checkout)
+    repair_workspace_check(s, spec, now, batch_state, repair_assignment, checkout)
 }
 
 fn repair_workspace_path(spec: &J) -> Result<PathBuf> {
@@ -3363,52 +3457,42 @@ fn repair_workspace_path(spec: &J) -> Result<PathBuf> {
     )?)))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_workspace_check(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
     checkout: PathBuf,
 ) -> Result<J> {
-    if Some(checkout.display().to_string()) != model::dig_str(&op, &["intent", "workspace"]) {
+    if Some(checkout.display().to_string())
+        != model::dig_str(&repair_assignment.record, &["intent", "workspace"])
+    {
         return Err(FlowError::progress(
             "repair must come from the reserved isolated workspace",
         ));
     }
-    repair_head(s, spec, now, t, lane, batch, operation, op, checkout)
+    repair_head(s, spec, now, batch_state, repair_assignment, checkout)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_head(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
     checkout: PathBuf,
 ) -> Result<J> {
     let head = ledger::sha(model::get(spec, "head"))?;
-    repair_evidence(s, spec, now, t, lane, batch, operation, op, checkout, head)
+    repair_evidence(s, spec, now, batch_state, repair_assignment, checkout, head)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_evidence(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
     checkout: PathBuf,
     head: String,
 ) -> Result<J> {
@@ -3418,47 +3502,64 @@ fn repair_evidence(
         1000,
     )?;
     repair_import(
-        s, now, t, lane, batch, operation, op, checkout, head, evidence,
+        s,
+        now,
+        batch_state,
+        repair_assignment,
+        checkout,
+        head,
+        evidence,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_import(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
     checkout: PathBuf,
     head: String,
     evidence: String,
 ) -> Result<J> {
-    let (bare, parent) = git::import_repair(&batch, &checkout, &head)?;
+    let (bare, parent) = git::import_repair(&batch_state.batch, &checkout, &head)?;
     repair_count(
-        s, now, t, lane, batch, operation, op, checkout, bare, parent, head, evidence,
+        s,
+        now,
+        batch_state,
+        repair_assignment,
+        CandidateSource {
+            checkout,
+            bare,
+            head,
+        },
+        parent,
+        evidence,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_count(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
-    checkout: PathBuf,
-    bare: PathBuf,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
+    candidate_source: CandidateSource,
     parent: String,
-    head: String,
     evidence: String,
 ) -> Result<J> {
-    let count = repair_commit_count(&bare, &batch, &head)?;
-    repair_limit(
-        s, now, t, lane, batch, operation, op, checkout, bare, parent, head, evidence, count,
+    let count = repair_commit_count(
+        &candidate_source.bare,
+        &batch_state.batch,
+        &candidate_source.head,
+    )?;
+    validate_repair_count(count)?;
+    repair_phase(
+        s,
+        now,
+        batch_state,
+        repair_assignment,
+        candidate_source,
+        parent,
+        evidence,
     )
 }
 
@@ -3478,113 +3579,106 @@ fn repair_commit_count(bare: &Path, batch: &J, head: &str) -> Result<u64> {
     .unwrap_or(u64::MAX))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn repair_limit(
-    s: &mut J,
-    now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
-    checkout: PathBuf,
-    bare: PathBuf,
-    parent: String,
-    head: String,
-    evidence: String,
-    count: u64,
-) -> Result<J> {
+fn validate_repair_count(count: u64) -> Result<()> {
     if count > 256 {
         return Err(FlowError::progress(
             "repaired batch exceeds the 256-commit provenance limit",
         ));
     }
-    repair_phase(
-        s, now, t, lane, batch, operation, op, checkout, bare, parent, head, evidence,
-    )
+    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_phase(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
-    checkout: PathBuf,
-    bare: PathBuf,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
+    candidate_source: CandidateSource,
     parent: String,
-    head: String,
     evidence: String,
 ) -> Result<J> {
-    let phase = model::string(&batch, "phase").unwrap_or_default();
+    let phase = model::string(&batch_state.batch, "phase").unwrap_or_default();
     if phase == "integration_conflict" {
-        return repair_conflict(s, now, t, lane, batch, operation, parent, head, evidence);
+        return repair_conflict(
+            s,
+            now,
+            batch_state,
+            repair_assignment.operation,
+            RepairRange {
+                parent,
+                head: candidate_source.head,
+                evidence,
+            },
+        );
     }
     repair_gate_phase(
-        s, now, t, lane, batch, operation, op, checkout, bare, parent, head, evidence,
+        s,
+        now,
+        batch_state,
+        repair_assignment,
+        candidate_source,
+        parent,
+        evidence,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_gate_phase(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
-    operation: String,
-    op: J,
-    checkout: PathBuf,
-    bare: PathBuf,
+    batch_state: BatchState,
+    repair_assignment: RepairAssignment,
+    candidate_source: CandidateSource,
     parent: String,
-    head: String,
     evidence: String,
 ) -> Result<J> {
-    if model::string(&batch, "phase").as_deref() == Some("gate_failed") {
+    if model::string(&batch_state.batch, "phase").as_deref() == Some("gate_failed") {
         return repair_gate_failed(
-            s, now, t, lane, batch, operation, op, checkout, bare, parent, head, evidence,
+            s,
+            now,
+            batch_state,
+            repair_assignment.operation,
+            candidate_source,
+            parent,
+            evidence,
         );
     }
     Err(FlowError::progress("batch no longer awaits this repair"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_conflict(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     operation: String,
-    parent: String,
-    head: String,
-    evidence: String,
+    repair_range: RepairRange,
 ) -> Result<J> {
-    let conflict = model::dig(&batch, &["integration", "conflict"])
+    let conflict = model::dig(&batch_state.batch, &["integration", "conflict"])
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if Some(parent.clone()) != model::string(&conflict, "parent") {
+    if Some(repair_range.parent.clone()) != model::string(&conflict, "parent") {
         return Err(FlowError::progress("conflict repair parent changed"));
     }
     repair_conflict_mapping(
-        s, now, t, lane, &mut batch, operation, parent, head, evidence, conflict,
+        s,
+        now,
+        LaneState {
+            task: batch_state.task,
+            lane: batch_state.lane,
+        },
+        &mut batch_state.batch,
+        operation,
+        repair_range,
+        conflict,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_conflict_mapping(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
+    lane_state: LaneState,
     batch: &mut J,
     operation: String,
-    parent: String,
-    head: String,
-    evidence: String,
+    repair_range: RepairRange,
     conflict: J,
 ) -> Result<J> {
     push_batch_mapping(
@@ -3592,10 +3686,10 @@ fn repair_conflict_mapping(
         json!({
             "task": conflict.get("task").cloned().unwrap_or(Value::Null),
             "source": conflict.get("source").cloned().unwrap_or(Value::Null),
-            "parent": parent,
-            "integrated": head,
+            "parent": repair_range.parent,
+            "integrated": repair_range.head,
             "repair": operation,
-            "evidence": evidence
+            "evidence": repair_range.evidence
         }),
     );
     let offset = model::dig(batch, &["integration", "offset"])
@@ -3605,7 +3699,18 @@ fn repair_conflict_mapping(
     batch["integration"]["offset"] = json!(offset);
     batch["integration"]["conflict"] = Value::Null;
     batch["phase"] = json!("integration_prepared");
-    repair_common(s, now, t, lane, batch.clone(), operation, parent, head)
+    repair_common(
+        s,
+        now,
+        BatchState {
+            task: lane_state.task,
+            lane: lane_state.lane,
+            batch: batch.clone(),
+        },
+        operation,
+        repair_range.parent,
+        repair_range.head,
+    )
 }
 
 fn push_batch_mapping(batch: &mut J, entry: J) {
@@ -3617,26 +3722,30 @@ fn push_batch_mapping(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_gate_failed(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     operation: String,
-    _op: J,
-    checkout: PathBuf,
-    bare: PathBuf,
+    candidate_source: CandidateSource,
     parent: String,
-    head: String,
     evidence: String,
 ) -> Result<J> {
-    batch["phase"] = json!("integrated");
-    batch["integrated"] = json!(head.clone());
-    let own = repair_own_commits(&bare, &parent, &head)?;
+    batch_state.batch["phase"] = json!("integrated");
+    batch_state.batch["integrated"] = json!(candidate_source.head.clone());
+    let own = repair_own_commits(&candidate_source.bare, &parent, &candidate_source.head)?;
     repair_corrections(
-        s, now, t, lane, batch, operation, checkout, parent, head, evidence, own,
+        s,
+        now,
+        batch_state,
+        operation,
+        candidate_source.checkout,
+        RepairRange {
+            parent,
+            head: candidate_source.head,
+            evidence,
+        },
+        own,
     )
 }
 
@@ -3656,35 +3765,36 @@ fn repair_own_commits(bare: &Path, parent: &str, head: &str) -> Result<Vec<Strin
     .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_corrections(
     s: &mut J,
     now: f64,
-    t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     operation: String,
     checkout: PathBuf,
-    parent: String,
-    head: String,
-    evidence: String,
+    repair_range: RepairRange,
     own: Vec<String>,
 ) -> Result<J> {
     append_correction(
-        &mut batch,
+        &mut batch_state.batch,
         json!({
-            "task": t.get("task").cloned().unwrap_or(Value::Null),
+            "task": batch_state.task.get("task").cloned().unwrap_or(Value::Null),
             "checkout": checkout.display().to_string(),
-            "original_base": parent,
-            "head": head,
+            "original_base": repair_range.parent,
+            "head": repair_range.head,
             "own_commits": own,
-            "evidence": evidence
+            "evidence": repair_range.evidence
         }),
     );
-    repair_common(s, now, t, lane, batch, operation, parent, head)
+    repair_common(
+        s,
+        now,
+        batch_state,
+        operation,
+        repair_range.parent,
+        repair_range.head,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_correction(batch: &mut J, entry: J) {
     if !matches!(batch.get("corrections"), Some(Value::Array(_))) {
         batch["corrections"] = json!([]);
@@ -3694,31 +3804,30 @@ fn append_correction(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_common(
     s: &mut J,
     now: f64,
-    mut t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     operation: String,
     parent: String,
     head: String,
 ) -> Result<J> {
-    batch["repair_update"] = json!({
+    batch_state.batch["repair_update"] = json!({
         "parent": parent,
         "head": head,
         "operation": operation
     });
-    candidate(&mut t, &head)?;
-    repair_previous_pr(s, now, t, lane, batch)
+    candidate(&mut batch_state.task, &head)?;
+    repair_previous_pr(s, now, batch_state)
 }
 
-fn repair_previous_pr(s: &mut J, now: f64, t: J, lane: J, mut batch: J) -> Result<J> {
-    if repair_pr_number(&t) {
-        batch["previous_pr"] = model::get(&t, "pr").cloned().unwrap_or(Value::Null);
+fn repair_previous_pr(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
+    if repair_pr_number(&batch_state.task) {
+        batch_state.batch["previous_pr"] = model::get(&batch_state.task, "pr")
+            .cloned()
+            .unwrap_or(Value::Null);
     }
-    repair_finish_state(s, now, t, lane, batch)
+    repair_finish_state(s, now, batch_state)
 }
 
 fn repair_pr_number(t: &J) -> bool {
@@ -3728,19 +3837,19 @@ fn repair_pr_number(t: &J) -> bool {
         .unwrap_or(false)
 }
 
-fn repair_finish_state(s: &mut J, now: f64, mut t: J, mut lane: J, mut batch: J) -> Result<J> {
-    model::remove(&mut t, "pr");
-    batch["snapshot"] = Value::Null;
-    batch["gate"] = Value::Null;
-    batch["failure_token"] = Value::Null;
+fn repair_finish_state(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
+    model::remove(&mut batch_state.task, "pr");
+    batch_state.batch["snapshot"] = Value::Null;
+    batch_state.batch["gate"] = Value::Null;
+    batch_state.batch["failure_token"] = Value::Null;
     block(
-        &mut t,
+        &mut batch_state.task,
         "verified repair awaiting private ref update",
         "batch-repair-finish before further integration or freezing",
     );
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t, now, "batch_repair_update_prepared")
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_repair_update_prepared")
 }
 
 pub fn repair_finish(
@@ -3774,49 +3883,51 @@ fn repair_finish_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    repair_finish_update(s, now, checkpoint, t, lane, batch)
+    repair_finish_update(
+        s,
+        now,
+        checkpoint,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn repair_finish_update(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    let update = model::get(&batch, "repair_update")
+    let update = model::get(&batch_state.batch, "repair_update")
         .cloned()
         .filter(|value| model::truthy(Some(value)))
         .ok_or_else(|| FlowError::progress("no prepared private repair update"))?;
-    repair_finish_actual(s, now, checkpoint, t, lane, batch, update)
+    repair_finish_actual(s, now, checkpoint, batch_state, update)
 }
 
 fn repair_finish_actual(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     update: J,
 ) -> Result<J> {
-    let bare = snapshot_bare(&batch);
+    let bare = snapshot_bare(&batch_state.batch);
     let actual = git::output(
         &bare,
         &["rev-parse".to_string(), "refs/herdr/candidate".to_string()],
     )?;
-    repair_finish_verify(s, now, checkpoint, t, lane, batch, update, bare, actual)
+    repair_finish_verify(s, now, checkpoint, batch_state, update, bare, actual)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_verify(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     update: J,
     bare: PathBuf,
     actual: String,
@@ -3829,7 +3940,16 @@ fn repair_finish_verify(
         ));
     }
     repair_finish_ref(
-        s, now, checkpoint, t, lane, batch, bare, actual, parent, head,
+        s,
+        now,
+        checkpoint,
+        batch_state,
+        bare,
+        RepairRef {
+            actual,
+            parent,
+            head,
+        },
     )
 }
 
@@ -3837,33 +3957,33 @@ fn repair_ref_ok(actual: &str, parent: &str, head: &str) -> bool {
     actual == parent || actual == head
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_ref(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     bare: PathBuf,
-    actual: String,
-    parent: String,
-    head: String,
+    repair_ref: RepairRef,
 ) -> Result<J> {
-    if actual == parent {
-        return repair_finish_update_ref(s, now, checkpoint, t, lane, batch, bare, parent, head);
+    if repair_ref.actual == repair_ref.parent {
+        return repair_finish_update_ref(
+            s,
+            now,
+            checkpoint,
+            batch_state,
+            bare,
+            repair_ref.parent,
+            repair_ref.head,
+        );
     }
-    repair_finish_done(s, now, checkpoint, t, lane, batch)
+    repair_finish_done(s, now, checkpoint, batch_state)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_update_ref(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     bare: PathBuf,
     parent: String,
     head: String,
@@ -3881,22 +4001,20 @@ fn repair_finish_update_ref(
         &std::collections::BTreeMap::new(),
         false,
     )?;
-    repair_finish_done(s, now, checkpoint, t, lane, batch)
+    repair_finish_done(s, now, checkpoint, batch_state)
 }
 
 fn repair_finish_done(
     s: &mut J,
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
-    mut t: J,
-    mut lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
 ) -> Result<J> {
-    model::remove(&mut batch, "repair_update");
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t.clone(), now, "batch_repair_ref_updated")?;
-    repair_finish_checkpoint(s, checkpoint, t)
+    model::remove(&mut batch_state.batch, "repair_update");
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task.clone(), now, "batch_repair_ref_updated")?;
+    repair_finish_checkpoint(s, checkpoint, batch_state.task)
 }
 
 fn repair_finish_checkpoint(
@@ -3934,7 +4052,17 @@ fn rebase_active(
     lane: J,
 ) -> Result<J> {
     let batch = active(&lane, spec)?;
-    rebase_guard(s, spec, now, api, t, lane, batch)
+    rebase_guard(
+        s,
+        spec,
+        now,
+        api,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+    )
 }
 
 fn rebase_guard(
@@ -3942,16 +4070,14 @@ fn rebase_guard(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if rebase_uncertain(&t, &batch) {
+    if rebase_uncertain(&batch_state.task, &batch_state.batch) {
         return Err(FlowError::progress(
             "reconcile uncertain repair/publication before rebuilding",
         ));
     }
-    rebase_operations(s, spec, now, api, t, lane, batch)
+    rebase_operations(s, spec, now, api, batch_state)
 }
 
 fn rebase_uncertain(t: &J, batch: &J) -> bool {
@@ -3975,16 +4101,14 @@ fn rebase_operations(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if rebase_operations_pending(&t, &batch) {
+    if rebase_operations_pending(&batch_state.task, &batch_state.batch) {
         return Err(FlowError::progress(
             "import or reconcile the existing batch repair before rebuilding",
         ));
     }
-    rebase_gate(s, spec, now, api, t, lane, batch)
+    rebase_gate(s, spec, now, api, batch_state)
 }
 
 fn rebase_operations_pending(t: &J, batch: &J) -> bool {
@@ -4026,14 +4150,12 @@ fn rebase_gate(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
-    if rebase_gate_sending(&batch) {
-        return rebase_gate_inspect(s, spec, now, api, t, lane, batch);
+    if rebase_gate_sending(&batch_state.batch) {
+        return rebase_gate_inspect(s, spec, now, api, batch_state);
     }
-    rebase_api(s, spec, now, api, t, lane, batch)
+    rebase_api(s, spec, now, api, batch_state)
 }
 
 fn rebase_gate_sending(batch: &J) -> bool {
@@ -4048,12 +4170,11 @@ fn rebase_gate_inspect(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
 ) -> Result<J> {
-    batch["gate"]["inspection"] = gate::quiescent(&lane, &batch)?;
-    rebase_api(s, spec, now, api, t, lane, batch)
+    batch_state.batch["gate"]["inspection"] =
+        gate::quiescent(&batch_state.lane, &batch_state.batch)?;
+    rebase_api(s, spec, now, api, batch_state)
 }
 
 fn rebase_api(
@@ -4061,33 +4182,29 @@ fn rebase_api(
     spec: &J,
     now: f64,
     api: Option<&dyn GitHubApi>,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
 ) -> Result<J> {
     let owned;
     let api: &dyn GitHubApi = if let Some(api) = api {
         api
     } else {
-        owned = GitHub::new(lane.clone());
+        owned = GitHub::new(batch_state.lane.clone());
         &owned
     };
-    rebase_pr(s, spec, now, t, lane, batch, api)
+    rebase_pr(s, spec, now, batch_state, api)
 }
 
 fn rebase_pr(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    if rebase_pr_number(&t) {
-        return rebase_pr_remote(s, spec, now, t, lane, batch, api);
+    if rebase_pr_number(&batch_state.task) {
+        return rebase_pr_remote(s, spec, now, batch_state, api);
     }
-    rebase_latest(s, spec, now, t, lane, batch, api)
+    rebase_latest(s, spec, now, batch_state, api)
 }
 
 fn rebase_pr_number(t: &J) -> bool {
@@ -4101,13 +4218,11 @@ fn rebase_pr_remote(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let (r, remote) = rebase_remote_pr(api, &t)?;
-    rebase_pr_check(s, spec, now, t, lane, batch, api, r, remote)
+    let (r, remote) = rebase_remote_pr(api, &batch_state.task)?;
+    rebase_pr_check(s, spec, now, batch_state, api, r, remote)
 }
 
 fn rebase_remote_pr(api: &dyn GitHubApi, t: &J) -> Result<(J, J)> {
@@ -4117,14 +4232,11 @@ fn rebase_remote_pr(api: &dyn GitHubApi, t: &J) -> Result<(J, J)> {
     Ok((r, remote))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rebase_pr_check(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    mut batch: J,
+    mut batch_state: BatchState,
     api: &dyn GitHubApi,
     r: J,
     remote: J,
@@ -4134,8 +4246,8 @@ fn rebase_pr_check(
             "published batch changed or landed; reconcile before rebuilding",
         ));
     }
-    batch["previous_pr"] = r;
-    rebase_latest(s, spec, now, t, lane, batch, api)
+    batch_state.batch["previous_pr"] = r;
+    rebase_latest(s, spec, now, batch_state, api)
 }
 
 fn rebase_pr_unchanged(r: &J, remote: &J) -> bool {
@@ -4153,54 +4265,52 @@ fn rebase_latest(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
 ) -> Result<J> {
-    let base = validation::latest(&lane, api)?;
-    rebase_changed(s, spec, now, t, lane, batch, api, base)
+    let base = validation::latest(&batch_state.lane, api)?;
+    rebase_changed(s, spec, now, batch_state, api, base)
 }
 
 fn rebase_changed(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
     base: String,
 ) -> Result<J> {
-    if base == model::string(&batch, "base").unwrap_or_default() {
+    if base == model::string(&batch_state.batch, "base").unwrap_or_default() {
         return Err(FlowError::progress("target has not changed"));
     }
-    rebase_ancestry(s, spec, now, t, lane, batch, api, base)
+    rebase_ancestry(s, spec, now, batch_state, api, base)
 }
 
 fn rebase_ancestry(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     api: &dyn GitHubApi,
     base: String,
 ) -> Result<J> {
-    validation::landing_ancestry(&lane, &base, api)?;
-    rebase_versions(s, spec, now, t, lane, batch, base)
+    validation::landing_ancestry(&batch_state.lane, &base, api)?;
+    rebase_versions(s, spec, now, batch_state, base)
 }
 
 fn rebase_versions(
     s: &mut J,
     spec: &J,
     now: f64,
-    t: J,
-    lane: J,
-    batch: J,
+    batch_state: BatchState,
     base: String,
 ) -> Result<J> {
+    let BatchState {
+        task: t,
+        lane,
+        batch,
+    } = batch_state;
+
     let versions_len = model::array_field(&batch, "versions")
         .map(Vec::len)
         .unwrap_or(0);
@@ -4210,7 +4320,17 @@ fn rebase_versions(
         ));
     }
     let batch = rebase_apply(batch, &lane, now, &base);
-    rebase_after_apply(s, spec, now, t, lane, batch, base)
+    rebase_after_apply(
+        s,
+        spec,
+        now,
+        BatchState {
+            task: t,
+            lane,
+            batch,
+        },
+        base,
+    )
 }
 
 fn rebase_apply(mut batch: J, lane: &J, now: f64, base: &str) -> J {
@@ -4260,26 +4380,24 @@ fn rebase_after_apply(
     s: &mut J,
     spec: &J,
     now: f64,
-    mut t: J,
-    lane: J,
-    batch: J,
+    mut batch_state: BatchState,
     base: String,
 ) -> Result<J> {
     let _ = spec;
-    candidate(&mut t, &base)?;
-    rebase_store(s, now, t, lane, batch)
+    candidate(&mut batch_state.task, &base)?;
+    rebase_store(s, now, batch_state)
 }
 
-fn rebase_store(s: &mut J, now: f64, mut t: J, mut lane: J, batch: J) -> Result<J> {
-    model::remove(&mut t, "pr");
+fn rebase_store(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
+    model::remove(&mut batch_state.task, "pr");
     block(
-        &mut t,
+        &mut batch_state.task,
         "same frozen members need integration on the new target",
         "batch-integrate then a new snapshot and trusted gate",
     );
-    lane["active"] = batch;
-    t["lane"] = lane;
-    save(s, t, now, "batch_base_changed")
+    batch_state.lane["active"] = batch_state.batch;
+    batch_state.task["lane"] = batch_state.lane;
+    save(s, batch_state.task, now, "batch_base_changed")
 }
 
 pub fn stall(t: &J, now: f64) -> Option<String> {

@@ -1,5 +1,17 @@
 //! Durable waits and acknowledged, batched Herdr notifications. No model polling.
 
+struct DeliveryResolution<'a> {
+    delivery: &'a str,
+    resolution: &'a str,
+    reason: &'a str,
+}
+
+struct NoticeText<'a> {
+    field: &'a str,
+    title: &'a str,
+    body: &'a str,
+}
+
 pub mod cli;
 pub mod command;
 
@@ -1262,7 +1274,6 @@ fn guard_root(s: &J) -> Result<PathBuf> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn operator_notice(
     root: &Path,
     s: &mut J,
@@ -1278,7 +1289,6 @@ pub fn operator_notice(
     operator_notice_attempt(root, s, delivery, field, title, body, factory)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_attempt(
     root: &Path,
     s: &mut J,
@@ -1299,7 +1309,6 @@ fn store_delivery_attempt(s: &mut J, delivery: &J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_save(
     root: &Path,
     s: &mut J,
@@ -1313,7 +1322,6 @@ fn operator_notice_save(
     operator_notice_guard(root, s, delivery, field, title, body, factory)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_guard(
     root: &Path,
     s: &mut J,
@@ -1324,22 +1332,34 @@ fn operator_notice_guard(
     factory: &ReceiverFactory,
 ) -> Result<()> {
     let guard_dir = guard_root(s)?;
-    operator_notice_submit(root, s, delivery, field, title, body, factory, &guard_dir)
+    operator_notice_submit(
+        root,
+        s,
+        delivery,
+        &NoticeText { field, title, body },
+        factory,
+        &guard_dir,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_submit(
     root: &Path,
     s: &mut J,
     delivery: &mut J,
-    field: &str,
-    title: &str,
-    body: &str,
+    notice_text: &NoticeText<'_>,
     factory: &ReceiverFactory,
     guard_dir: &Path,
 ) -> Result<()> {
-    let result = operator_notice_call(root, s, delivery, title, body, factory, guard_dir);
-    apply_notice_result(delivery, field, result.err());
+    let result = operator_notice_call(
+        root,
+        s,
+        delivery,
+        notice_text.title,
+        notice_text.body,
+        factory,
+        guard_dir,
+    );
+    apply_notice_result(delivery, notice_text.field, result.err());
     Ok(())
 }
 
@@ -1734,7 +1754,6 @@ fn deliver_agent(
     deliver_agent_checked(root, s, pending, guard_dir, g, adapter, &agent)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn deliver_agent_checked(
     root: &Path,
     s: &mut J,
@@ -1978,7 +1997,6 @@ fn ensure_ack_receiver(s: &J, g: &J, session: &str) -> Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn acknowledge_marker(
     root: &Path,
     s: J,
@@ -2112,69 +2130,67 @@ fn validate_resolution_reason(reason: &str) -> Result<()> {
 
 pub fn resolve(root: &Path, delivery: &str, resolution: &str, reason: &str) -> Result<J> {
     validate_resolution(resolution, reason)?;
-    resolve_loaded(root, delivery, resolution, reason)
+    resolve_loaded(
+        root,
+        &DeliveryResolution {
+            delivery,
+            resolution,
+            reason,
+        },
+    )
 }
 
-fn resolve_loaded(root: &Path, delivery: &str, resolution: &str, reason: &str) -> Result<J> {
+fn resolve_loaded(root: &Path, delivery_resolution: &DeliveryResolution<'_>) -> Result<J> {
     let s = load_queue(root)?;
-    resolve_active(root, s, delivery, resolution, reason)
+    resolve_active(root, s, delivery_resolution)
 }
 
-fn resolve_active(root: &Path, s: J, delivery: &str, resolution: &str, reason: &str) -> Result<J> {
-    ensure_active_matches(&s, delivery)?;
-    resolve_record(root, s, delivery, resolution, reason)
+fn resolve_active(root: &Path, s: J, delivery_resolution: &DeliveryResolution<'_>) -> Result<J> {
+    ensure_active_matches(&s, delivery_resolution.delivery)?;
+    resolve_record(root, s, delivery_resolution)
 }
 
-fn resolve_record(root: &Path, s: J, delivery: &str, resolution: &str, reason: &str) -> Result<J> {
-    let d = delivery_record(&s, delivery)?;
-    resolve_guard(root, s, delivery, resolution, reason, d)
+fn resolve_record(root: &Path, s: J, delivery_resolution: &DeliveryResolution<'_>) -> Result<J> {
+    let d = delivery_record(&s, delivery_resolution.delivery)?;
+    resolve_guard(root, s, delivery_resolution, d)
 }
 
 fn resolve_guard(
     root: &Path,
     s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     d: J,
 ) -> Result<J> {
     let guard_dir = guard_root(&s)?;
-    resolve_locked(root, s, delivery, resolution, reason, d, &guard_dir)
+    resolve_locked(root, s, delivery_resolution, d, &guard_dir)
 }
 
 fn resolve_locked(
     root: &Path,
     s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     d: J,
     guard_dir: &Path,
 ) -> Result<J> {
     let _lock = guard::locked(guard_dir)?;
-    resolve_guard_state(root, s, delivery, resolution, reason, d, guard_dir)
+    resolve_guard_state(root, s, delivery_resolution, d, guard_dir)
 }
 
 fn resolve_guard_state(
     root: &Path,
     s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     d: J,
     guard_dir: &Path,
 ) -> Result<J> {
     let g = util::read_json(&guard_dir.join("state.json"))?;
-    resolve_marker(root, s, delivery, resolution, reason, d, guard_dir, g)
+    resolve_marker(root, s, delivery_resolution, d, guard_dir, g)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_marker(
     root: &Path,
     s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     d: J,
     guard_dir: &Path,
     g: J,
@@ -2182,31 +2198,28 @@ fn resolve_marker(
     let marker = model::get(&g, "external_delivery").cloned();
     let expected = json!({
         "queue": root.display().to_string(),
-        "delivery": delivery,
+        "delivery": delivery_resolution.delivery,
         "session": d.get("session").cloned().unwrap_or(Value::Null)
     });
     let Some(marker) = marker.filter(|value| model::truthy(Some(value))) else {
-        return resolve_events(root, s, delivery, resolution, reason, d, guard_dir, g);
+        return resolve_events(root, s, delivery_resolution, d, guard_dir, g);
     };
     if marker != expected {
         return Err(queue_error("receiver marker belongs to another delivery"));
     }
-    resolve_events(root, s, delivery, resolution, reason, d, guard_dir, g)
+    resolve_events(root, s, delivery_resolution, d, guard_dir, g)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_events(
     root: &Path,
     mut s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     d: J,
     guard_dir: &Path,
     g: J,
 ) -> Result<J> {
-    acknowledge_resolved_events(&mut s, &d, resolution);
-    resolve_finish(root, s, delivery, resolution, reason, d, guard_dir, g)
+    acknowledge_resolved_events(&mut s, &d, delivery_resolution.resolution);
+    resolve_finish(root, s, delivery_resolution, d, guard_dir, g)
 }
 
 fn acknowledge_resolved_events(s: &mut J, d: &J, resolution: &str) {
@@ -2216,25 +2229,22 @@ fn acknowledge_resolved_events(s: &mut J, d: &J, resolution: &str) {
     acknowledge_event_ids(s, d);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_finish(
     root: &Path,
     mut s: J,
-    delivery: &str,
-    resolution: &str,
-    reason: &str,
+    delivery_resolution: &DeliveryResolution<'_>,
     mut d: J,
     guard_dir: &Path,
     mut g: J,
 ) -> Result<J> {
     d["phase"] = json!("resolved");
-    d["resolution"] = json!(resolution);
-    d["reason"] = json!(reason);
+    d["resolution"] = json!(delivery_resolution.resolution);
+    d["reason"] = json!(delivery_resolution.reason);
     d["resolved_at"] = json!(util::now());
     s["active"] = Value::Null;
     s["notify"] = json!(false);
     s["delivery_status"] = json!("resolved_delivery_disabled");
-    s["deliveries"][delivery] = d;
+    s["deliveries"][delivery_resolution.delivery] = d;
     model::remove(&mut g, "external_delivery");
     resolve_save(root, s, guard_dir, g)
 }

@@ -135,9 +135,12 @@ herdr-flow queue metrics --state-dir /absolute/queue --json
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo run --locked -- lint-policy
+cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets
 ```
+
+Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexity` 逐项设为 `forbid`；同时禁止覆盖已有 `forbid` lint 组的兼容性放行。源码和测试一律禁止通过 `allow`、`expect`、条件属性或宏中的属性豁免任何 Clippy 规则，也禁止用 `allow(warnings)` / `expect(warnings)` 隐藏诊断。`lint-policy` 检查整个仓库的 Rust 文件（包括未启用的条件分支），CI 在 Clippy 前执行；发现问题须修正代码，不能增加豁免或放宽阈值。
 
 测试覆盖队列/投递/ACK、任务状态机、guard transcript 游标、换班、review 配置、CI 分页与 required-jobs 判定、外部 Checks 身份、PR 来源/合并、合批冻结/隔离整合/快照、门禁客户端与工具函数。第一版迁移保留了原有安全边界与故障语义。
 
@@ -148,7 +151,7 @@ Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `carg
 - 每个函数的 `CRAP = CC² × (1 - coverage)³ + CC` 必须不超过 10。
 - CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。
 - 高复杂度函数必须拆分为小函数；低覆盖函数需要补测试。
-- 当前门禁测量 4,065 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 65.9%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
+- 当前门禁测量 4,085 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 67.2%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
 
 ```bash
 # 需要先安装 cargo-llvm-cov

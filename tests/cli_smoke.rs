@@ -12,7 +12,16 @@ fn entrypoint_covers_help_version_and_all_dispatches() {
     assert!(run(&[]).status.success());
     assert!(run(&["--help"]).status.success());
     assert!(run(&["--version"]).status.success());
-    for command in ["queue", "ci", "guard", "tui", "advisor", "opencode", "crap"] {
+    for command in [
+        "queue",
+        "ci",
+        "guard",
+        "tui",
+        "advisor",
+        "opencode",
+        "crap",
+        "lint-policy",
+    ] {
         let output = run(&[command, "--help"]);
         assert!(
             output.status.success(),
