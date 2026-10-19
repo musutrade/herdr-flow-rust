@@ -18,7 +18,7 @@ use crate::util;
 struct IntegrationContext<'a, 'callback> {
     batch: &'a mut J,
     bare: &'a Path,
-    checkpoint: &'a mut (dyn FnMut(&J) -> Result<()> + 'callback),
+    checkpoint: &'a mut (dyn FnMut(&mut J) -> Result<()> + 'callback),
 }
 
 const ALLOWED_COMMANDS: &[&str] = &[
@@ -73,15 +73,10 @@ fn build_environment(
     index: Option<&Path>,
     extra: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    let mut settings: BTreeMap<String, String> = std::env::vars()
-        .filter(|(key, _)| !key.starts_with("GIT_"))
-        .collect();
+    let mut settings = util::process::git_environment();
     let email =
         std::env::var("HERDR_BATCH_EMAIL").unwrap_or_else(|_| "batch@example.invalid".to_string());
     for (key, value) in [
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_TERMINAL_PROMPT", "0"),
         ("GIT_AUTHOR_NAME", "Herdr batch"),
         ("GIT_COMMITTER_NAME", "Herdr batch"),
     ] {
@@ -127,7 +122,8 @@ pub fn run(
         cwd: None,
         timeout: Duration::from_secs(60),
         env: settings,
-        clear_env: true,
+        clear_env: false,
+        remove_git_env: true,
         stdin: data.map(ToOwned::to_owned),
     };
     let output = util::process::run_command(&argv, &options).map_err(|error| {
@@ -472,7 +468,7 @@ fn prepare_bare_member_run(bare: &Path, member: &J, head: &str) -> Result<()> {
 fn prepare(
     batch: &mut J,
     record: &J,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
 ) -> Result<PathBuf> {
     let root = PathBuf::from(model::string(batch, "workspace").unwrap_or_default());
     let marker = root.join("owner.json");
@@ -516,10 +512,12 @@ fn prepare(
     Ok(bare)
 }
 
+/// Checkpoints may enrich the canonical batch (e.g. its repair binding) before
+/// saving it; subsequent integration steps and the final caller retain it.
 pub fn integrate(
     batch: &mut J,
     record: &J,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
 ) -> Result<()> {
     let bare = prepare(batch, record, checkpoint)?;
     integrate_drive(&mut IntegrationContext {
@@ -783,7 +781,7 @@ fn integrate_recover_move(
 
 fn integrate_recover_record(
     batch: &mut J,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
     offset: usize,
     journal: J,
 ) -> Result<()> {
@@ -933,7 +931,7 @@ fn integrate_applied(
 
 fn integrate_conflict(
     batch: &mut J,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
     offset: usize,
     task: &str,
     source: &str,
@@ -1034,7 +1032,7 @@ fn integrate_create(
 
 fn integrate_record(
     batch: &mut J,
-    checkpoint: &mut dyn FnMut(&J) -> Result<()>,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
     task: &str,
     source: &str,
     parent: &str,

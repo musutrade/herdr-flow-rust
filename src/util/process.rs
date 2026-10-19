@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,12 +20,16 @@ use crate::model::{self, J};
 use crate::util::fs::{read_bytes, resolve_path};
 use crate::util::pyjson::to_hex;
 
+mod capture;
+
 #[derive(Clone, Debug)]
 pub struct CommandOptions {
     pub cwd: Option<PathBuf>,
     pub timeout: Duration,
     pub env: BTreeMap<String, String>,
     pub clear_env: bool,
+    /// Remove inherited GIT_* variables before applying explicit env entries.
+    pub remove_git_env: bool,
     pub stdin: Option<Vec<u8>>,
 }
 
@@ -35,6 +40,7 @@ impl Default for CommandOptions {
             timeout: Duration::from_secs(30),
             env: BTreeMap::new(),
             clear_env: false,
+            remove_git_env: false,
             stdin: None,
         }
     }
@@ -67,15 +73,10 @@ impl CommandOutput {
 /// the caller as data; policy about failures belongs to each boundary.
 pub fn run_command(argv: &[String], options: &CommandOptions) -> Result<CommandOutput> {
     require_argv(argv)?;
+    let deadline = Instant::now() + options.timeout;
     let mut command = build_command(argv, options);
-    let mut child = spawn_child(&mut command, &argv[0])?;
-    let stdout = take_stdout(&mut child)?;
-    let stderr = take_stderr(&mut child)?;
-    let readers = spawn_readers(stdout, stderr);
-    start_stdin(&mut child, options);
-    let outcome = wait_for_child(&mut child, options.timeout);
-    let (stdout, stderr) = join_readers(readers);
-    build_output(outcome, &argv[0], stdout, stderr)
+    let child = spawn_child(&mut command, &argv[0])?;
+    capture::run(child, options, &argv[0], deadline)
 }
 
 fn require_argv(argv: &[String]) -> Result<()> {
@@ -94,7 +95,10 @@ fn build_command(argv: &[String], options: &CommandOptions) -> Command {
     apply_cwd(&mut command, options.cwd.as_deref());
     apply_env(&mut command, options);
     apply_stdin(&mut command, options.stdin.is_some());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
     command
 }
 
@@ -107,6 +111,9 @@ fn apply_cwd(command: &mut Command, cwd: Option<&Path>) {
 fn apply_env(command: &mut Command, options: &CommandOptions) {
     if options.clear_env {
         command.env_clear();
+    }
+    if options.remove_git_env {
+        remove_git_env(command);
     }
     apply_env_vars(command, &options.env);
 }
@@ -131,123 +138,39 @@ fn spawn_child(command: &mut Command, program: &str) -> Result<Child> {
         .map_err(|error| FlowError::new(ErrorKind::Io, format!("cannot start {program}: {error}")))
 }
 
-fn take_stdout(child: &mut Child) -> Result<ChildStdout> {
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| FlowError::io("missing stdout pipe"))
-}
-
-fn take_stderr(child: &mut Child) -> Result<ChildStderr> {
-    child
-        .stderr
-        .take()
-        .ok_or_else(|| FlowError::io("missing stderr pipe"))
-}
-
-struct ReaderPair {
-    stdout: thread::JoinHandle<Vec<u8>>,
-    stderr: thread::JoinHandle<Vec<u8>>,
-}
-
-fn spawn_readers(stdout: ChildStdout, stderr: ChildStderr) -> ReaderPair {
-    ReaderPair {
-        stdout: thread::spawn(move || read_all(stdout)),
-        stderr: thread::spawn(move || read_all(stderr)),
-    }
-}
-
-fn start_stdin(child: &mut Child, options: &CommandOptions) {
-    if let Some(data) = &options.stdin {
-        spawn_stdin(child, data);
-    }
-}
-
-fn spawn_stdin(child: &mut Child, data: &[u8]) {
-    if let Some(mut stdin) = child.stdin.take() {
-        let data = data.to_vec();
-        thread::spawn(move || {
-            let _ = stdin.write_all(&data);
-            let _ = stdin.flush();
-        });
-    }
-}
-
-enum WaitOutcome {
-    Exited(ExitStatus),
-    TimedOut,
-    Failed(FlowError),
-}
-
-fn wait_for_child(child: &mut Child, timeout: Duration) -> WaitOutcome {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return WaitOutcome::Exited(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return WaitOutcome::TimedOut;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return WaitOutcome::Failed(FlowError::io(format!(
-                    "cannot wait for command: {error}"
-                )));
-            }
+fn remove_git_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        if key.as_bytes().starts_with(b"GIT_") {
+            command.env_remove(key);
         }
     }
 }
 
-fn join_readers(readers: ReaderPair) -> (Vec<u8>, Vec<u8>) {
-    (
-        readers.stdout.join().unwrap_or_default(),
-        readers.stderr.join().unwrap_or_default(),
-    )
+/// A shared environment boundary for Git provenance, fingerprints and batch
+/// operations. Explicit batch index/identity entries can be added afterwards.
+pub fn git_environment() -> BTreeMap<String, String> {
+    [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "core.hooksPath"),
+        ("GIT_CONFIG_VALUE_0", "/dev/null"),
+        ("GIT_CONFIG_KEY_1", "core.fsmonitor"),
+        ("GIT_CONFIG_VALUE_1", "false"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
 }
 
-fn build_output(
-    outcome: WaitOutcome,
-    program: &str,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-) -> Result<CommandOutput> {
-    match outcome {
-        WaitOutcome::Exited(status) => Ok(CommandOutput {
-            status: exit_code(status),
-            stdout,
-            stderr,
-        }),
-        WaitOutcome::TimedOut => Err(FlowError::new(
-            ErrorKind::Timeout,
-            format!("{program} timed out"),
-        )),
-        WaitOutcome::Failed(error) => Err(error),
+pub fn git_options(timeout: Duration) -> CommandOptions {
+    CommandOptions {
+        timeout,
+        env: git_environment(),
+        remove_git_env: true,
+        ..Default::default()
     }
-}
-
-fn read_all(mut reader: impl Read) -> Vec<u8> {
-    let mut data = Vec::new();
-    let _ = reader.read_to_end(&mut data);
-    data
-}
-
-fn exit_code(status: ExitStatus) -> i32 {
-    if let Some(code) = status.code() {
-        return code;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return -signal;
-        }
-    }
-    1
 }
 
 /// The original `context_guard.command`: non-zero exit raises, stderr is
@@ -266,7 +189,11 @@ pub fn command(
         timeout,
         ..Default::default()
     };
-    let output = match run_command(argv, &options) {
+    checked_command(argv, &options, transient)
+}
+
+fn checked_command(argv: &[String], options: &CommandOptions, transient: bool) -> Result<Vec<u8>> {
+    let output = match run_command(argv, options) {
         Ok(output) => output,
         Err(error) if error.kind == ErrorKind::Timeout => {
             return Err(FlowError::new(
@@ -423,7 +350,7 @@ pub fn git_output_bounded(cwd: &Path, args: &[&str], timeout: Duration) -> Resul
         cwd.display().to_string(),
     ];
     argv.extend(args.iter().map(|argument| argument.to_string()));
-    command(&argv, None, timeout, false)
+    checked_command(&argv, &git_options(timeout), false)
 }
 
 pub fn checkout_root(cwd: &Path) -> PathBuf {
@@ -454,24 +381,17 @@ pub fn fingerprint(cwd: &Path) -> Result<String> {
 }
 
 fn repository_root(cwd: &Path) -> Result<PathBuf> {
-    let output = command(
-        &[
-            "git".to_string(),
-            "rev-parse".to_string(),
-            "--show-toplevel".to_string(),
-        ],
-        Some(cwd),
+    let output = git_output_bounded(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
         Duration::from_secs(30),
-        false,
     )?;
     let text = String::from_utf8_lossy(&output);
     Ok(PathBuf::from(text.trim()))
 }
 
 fn git_in(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut argv = vec!["git".to_string()];
-    argv.extend(args.iter().map(|argument| argument.to_string()));
-    command(&argv, Some(repo_root), Duration::from_secs(120), false)
+    git_output_bounded(repo_root, args, Duration::from_secs(120))
 }
 
 fn ensure_no_submodules(repo_root: &Path) -> Result<()> {

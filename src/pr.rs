@@ -64,10 +64,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         cwd.display().to_string(),
     ];
     argv.extend(args.iter().map(|argument| argument.to_string()));
-    let options = util::process::CommandOptions {
-        timeout: Duration::from_secs(15),
-        ..Default::default()
-    };
+    let options = util::process::git_options(Duration::from_secs(15));
     let output = util::process::run_command(&argv, &options).map_err(|error| {
         if error.kind == crate::error::ErrorKind::Timeout {
             FlowError::progress("local Git provenance query timed out")

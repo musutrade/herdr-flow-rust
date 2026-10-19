@@ -1477,12 +1477,12 @@ fn integrate_run(
     } = batch_state;
 
     batch["phase"] = json!("integrating");
-    let mut persist = |batch: &J| -> Result<()> {
+    let mut persist = |batch: &mut J| -> Result<()> {
         if model::string(batch, "phase").as_deref() == Some("integration_conflict") {
             let conflict_parent =
                 model::dig_str(batch, &["integration", "conflict", "parent"]).unwrap_or_default();
             candidate(&mut t, &conflict_parent)?;
-            t["lane"]["active"]["failure_token"] = json!(repair_token(batch));
+            batch["failure_token"] = json!(repair_token(batch));
             block(
                 &mut t,
                 "frozen task changes conflict",
@@ -1495,7 +1495,7 @@ fn integrate_run(
         t = save(s, t.clone(), now, "batch_integration_checkpoint")?;
         checkpoint(s)
     };
-    persist(&batch)?;
+    persist(&mut batch)?;
     let result = git::integrate(&mut batch, &lane, &mut persist);
     // Persist the final integration state even after a conflict return.
     t["lane"]["active"] = batch.clone();
