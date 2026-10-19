@@ -123,12 +123,14 @@
 
 ### H8. Git 子进程的环境隔离不一致
 
+- **P1 Issue #2 已修复**：PR 来源、checkout 边界、fingerprint 和 batch Git 共享环境边界，先移除继承的全部 `GIT_*`（包含非 UTF-8 环境键），再显式设置配置隔离及禁用 hooks/fsmonitor。回归使用两个独立仓库和 linked worktree，证明环境无法串库；batch 自有 index/身份仍可显式传入。以下记录为审计基线；`PATH` 的可执行文件信任及 checkout 查询失败后的 fallback 不属于此次修复。
 - `batch::git` 清理了 `GIT_*`、固定 config/hooks，但 `pr::git` 和 `util::{checkout_root,fingerprint}` 继承 `GIT_DIR`/`GIT_WORK_TREE`/`GIT_*` 和 `PATH`。
 - 复现：`GIT_DIR=repoB/.git` 时，对 checkout A 的 `pr::provenance` 成功使用 B 的 commit；`GIT_WORK_TREE` 可改变 `inside_checkout`；`PATH` 无 git 时 fallback 让检查变成“不在 checkout 内”。本地 `core.fsmonitor` 会在 fingerprint 的 `git diff` 中执行。
 - 影响：provenance/来源校验可能读到错误的仓库；状态目录隔离检查可被环境变量绕过。
 
 ### H9. 超时不是硬上限，子进程后代和输出未受限
 
+- **P1 Issue #1 的超时部分已修复**：独立进程组、非阻塞 stdin/stdout/stderr 和统一截止时间，超时关闭本端管道并清理自有进程组；保留 leader 至清理结束，避免 PID 重用导致误杀。脱离进程组的后代无法拖住管道收尾；不确定执行仍不自动重放。下述无限等待为审计基线；输出总量上限仍未设置。
 - `run_command` 超时只 kill 直接子进程，然后 join reader 线程直到 pipe EOF；子进程若派生了继承 stdout/stderr 的后台进程，调用会一直阻塞。
 - 复现：`timeout=200ms` + `sh -c 'sleep 3 & exit 0'`，实际 3.0s 后返回 `Ok(0)`。
 - stdout/stderr 无上限；batch `diff-tree` 的 binary patch 会整体进内存。可能导致 guard/CI watcher 挂起或 OOM。
@@ -255,3 +257,11 @@
 - 上游 live 证据（PR #16/#17、GateHouse/App Check）是 Python 实现的时点记录，不是 Rust 运行记录；本报告不把它们当作 Rust 验收。
 - Rust 测试中的 fake/脚本 fixture 只能证明状态机分支，不证明真实协议、权限、进程、网络和 GitHub 行为。
 - 本报告基于公开源码与本地可复现实验；未对生产仓库做写操作，未使用真实 App/发布凭据。
+
+## 10. P1 Issue 修复（相对 `b04b32c`）
+
+- [#1](https://github.com/musutrade/herdr-flow-rust/issues/1)：命令等待及非阻塞管道收尾共用截止时间；独立进程组负责清理，`waitid(WNOWAIT)` 保留 leader 至清理结束，避免 PID 重用。回归覆盖父进程提前退出、等待后代、后代脱离进程组仍持有管道、持续输出、阻塞 stdin、双输出流与大输入、信号退出及不误杀其他进程。脱离自有进程组的进程不由该组信号清理，但不能阻塞调用返回。
+- [#2](https://github.com/musutrade/herdr-flow-rust/issues/2)：PR/batch/checkout/fingerprint 统一 Git 环境边界，过滤继承的 `GIT_*`，隔离全局/系统配置，禁用 hooks/fsmonitor。真实 Git 回归覆盖独立仓库、linked worktree、定位/配置环境注入、非 UTF-8 环境及本地 fsmonitor。
+- [#3](https://github.com/musutrade/herdr-flow-rust/issues/3)：checkpoint 将 `failure_token` 写回 canonical batch，再保存至任务状态，最终返回不再丢失 token。真实 Git 冲突回归检查 checkpoint、最终返回、保存重载、使用保存 token 创建修复、拒绝过期/重复 token，以及 checkpoint 报错后的状态一致性。
+
+新增 `tests/p1_boundaries.rs` 的 7 项测试；其中 4 项修复前失败，复现了三个 P1。修复后全量 244 项测试通过；fmt、无 Clippy 豁免策略、Clippy `-D warnings` 和绝对 CRAP 门禁通过（4,095 个函数、约 68.1% 行覆盖、0 violations、无 baseline）。这些本地回归不替代真实 Herdr/GitHub 发布验收。
