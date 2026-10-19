@@ -9,7 +9,7 @@ use crate::guard;
 use crate::herdr::ReceiverFactory;
 use crate::model::{self, J};
 use crate::progress;
-use crate::util::{resolve_path, FileLock};
+use crate::util::FileLock;
 use crate::watch_service;
 
 pub fn scope(g: &J) -> J {
@@ -119,7 +119,7 @@ fn ensure(condition: bool, message: &str) -> Result<()> {
 
 fn guard_path(s: &J) -> PathBuf {
     let guard_dir = model::string(s, "guard_dir").unwrap_or_default();
-    resolve_path(Path::new(&guard_dir))
+    PathBuf::from(guard_dir)
 }
 
 fn lock_guard(path: &Path) -> Result<FileLock> {
@@ -128,7 +128,7 @@ fn lock_guard(path: &Path) -> Result<FileLock> {
 }
 
 fn read_guard_state(path: &Path) -> Result<J> {
-    crate::util::read_json(&path.join("state.json"))
+    crate::util::read_state_json(path, "state.json")
 }
 
 fn guard_scope_matches(s: &J, state: &J) -> bool {
@@ -325,7 +325,7 @@ fn load_readiness(
     session: Option<&str>,
     factory: &ReceiverFactory,
 ) -> Result<(J, Vec<String>, Vec<String>)> {
-    crate::util::read_json(&root.join("queue.json"))
+    crate::util::read_state_json(root, "queue.json")
         .and_then(|s| readiness_checks(root, &s, session, factory))
 }
 
@@ -473,13 +473,13 @@ pub fn receiver_session(s: &J, session: Option<&str>) -> Result<()> {
             "task mutation requires the registered coordinator session",
         ));
     };
-    let path = resolve_path(Path::new(&guard_dir));
+    let path = PathBuf::from(guard_dir);
     let _lock = guard::locked(&path).map_err(|error| {
         FlowError::progress(format!(
             "task mutation receiver registration/session changed: {error}"
         ))
     })?;
-    let state = crate::util::read_json(&path.join("state.json"))?;
+    let state = crate::util::read_state_json(&path, "state.json")?;
     if guard::scope(&state) != model::get(s, "receiver").cloned().unwrap_or(Value::Null)
         || model::string(&state, "session").as_deref() != Some(session)
         || model::string(&state, "phase").as_deref() != Some("monitoring")

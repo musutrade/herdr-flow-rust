@@ -3,6 +3,8 @@
 //! These tests exercise the refactored PR observer and repair decision paths
 //! without any network access and without modifying durable queue documents.
 
+pub mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -12,7 +14,6 @@ use herdr_flow::pr;
 use herdr_flow::util::pyjson::sha256_json_sorted;
 use herdr_flow::{ErrorKind, FlowError, Result};
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -227,7 +228,7 @@ fn unknown_pr_action_is_rejected() {
 
 #[test]
 fn observe_records_required_workflow_failure() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::tempdir().unwrap();
     let observed_at = write_observer(dir.path(), "failure", "failure");
     let api = Fake::new().get("pulls/7", pull());
     let mut state = queue_state(task());
@@ -259,7 +260,7 @@ fn observe_records_required_workflow_failure() {
 
 #[test]
 fn observe_records_successful_required_workflow() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::tempdir().unwrap();
     let observed_at = write_observer(dir.path(), "success", "success");
     let api = Fake::new().get("pulls/7", pull());
     let mut state = queue_state(task());

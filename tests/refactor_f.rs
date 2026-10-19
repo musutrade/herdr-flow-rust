@@ -1,6 +1,8 @@
 //! Offline regression checks for the batch refactor: dependency validation,
 //! bounded offer with dependencies, and public stall/repair/action edges.
 
+pub mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -120,9 +122,9 @@ struct Repo {
 
 impl Repo {
     fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::tempdir().unwrap();
         let root = tmp.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
+        common::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.email", "test@example.invalid"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -380,9 +382,9 @@ fn verifier_script(directory: &Path, name: &str, response: &J) -> PathBuf {
 
 #[test]
 fn gate_query_and_quiescent_accept_valid_receipts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let verifier = tmp.path().join("verifier");
-    std::fs::create_dir_all(&verifier).unwrap();
+    common::create_dir_all(&verifier).unwrap();
     let receipt_verifier = verifier.join("verify-receipt");
     let lane = json!({
         "repo": "o/r",

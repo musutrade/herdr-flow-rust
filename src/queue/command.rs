@@ -1,6 +1,6 @@
 //! One-shot command reservations and result capture for the wait queue.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -331,7 +331,7 @@ fn reserve(
     session: Option<&str>,
 ) -> Result<(PathBuf, J)> {
     let folder = root.join("commands").join(wait_id);
-    fs::create_dir_all(&folder)?;
+    util::ensure_private_dir(&folder, true)?;
     let record = json!({
         "argv": argv,
         "cwd": cwd,

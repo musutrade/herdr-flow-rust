@@ -12,7 +12,6 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -104,10 +103,7 @@ fn canonical_sha(value: &Value) -> String {
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .map_err(|error| FlowError::io(format!("cannot create advisor directory: {error}")))?;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-    Ok(())
+    crate::util::ensure_private_dir(path, true)
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -382,11 +378,25 @@ pub fn request(root: &Path, binding: &Value, handoff: &Value) -> Result<Value> {
 }
 
 fn request_validated(root: &Path, binding: &Value, handoff: &Value) -> Result<Value> {
+    crate::util::ensure_private_dir(root, true)?;
     let payload = request_payload(binding, handoff);
     let identity = canonical_sha(&payload);
+    reject_legacy_reservation(root, &payload, &identity)?;
     let folder = request_folder(root, &identity);
     create_private_dir(&folder)?;
     start_request_file(&folder, &payload, &identity)
+}
+
+fn reject_legacy_reservation(root: &Path, payload: &Value, identity: &str) -> Result<()> {
+    let legacy = sha256_hex(&crate::util::pyjson::legacy_canonical(payload));
+    if legacy == identity {
+        return Ok(());
+    }
+    match request_folder(root, &legacy).join("job.json").symlink_metadata() {
+        Ok(_) => Err(advisor("legacy Rust JSON advisor reservation exists; reconcile it before using a new epoch; automatic replay refused")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn request_payload(binding: &Value, handoff: &Value) -> Value {

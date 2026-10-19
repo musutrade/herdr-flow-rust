@@ -36,7 +36,7 @@ fn start_ticks(pid: u32) -> Option<String> {
 /// Inspect watcher identity, heartbeat and lock ownership.
 pub fn health(root: &Path) -> J {
     let root = root.to_path_buf();
-    let state = util::read_json(&root.join("watch.json"));
+    let state = util::read_state_json(&root, "watch.json");
     let Ok(state) = state else {
         return unhealthy(
             "watcher identity or heartbeat is unavailable",
@@ -212,8 +212,7 @@ where
 }
 
 fn prepare_watch_root(root: &Path) -> Result<PathBuf> {
-    let root = util::resolve_path(root);
-    std::fs::create_dir_all(&root)?;
+    let root = util::state_dir(root, true)?;
     Ok(root)
 }
 
@@ -326,7 +325,7 @@ where
     V: FnOnce() -> Result<()>,
 {
     validate()
-        .map(|()| util::resolve_path(root))
+        .and_then(|()| util::state_dir(root, true))
         .and_then(|root| start_watch_background(root, argv_without_exe, timeout))
 }
 

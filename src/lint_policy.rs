@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn cli_checks_all_rust_files_and_reports_invalid_input() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::util::fs::test_tempdir();
         fs::create_dir(root.path().join("tests")).unwrap();
         let file = root.path().join("tests/fixture.rs");
         fs::write(&file, "#[cfg_attr(any(), allow(clippy::all))] fn f() {}").unwrap();

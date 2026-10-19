@@ -1177,7 +1177,7 @@ fn run_inner_root(root: &Path, args: &Args) -> Result<Option<i32>> {
 }
 
 fn run_inner(args: &Args) -> Result<Option<i32>> {
-    let root = util::resolve_path(&args.state_dir);
+    let root = util::state_dir(&args.state_dir, true)?;
     run_inner_root(&root, args)
 }
 

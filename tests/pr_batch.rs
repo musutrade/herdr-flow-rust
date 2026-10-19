@@ -1,5 +1,7 @@
 //! PR provenance/publication and bounded batch integration over real Git.
 
+pub mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,9 +25,9 @@ struct Repo {
 
 impl Repo {
     fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::tempdir().unwrap();
         let root = tmp.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
+        common::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.email", "test@example.invalid"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -242,7 +244,7 @@ fn pr_prepare_begin_reconcile_and_landing() {
 #[test]
 fn batch_offer_freeze_integrate_and_snapshot() {
     let repo = Repo::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let integration_root = tmp.path().join("integration");
     let mut lane_task = task(&repo);
     lane_task["task"] = json!("lane");
@@ -331,7 +333,7 @@ fn batch_offer_freeze_integrate_and_snapshot() {
     assert!(model::array_field(active, "versions").is_some());
     let workspace = PathBuf::from(model::string(active, "workspace").unwrap());
     // Pre-populate the private object store so integration never needs network.
-    std::fs::create_dir_all(&workspace).unwrap();
+    common::create_dir_all(&workspace).unwrap();
     util::atomic_write_json(
         &workspace.join("owner.json"),
         &json!({"batch": batch_id, "repo": "o/r", "base": repo.base}),
@@ -393,13 +395,17 @@ fn batch_offer_freeze_integrate_and_snapshot() {
 #[test]
 fn batch_gate_repair_imports_verified_range_before_private_ref_update() {
     let repo = Repo::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let workspace = tmp.path().join("batch-repair");
-    std::fs::create_dir(&workspace).unwrap();
+    common::create_dir(&workspace).unwrap();
     let bare = workspace.join("objects.git");
     git(
         &workspace,
         &["init", "--bare", "-q", bare.to_str().unwrap()],
+    );
+    git(
+        &bare,
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
     );
     git(
         &bare,
@@ -417,12 +423,16 @@ fn batch_gate_repair_imports_verified_range_before_private_ref_update() {
     owner["lane"] = json!({
         "repo": "o/r",
         "host": "github.com",
+        "base_ref": "main",
         "workspace_root": tmp.path(),
+        "max_repairs": 2,
         "active": {
             "id": "batch-repair",
             "base": repo.base,
             "phase": "gate_failed",
             "workspace": workspace,
+            "members": [],
+            "versions": [],
             "corrections": [],
             "integration": {"mapping": [], "offset": 0}
         }
@@ -468,12 +478,22 @@ fn batch_gate_repair_imports_verified_range_before_private_ref_update() {
         repo.base
     );
 
-    batch::lane::repair_finish(
+    let finished = batch::action(
         &mut s,
+        "batch-repair-finish",
         &json!({"task": "o/r#1", "state_version": repaired["state_version"], "batch": "batch-repair"}),
         21.0,
         &mut |_| Ok(()),
     ).unwrap();
+    assert_eq!(finished, s["tasks"]["o/r#1"]);
+    assert!(
+        finished["state_version"].as_i64().unwrap() > repaired["state_version"].as_i64().unwrap()
+    );
+    assert!(finished["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["action"] == "batch_repair_ref_updated"));
     assert_eq!(
         output(&bare, &["rev-parse", "refs/herdr/candidate"]),
         repo.head
@@ -481,11 +501,21 @@ fn batch_gate_repair_imports_verified_range_before_private_ref_update() {
     assert!(s["tasks"]["o/r#1"]["lane"]["active"]
         .get("repair_update")
         .is_none());
+    let api = Fake::new().with("branches/main", json!({"commit": {"sha": repo.base}}));
+    let snapshot = batch::lane::snapshot(
+        &mut s,
+        &json!({"task": "o/r#1", "state_version": finished["state_version"],
+            "batch": "batch-repair", "issue": 7}),
+        22.0,
+        Some(&api),
+    )
+    .unwrap();
+    assert_eq!(snapshot["lane"]["active"]["phase"], "snapshot_frozen");
 }
 
 #[test]
 fn batch_git_rejects_dangerous_options_and_commands() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let result = batch::git::run(
         tmp.path(),
         &["-c".to_string(), "x=y".to_string(), "status".to_string()],

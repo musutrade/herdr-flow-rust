@@ -1,5 +1,7 @@
 //! Handoff advisor reservation, worker lifecycle, cleanup and recovery tests.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +11,6 @@ use std::time::{Duration, Instant};
 use herdr_flow::codex::advisor::{self, AdvisorClient};
 use herdr_flow::util::{atomic_write_json, canonical, read_json, sha256_hex, FileLock};
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 const THREAD: &str = "22222222-2222-2222-2222-222222222222";
@@ -26,7 +27,7 @@ fn lock_env() -> MutexGuard<'static, ()> {
 
 fn with_env<T>(run: impl FnOnce(&Path) -> T) -> T {
     let _guard = lock_env();
-    let temporary = TempDir::new().unwrap();
+    let temporary = common::tempdir().unwrap();
     let state = temporary.path().join("state");
     std::env::set_var("XDG_STATE_HOME", &state);
     run(temporary.path())
@@ -437,7 +438,7 @@ fn request_refuses_to_replace_a_mismatched_reserved_job() {
         });
         let identity = sha256_hex(&canonical(&payload));
         let folder = root.join("advisor").join(&identity);
-        fs::create_dir_all(&folder).unwrap();
+        common::create_dir_all(&folder).unwrap();
         let mut forged = payload.clone();
         forged["binding"]["task"] = json!("other");
         atomic_write_json(&folder.join("job.json"), &forged).unwrap();
@@ -446,6 +447,37 @@ fn request_refuses_to_replace_a_mismatched_reserved_job() {
             error.to_string(),
             "advisor immutable input identity mismatch"
         );
+    });
+}
+
+#[test]
+fn request_refuses_to_replay_a_legacy_rust_json_reservation() {
+    with_env(|base| {
+        let root = base.join("guard");
+        let mut handoff = handoff();
+        handoff["extra"] = json!({"text": "\u{7f}", "tiny": 1e-7, "large": 1e20,
+            "uint": u64::MAX, "fraction": 0.5, "zero": -0.0});
+        let payload = json!({"policy_version": advisor::POLICY_VERSION,
+            "binding": binding(), "handoff": handoff});
+        // The original Rust encoder emitted DEL raw and floats in fixed form.
+        let legacy_bytes = String::from_utf8(canonical(&payload))
+            .unwrap()
+            .replace("\\u007f", "\u{7f}")
+            .replace("1e-07", "0.0000001")
+            .replace("1e+20", "100000000000000000000.0");
+        let legacy_id = sha256_hex(legacy_bytes.as_bytes());
+        let new_id = sha256_hex(&canonical(&payload));
+        assert_ne!(legacy_id, new_id);
+        let folder = root.join("advisor").join(legacy_id);
+        let mut job = payload;
+        job["id"] = json!(folder.file_name().unwrap().to_str().unwrap());
+        job["thread_id"] = json!(THREAD);
+        job["status"] = json!("uncertain");
+        atomic_write_json(&folder.join("job.json"), &job).unwrap();
+        let error = advisor::request(&root, &binding(), &handoff).unwrap_err();
+        assert!(error.message.contains("automatic replay refused"));
+        assert!(!root.join("advisor").join(new_id).exists());
+        assert_eq!(read_json(&folder.join("job.json")).unwrap(), job);
     });
 }
 
@@ -807,7 +839,7 @@ fn global_busy_skips_without_calling_rpc() {
         let root = base.join("guard");
         let job = request_job(&root, None);
         let (_, _, lock_path) = globals();
-        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        common::create_dir_all(lock_path.parent().unwrap()).unwrap();
         let guard = FileLock::acquire(&lock_path, false).unwrap().unwrap();
         let server = FakeServer::new(None);
         let factory = server.factory();
@@ -829,7 +861,7 @@ fn abandoned_global_reservation_prevents_unbounded_leak() {
         let root = base.join("guard");
         let job = request_job(&root, None);
         let (fault, active, _) = globals();
-        fs::create_dir_all(fault.parent().unwrap()).unwrap();
+        common::create_dir_all(fault.parent().unwrap()).unwrap();
         atomic_write_json(
             &active,
             &json!({"id": "other", "phase": "thread_start_sending"}),
@@ -917,7 +949,7 @@ fn crashed_job_on_other_server(root: &Path) -> (Value, Value, Registry) {
     result["thread_id"] = json!(THREAD);
     write_result(&old, &result);
     let (_, active, _) = globals();
-    fs::create_dir_all(active.parent().unwrap()).unwrap();
+    common::create_dir_all(active.parent().unwrap()).unwrap();
     atomic_write_json(
         &active,
         &json!({"job": old["path"], "id": old["id"], "thread_id": THREAD}),
@@ -980,7 +1012,7 @@ fn clear_fault_without_thread_requires_attestation_and_lease() {
     with_env(|base| {
         let _ = base;
         let (fault, active, lock_path) = globals();
-        fs::create_dir_all(fault.parent().unwrap()).unwrap();
+        common::create_dir_all(fault.parent().unwrap()).unwrap();
         atomic_write_json(
             &fault,
             &json!({"id": "x", "reason": "unknown start", "thread_id": null}),
@@ -1150,7 +1182,7 @@ fn never_created_requires_every_signal() {
 fn wait_result_polls_recorded_result() {
     with_env(|base| {
         let root = base.join("guard");
-        fs::create_dir_all(&root).unwrap();
+        common::create_dir_all(&root).unwrap();
         assert_eq!(
             advisor::wait_result(&root, 0.0).unwrap_err().kind,
             herdr_flow::ErrorKind::Io
@@ -1211,7 +1243,7 @@ fn cli_worker_and_clear_fault_exit_codes() {
         );
 
         let (fault, _, _) = globals();
-        fs::create_dir_all(fault.parent().unwrap()).unwrap();
+        common::create_dir_all(fault.parent().unwrap()).unwrap();
         atomic_write_json(
             &fault,
             &json!({"id": "cli", "reason": "unknown", "thread_id": null}),

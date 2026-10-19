@@ -2,17 +2,19 @@
 //! `--all --skip-tests` (or an explicit coverage export) so they never invoke
 //! git, cargo test or cargo-llvm-cov from inside the test suite.
 
+pub mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
 fn project(files: &[(&str, &str)]) -> TempDir {
-    let directory = TempDir::new().expect("temporary crate root");
+    let directory = common::tempdir().expect("temporary crate root");
     for (relative, contents) in files {
         let path = directory.path().join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent directory");
+            common::create_dir_all(parent).expect("create parent directory");
         }
         fs::write(path, contents).expect("write fixture source");
     }
@@ -145,12 +147,12 @@ fn malformed_inputs_are_tool_errors() {
 
 #[test]
 fn empty_or_missing_source_tree_is_a_tool_error() {
-    let empty = TempDir::new().expect("temporary root");
-    fs::create_dir_all(empty.path().join("src")).expect("create src");
+    let empty = common::tempdir().expect("temporary root");
+    common::create_dir_all(empty.path().join("src")).expect("create src");
     let no_functions = args(empty.path(), &["--all", "--skip-tests"]);
     assert_eq!(herdr_flow::crap::cli(&no_functions), 2);
 
-    let missing = TempDir::new().expect("temporary root");
+    let missing = common::tempdir().expect("temporary root");
     let no_src = args(missing.path(), &["--all", "--skip-tests"]);
     assert_eq!(herdr_flow::crap::cli(&no_src), 2);
 }
