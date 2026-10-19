@@ -702,7 +702,6 @@ fn dependency_task(
     dependency_head(lane, source, mt, dep, accepted, resolved, dep_task, dt)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dependency_head(
     lane: &J,
     source: &J,
@@ -987,7 +986,6 @@ fn offer_member_dependencies(
     offer_member_evidence(s, now, t, lane, m, mt, source, checks, dependencies)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn offer_member_evidence(
     s: &mut J,
     now: f64,
@@ -1572,7 +1570,6 @@ fn snapshot_checkout_path(batch: &J) -> PathBuf {
     Path::new(&model::string(batch, "workspace").unwrap_or_default()).join("snapshot")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_checkout(
     s: &mut J,
     spec: &J,
@@ -1592,7 +1589,6 @@ fn snapshot_checkout(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse(
     s: &mut J,
     spec: &J,
@@ -1614,7 +1610,6 @@ fn snapshot_reuse(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_status(
     s: &mut J,
     spec: &J,
@@ -1641,7 +1636,6 @@ fn snapshot_reuse_status(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_guard(
     s: &mut J,
     spec: &J,
@@ -1668,7 +1662,6 @@ fn checkout_dirty(root: &str, checkout: &Path, status: &str) -> bool {
     root != checkout.display().to_string() || !status.is_empty()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_reuse_checkout(
     s: &mut J,
     spec: &J,
@@ -1692,7 +1685,6 @@ fn snapshot_reuse_checkout(
     snapshot_candidate(s, spec, now, t, lane, batch, bare, checkout, head, tree)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_create(
     s: &mut J,
     spec: &J,
@@ -1722,7 +1714,6 @@ fn snapshot_create(
     snapshot_candidate(s, spec, now, t, lane, batch, bare, checkout, head, tree)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_candidate(
     s: &mut J,
     spec: &J,
@@ -1751,7 +1742,6 @@ fn snapshot_candidate(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_own(
     s: &mut J,
     spec: &J,
@@ -1786,7 +1776,6 @@ fn snapshot_own_commits(bare: &Path, base: &str, head: &str) -> Result<Vec<Strin
     .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_prepare(
     s: &mut J,
     spec: &J,
@@ -2507,7 +2496,6 @@ fn reconcile_landing(
     reconcile_receipt(working, s, t, lane, batch, r, landing, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_receipt(
     working: &mut J,
     s: &mut J,
@@ -2533,7 +2521,6 @@ fn reconcile_receipt_value(batch: &J) -> Result<J> {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_receipt_decision(
     working: &mut J,
     s: &mut J,
@@ -2553,7 +2540,6 @@ fn reconcile_receipt_decision(
     reconcile_checks(working, s, t, lane, batch, r, landing, receipt, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_checks(
     working: &mut J,
     s: &mut J,
@@ -2581,7 +2567,6 @@ fn reconcile_check_config(batch: &J, lane: &J, receipt: &J) -> J {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_check_state(
     working: &mut J,
     s: &mut J,
@@ -2614,7 +2599,6 @@ fn reconcile_checks_ok(checks: &[J]) -> bool {
     .all(|ok| ok)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit(
     working: &mut J,
     s: &mut J,
@@ -2632,7 +2616,6 @@ fn reconcile_commit(
     reconcile_commit_tree(working, s, t, lane, batch, r, landing, commit, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_tree(
     working: &mut J,
     s: &mut J,
@@ -2648,7 +2631,6 @@ fn reconcile_commit_tree(
     reconcile_commit_compare(working, s, t, lane, batch, r, landing, actual, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_compare(
     working: &mut J,
     s: &mut J,
@@ -2666,7 +2648,6 @@ fn reconcile_commit_compare(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_commit_guard(
     working: &mut J,
     s: &mut J,
@@ -2687,7 +2668,6 @@ fn reconcile_commit_guard(
     reconcile_members(working, s, t, lane, batch, r, landing, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_members(
     working: &mut J,
     s: &mut J,
@@ -2738,7 +2718,6 @@ fn reconcile_member(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_land(
     working: &mut J,
     s: &mut J,
@@ -3027,7 +3006,6 @@ fn repair_intent_diagnosis(
     repair_intent_kind(t, action, now, lane, batch, expected, diagnosis)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_kind(
     t: &mut J,
     action: &J,
@@ -3097,7 +3075,6 @@ fn repair_limit_hit(
         || same_batch >= model::int(lane, "max_repairs").unwrap_or(0) as usize
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_workspace(
     t: &mut J,
     action: &J,
@@ -3115,7 +3092,6 @@ fn repair_intent_workspace(
     repair_intent_isolation(t, action, now, lane, batch, expected, token, workspace)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_intent_isolation(
     t: &mut J,
     action: &J,
@@ -3270,7 +3246,6 @@ fn repair_inputs(s: &mut J, spec: &J, now: f64, t: J, lane: J, batch: J) -> Resu
     repair_validate(s, spec, now, t, lane, batch, operation, op, event)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_validate(
     s: &mut J,
     spec: &J,
@@ -3340,7 +3315,6 @@ fn repair_assignment_ok(t: &J, op: &Option<J>) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_checkout(
     s: &mut J,
     spec: &J,
@@ -3363,7 +3337,6 @@ fn repair_workspace_path(spec: &J) -> Result<PathBuf> {
     )?)))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_workspace_check(
     s: &mut J,
     spec: &J,
@@ -3383,7 +3356,6 @@ fn repair_workspace_check(
     repair_head(s, spec, now, t, lane, batch, operation, op, checkout)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_head(
     s: &mut J,
     spec: &J,
@@ -3399,7 +3371,6 @@ fn repair_head(
     repair_evidence(s, spec, now, t, lane, batch, operation, op, checkout, head)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_evidence(
     s: &mut J,
     spec: &J,
@@ -3422,7 +3393,6 @@ fn repair_evidence(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_import(
     s: &mut J,
     now: f64,
@@ -3441,7 +3411,6 @@ fn repair_import(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_count(
     s: &mut J,
     now: f64,
@@ -3478,7 +3447,6 @@ fn repair_commit_count(bare: &Path, batch: &J, head: &str) -> Result<u64> {
     .unwrap_or(u64::MAX))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_limit(
     s: &mut J,
     now: f64,
@@ -3504,7 +3472,6 @@ fn repair_limit(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_phase(
     s: &mut J,
     now: f64,
@@ -3528,7 +3495,6 @@ fn repair_phase(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_gate_phase(
     s: &mut J,
     now: f64,
@@ -3551,7 +3517,6 @@ fn repair_gate_phase(
     Err(FlowError::progress("batch no longer awaits this repair"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_conflict(
     s: &mut J,
     now: f64,
@@ -3574,7 +3539,6 @@ fn repair_conflict(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_conflict_mapping(
     s: &mut J,
     now: f64,
@@ -3617,7 +3581,6 @@ fn push_batch_mapping(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_gate_failed(
     s: &mut J,
     now: f64,
@@ -3656,7 +3619,6 @@ fn repair_own_commits(bare: &Path, parent: &str, head: &str) -> Result<Vec<Strin
     .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_corrections(
     s: &mut J,
     now: f64,
@@ -3684,7 +3646,6 @@ fn repair_corrections(
     repair_common(s, now, t, lane, batch, operation, parent, head)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_correction(batch: &mut J, entry: J) {
     if !matches!(batch.get("corrections"), Some(Value::Array(_))) {
         batch["corrections"] = json!([]);
@@ -3694,7 +3655,6 @@ fn append_correction(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_common(
     s: &mut J,
     now: f64,
@@ -3809,7 +3769,6 @@ fn repair_finish_actual(
     repair_finish_verify(s, now, checkpoint, t, lane, batch, update, bare, actual)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_verify(
     s: &mut J,
     now: f64,
@@ -3837,7 +3796,6 @@ fn repair_ref_ok(actual: &str, parent: &str, head: &str) -> bool {
     actual == parent || actual == head
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_ref(
     s: &mut J,
     now: f64,
@@ -3856,7 +3814,6 @@ fn repair_finish_ref(
     repair_finish_done(s, now, checkpoint, t, lane, batch)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_finish_update_ref(
     s: &mut J,
     now: f64,
@@ -4117,7 +4074,6 @@ fn rebase_remote_pr(api: &dyn GitHubApi, t: &J) -> Result<(J, J)> {
     Ok((r, remote))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rebase_pr_check(
     s: &mut J,
     spec: &J,

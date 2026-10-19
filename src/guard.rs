@@ -3161,7 +3161,6 @@ struct InitRequest<'a> {
     codex_binary: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn init(
     root: &Path,
     pane: &str,

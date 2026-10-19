@@ -76,7 +76,6 @@ fn request_job_with(root: &Path, binding: &Value, change: Option<&str>) -> Value
     advisor::request(root, binding, &document).unwrap()
 }
 
-#[allow(clippy::type_complexity)]
 fn run_job(
     job: &Value,
     factory: &dyn Fn(&str, f64) -> herdr_flow::Result<Box<dyn AdvisorClient>>,

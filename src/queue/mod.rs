@@ -1262,7 +1262,6 @@ fn guard_root(s: &J) -> Result<PathBuf> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn operator_notice(
     root: &Path,
     s: &mut J,
@@ -1278,7 +1277,6 @@ pub fn operator_notice(
     operator_notice_attempt(root, s, delivery, field, title, body, factory)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_attempt(
     root: &Path,
     s: &mut J,
@@ -1299,7 +1297,6 @@ fn store_delivery_attempt(s: &mut J, delivery: &J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_save(
     root: &Path,
     s: &mut J,
@@ -1313,7 +1310,6 @@ fn operator_notice_save(
     operator_notice_guard(root, s, delivery, field, title, body, factory)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_guard(
     root: &Path,
     s: &mut J,
@@ -1327,7 +1323,6 @@ fn operator_notice_guard(
     operator_notice_submit(root, s, delivery, field, title, body, factory, &guard_dir)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn operator_notice_submit(
     root: &Path,
     s: &mut J,
@@ -1734,7 +1729,6 @@ fn deliver_agent(
     deliver_agent_checked(root, s, pending, guard_dir, g, adapter, &agent)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn deliver_agent_checked(
     root: &Path,
     s: &mut J,
@@ -1978,7 +1972,6 @@ fn ensure_ack_receiver(s: &J, g: &J, session: &str) -> Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn acknowledge_marker(
     root: &Path,
     s: J,
@@ -2168,7 +2161,6 @@ fn resolve_guard_state(
     resolve_marker(root, s, delivery, resolution, reason, d, guard_dir, g)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_marker(
     root: &Path,
     s: J,
@@ -2194,7 +2186,6 @@ fn resolve_marker(
     resolve_events(root, s, delivery, resolution, reason, d, guard_dir, g)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_events(
     root: &Path,
     mut s: J,
@@ -2216,7 +2207,6 @@ fn acknowledge_resolved_events(s: &mut J, d: &J, resolution: &str) {
     acknowledge_event_ids(s, d);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_finish(
     root: &Path,
     mut s: J,

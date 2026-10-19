@@ -676,7 +676,6 @@ fn integrate_iteration(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_choose(
     batch: &mut J,
     bare: &Path,
@@ -700,7 +699,6 @@ fn integrate_choose(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover(
     batch: &mut J,
     bare: &Path,
@@ -724,7 +722,6 @@ fn journal_mismatch(journal: &J, source: &str, parent: &str) -> bool {
         || model::string(journal, "parent") != Some(parent.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_ref(
     batch: &mut J,
     bare: &Path,
@@ -756,7 +753,6 @@ fn integration_ref_matches(actual: &str, parent: &str, integrated: &str) -> bool
     actual == parent || actual == integrated
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_update(
     batch: &mut J,
     bare: &Path,
@@ -775,7 +771,6 @@ fn integrate_recover_update(
     integrate_recover_record(batch, checkpoint, offset, journal)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_recover_move(
     batch: &mut J,
     bare: &Path,
@@ -822,7 +817,6 @@ fn push_integration_mapping(batch: &mut J, entry: J) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_apply_step(
     batch: &mut J,
     bare: &Path,
@@ -841,7 +835,6 @@ fn integrate_apply_step(
     integrate_read_tree(batch, bare, checkpoint, offset, task, source, parent)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_read_tree(
     batch: &mut J,
     bare: &Path,
@@ -865,7 +858,6 @@ fn integrate_read_tree(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_diff(
     batch: &mut J,
     bare: &Path,
@@ -900,7 +892,6 @@ fn integrate_diff(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_apply(
     batch: &mut J,
     bare: &Path,
@@ -931,7 +922,6 @@ fn integrate_apply(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_applied(
     batch: &mut J,
     bare: &Path,
@@ -967,7 +957,6 @@ fn integrate_conflict(
     checkpoint(batch)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_tree(
     batch: &mut J,
     bare: &Path,
@@ -982,7 +971,6 @@ fn integrate_tree(
     integrate_date(batch, bare, checkpoint, offset, task, source, parent, tree)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_date(
     batch: &mut J,
     bare: &Path,
@@ -1007,7 +995,6 @@ fn integrate_date(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn integrate_create(
     batch: &mut J,
     bare: &Path,

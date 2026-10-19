@@ -1373,7 +1373,6 @@ impl RunState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn start_thread(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1461,7 +1460,6 @@ fn sorted_keys(map: &Map<String, Value>) -> Vec<String> {
     names
 }
 
-#[allow(clippy::too_many_arguments)]
 fn begin_thread_creation(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1489,7 +1487,6 @@ fn begin_thread_creation(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_thread_start(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1527,7 +1524,6 @@ fn create_thread_start(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_creation_attempt(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1563,7 +1559,6 @@ fn record_creation_attempt(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call_and_accept_thread_start(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1600,7 +1595,6 @@ fn call_thread_start(
     client.call("thread/start", &start_params(cwd, names), Some(timeout))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn accept_thread_start(
     response: Value,
     client: &mut dyn AdvisorClient,
@@ -1627,7 +1621,6 @@ fn accept_thread_start(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn begin_thread_identity(
     thread_value: Value,
     response: Value,
@@ -1673,7 +1666,6 @@ fn canonical_thread_id(thread_value: &Value) -> Result<String> {
         .ok_or_else(|| advisor("advisor start returned an invalid thread identity"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_thread_started(
     thread_value: Value,
     thread_id: String,
@@ -1707,7 +1699,6 @@ fn persist_thread_started(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_thread_in_active(
     thread_value: Value,
     thread_id: String,
@@ -1742,7 +1733,6 @@ fn record_thread_in_active(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_start_model(
     response: Value,
     thread_value: Value,
@@ -1783,7 +1773,6 @@ fn is_luna_model(model: &Value) -> bool {
     model.is_null() || model.as_str() == Some("gpt-6-luna")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_thread_start_events(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1807,7 +1796,6 @@ fn check_thread_start_events(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_history_sending(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1831,7 +1819,6 @@ fn persist_history_sending(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn inject_history(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1856,7 +1843,6 @@ fn inject_history(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn inject_history_call(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1899,7 +1885,6 @@ fn history_items(thread_id: &str) -> Value {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_history_ready(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1923,7 +1908,6 @@ fn persist_history_ready(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_history_events(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1947,7 +1931,6 @@ fn check_history_events(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_turn_sending(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -1971,7 +1954,6 @@ fn persist_turn_sending(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_turn(
     client: &mut dyn AdvisorClient,
     job: &Value,
@@ -2001,7 +1983,6 @@ fn handoff_text(job: &Value) -> Result<String> {
         .map_err(|_| advisor("advisor handoff is not canonical text"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call_turn_start(
     client: &mut dyn AdvisorClient,
     thread_value: Value,
@@ -2025,7 +2006,6 @@ fn call_turn_start(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_turn_request(
     client: &mut dyn AdvisorClient,
     thread_value: Value,
@@ -2116,7 +2096,6 @@ fn write_running_turn(
     Ok((thread_value, turn_value))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cleanup_thread(
     factory: &AdvisorClientFactory<'_>,
     job: &Value,
@@ -2753,7 +2732,6 @@ fn persist_ambiguous_failure(run: &mut JobRun) -> Result<Value> {
     result_summary(&run.path)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cleanup_and_summarize(
     run: &mut JobRun,
     factory: &AdvisorClientFactory<'_>,
@@ -3082,7 +3060,6 @@ fn process_existing_records(
     collect_verified(global_dir, records, threaded, reason, no_thread, factory)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_verified(
     global_dir: &Path,
     records: Vec<(String, Value)>,
@@ -3103,7 +3080,6 @@ fn verify_thread_entry(
     Ok(entry.into_iter().collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_other_verifications(
     mut verified: Vec<Value>,
     records: &[(String, Value)],

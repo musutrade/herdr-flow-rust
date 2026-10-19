@@ -103,6 +103,7 @@ name = "herdr-flow"
 version = "1.0.0"
 dependencies = [
  "libc",
+ "proc-macro2",
  "regex",
  "serde",
  "serde_json",
