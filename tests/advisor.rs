@@ -76,10 +76,7 @@ fn request_job_with(root: &Path, binding: &Value, change: Option<&str>) -> Value
     advisor::request(root, binding, &document).unwrap()
 }
 
-fn run_job(
-    job: &Value,
-    factory: &dyn Fn(&str, f64) -> herdr_flow::Result<Box<dyn AdvisorClient>>,
-) -> herdr_flow::Result<Value> {
+fn run_job(job: &Value, factory: &advisor::AdvisorClientFactory<'_>) -> herdr_flow::Result<Value> {
     advisor::run_with_factory(
         Path::new(job["path"].as_str().unwrap()),
         20.0,

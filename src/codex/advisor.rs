@@ -27,6 +27,22 @@ use crate::util::{
     write_new_file, xdg_state_home, FileLock,
 };
 
+struct CreationPaths<'a> {
+    job_path: &'a str,
+    active_path: &'a Path,
+}
+
+struct StartedThread {
+    value: Value,
+    id: String,
+}
+
+struct RunProgress<'a> {
+    result: &'a mut Value,
+    result_path: &'a Path,
+    state: &'a mut RunState,
+}
+
 pub const POLICY_VERSION: i64 = 1;
 pub const INFERENCE_SECONDS: f64 = 20.0;
 pub const CLEANUP_SECONDS: f64 = 10.0;
@@ -1376,23 +1392,17 @@ impl RunState {
 fn start_thread(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let (cwd, names) = prepare_thread_start(client, job, deadline)?;
     begin_thread_creation(
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
         cwd,
         names,
     )
@@ -1463,12 +1473,9 @@ fn sorted_keys(map: &Map<String, Value>) -> Vec<String> {
 fn begin_thread_creation(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
     cwd: String,
     names: Vec<String>,
 ) -> Result<(Value, Value)> {
@@ -1476,12 +1483,9 @@ fn begin_thread_creation(
     create_thread_start(
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
         cwd,
         names,
     )
@@ -1490,19 +1494,16 @@ fn begin_thread_creation(
 fn create_thread_start(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
     cwd: String,
     names: Vec<String>,
 ) -> Result<(Value, Value)> {
     // create_attempted is monotonic: no later persist ever removes it.
     persist(
-        result,
-        result_path,
+        run_progress.result,
+        run_progress.result_path,
         json!({
             "status": "running",
             "phase": "thread_start_sending",
@@ -1513,12 +1514,9 @@ fn create_thread_start(
     record_creation_attempt(
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
         cwd,
         names,
     )
@@ -1527,33 +1525,27 @@ fn create_thread_start(
 fn record_creation_attempt(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
     cwd: String,
     names: Vec<String>,
 ) -> Result<(Value, Value)> {
     atomic_write_json(
-        active_path,
+        creation_paths.active_path,
         &json!({
-            "job": job_path,
+            "job": creation_paths.job_path,
             "id": job.get("id").cloned().unwrap_or(Value::Null),
             "phase": "thread_start_sending"
         }),
     )?;
-    state.create_sent = true;
+    run_progress.state.create_sent = true;
     call_and_accept_thread_start(
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
         cwd,
         names,
     )
@@ -1562,12 +1554,9 @@ fn record_creation_attempt(
 fn call_and_accept_thread_start(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
     cwd: String,
     names: Vec<String>,
 ) -> Result<(Value, Value)> {
@@ -1576,12 +1565,9 @@ fn call_and_accept_thread_start(
         response,
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
     )
 }
 
@@ -1599,12 +1585,9 @@ fn accept_thread_start(
     response: Value,
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let thread_value = response_thread_id(&response)?;
     begin_thread_identity(
@@ -1612,12 +1595,9 @@ fn accept_thread_start(
         response,
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
     )
 }
 
@@ -1626,27 +1606,23 @@ fn begin_thread_identity(
     response: Value,
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let thread_id = canonical_thread_id(&thread_value)?;
-    state.thread_id = Some(thread_value.clone());
+    run_progress.state.thread_id = Some(thread_value.clone());
     persist_thread_started(
-        thread_value,
-        thread_id,
+        StartedThread {
+            value: thread_value,
+            id: thread_id,
+        },
         response,
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
     )
 }
 
@@ -1667,94 +1643,67 @@ fn canonical_thread_id(thread_value: &Value) -> Result<String> {
 }
 
 fn persist_thread_started(
-    thread_value: Value,
-    thread_id: String,
+    started_thread: StartedThread,
     response: Value,
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     persist(
-        result,
-        result_path,
-        json!({"phase": "thread_started", "thread_id": thread_value}),
+        run_progress.result,
+        run_progress.result_path,
+        json!({"phase": "thread_started", "thread_id": started_thread.value}),
     )?;
     record_thread_in_active(
-        thread_value,
-        thread_id,
+        started_thread,
         response,
         client,
         job,
-        job_path,
-        result,
-        result_path,
-        active_path,
+        creation_paths,
+        run_progress,
         deadline,
-        state,
     )
 }
 
 fn record_thread_in_active(
-    thread_value: Value,
-    thread_id: String,
+    started_thread: StartedThread,
     response: Value,
     client: &mut dyn AdvisorClient,
     job: &Value,
-    job_path: &str,
-    result: &mut Value,
-    result_path: &Path,
-    active_path: &Path,
+    creation_paths: &CreationPaths<'_>,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     atomic_write_json(
-        active_path,
+        creation_paths.active_path,
         &json!({
-            "job": job_path,
+            "job": creation_paths.job_path,
             "id": job.get("id").cloned().unwrap_or(Value::Null),
-            "thread_id": thread_value
+            "thread_id": started_thread.value
         }),
     )?;
     verify_start_model(
         response,
-        thread_value,
-        thread_id,
+        started_thread,
         client,
         job,
-        result,
-        result_path,
+        run_progress,
         deadline,
-        state,
     )
 }
 
 fn verify_start_model(
     response: Value,
-    thread_value: Value,
-    thread_id: String,
+    started_thread: StartedThread,
     client: &mut dyn AdvisorClient,
     job: &Value,
-    result: &mut Value,
-    result_path: &Path,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     ensure_start_model(&response)?;
-    check_thread_start_events(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    check_thread_start_events(client, job, started_thread, run_progress, deadline)
 }
 
 fn ensure_start_model(response: &Value) -> Result<()> {
@@ -1776,99 +1725,54 @@ fn is_luna_model(model: &Value) -> bool {
 fn check_thread_start_events(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
-    check_events(client, Some(&thread_id), None)?;
-    persist_history_sending(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    check_events(client, Some(&started_thread.id), None)?;
+    persist_history_sending(client, job, started_thread, run_progress, deadline)
 }
 
 fn persist_history_sending(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
-    persist(result, result_path, json!({"phase": "history_sending"}))?;
-    inject_history(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    persist(
+        run_progress.result,
+        run_progress.result_path,
+        json!({"phase": "history_sending"}),
+    )?;
+    inject_history(client, job, started_thread, run_progress, deadline)
 }
 
 fn inject_history(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let timeout = remaining(deadline)?;
-    inject_history_call(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        timeout,
-        deadline,
-        state,
-    )
+    inject_history_call(client, job, started_thread, run_progress, timeout, deadline)
 }
 
 fn inject_history_call(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     timeout: f64,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     client.call(
         "thread/inject_items",
-        &history_items(&thread_id),
+        &history_items(&started_thread.id),
         Some(timeout),
     )?;
-    persist_history_ready(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    persist_history_ready(client, job, started_thread, run_progress, deadline)
 }
 
 fn history_items(thread_id: &str) -> Value {
@@ -1888,92 +1792,58 @@ fn history_items(thread_id: &str) -> Value {
 fn persist_history_ready(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
-    persist(result, result_path, json!({"phase": "history_ready"}))?;
-    check_history_events(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    persist(
+        run_progress.result,
+        run_progress.result_path,
+        json!({"phase": "history_ready"}),
+    )?;
+    check_history_events(client, job, started_thread, run_progress, deadline)
 }
 
 fn check_history_events(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
-    check_events(client, Some(&thread_id), None)?;
-    persist_turn_sending(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    check_events(client, Some(&started_thread.id), None)?;
+    persist_turn_sending(client, job, started_thread, run_progress, deadline)
 }
 
 fn persist_turn_sending(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
-    persist(result, result_path, json!({"phase": "turn_sending"}))?;
-    send_turn(
-        client,
-        job,
-        thread_value,
-        thread_id,
-        result,
-        result_path,
-        deadline,
-        state,
-    )
+    persist(
+        run_progress.result,
+        run_progress.result_path,
+        json!({"phase": "turn_sending"}),
+    )?;
+    send_turn(client, job, started_thread, run_progress, deadline)
 }
 
 fn send_turn(
     client: &mut dyn AdvisorClient,
     job: &Value,
-    thread_value: Value,
-    thread_id: String,
-    result: &mut Value,
-    result_path: &Path,
+    started_thread: StartedThread,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let handoff_text = handoff_text(job)?;
     call_turn_start(
         client,
-        thread_value,
-        thread_id,
+        started_thread,
         &handoff_text,
-        result,
-        result_path,
+        run_progress,
         deadline,
-        state,
     )
 }
 
@@ -1985,43 +1855,28 @@ fn handoff_text(job: &Value) -> Result<String> {
 
 fn call_turn_start(
     client: &mut dyn AdvisorClient,
-    thread_value: Value,
-    thread_id: String,
+    started_thread: StartedThread,
     handoff_text: &str,
-    result: &mut Value,
-    result_path: &Path,
+    run_progress: &mut RunProgress<'_>,
     deadline: Instant,
-    state: &mut RunState,
 ) -> Result<(Value, Value)> {
     let timeout = remaining(deadline)?;
-    send_turn_request(
-        client,
-        thread_value,
-        thread_id,
-        handoff_text,
-        timeout,
-        result,
-        result_path,
-        state,
-    )
+    send_turn_request(client, started_thread, handoff_text, timeout, run_progress)
 }
 
 fn send_turn_request(
     client: &mut dyn AdvisorClient,
-    thread_value: Value,
-    thread_id: String,
+    started_thread: StartedThread,
     handoff_text: &str,
     timeout: f64,
-    result: &mut Value,
-    result_path: &Path,
-    state: &mut RunState,
+    run_progress: &mut RunProgress<'_>,
 ) -> Result<(Value, Value)> {
     let response = client.call(
         "turn/start",
-        &turn_params(&thread_id, handoff_text),
+        &turn_params(&started_thread.id, handoff_text),
         Some(timeout),
     )?;
-    finish_turn_start(response, thread_value, result, result_path, state)
+    finish_turn_start(response, started_thread.value, run_progress)
 }
 
 fn turn_params(thread_id: &str, handoff_text: &str) -> Value {
@@ -2043,13 +1898,16 @@ fn turn_params(thread_id: &str, handoff_text: &str) -> Value {
 fn finish_turn_start(
     response: Value,
     thread_value: Value,
-    result: &mut Value,
-    result_path: &Path,
-    state: &mut RunState,
+    run_progress: &mut RunProgress<'_>,
 ) -> Result<(Value, Value)> {
     let turn_value = response_turn_id(&response)?;
-    state.turn_id = Some(turn_value.clone());
-    persist_running_turn(turn_value, thread_value, result, result_path)
+    run_progress.state.turn_id = Some(turn_value.clone());
+    persist_running_turn(
+        turn_value,
+        thread_value,
+        run_progress.result,
+        run_progress.result_path,
+    )
 }
 
 fn response_turn_id(response: &Value) -> Result<Value> {
@@ -2098,21 +1956,26 @@ fn write_running_turn(
 
 fn cleanup_thread(
     factory: &AdvisorClientFactory<'_>,
-    job: &Value,
-    job_path: &Path,
-    job_id: &str,
-    result: &mut Value,
-    result_path: &Path,
-    fault_path: &Path,
-    active_path: &Path,
+    run: &mut JobRun,
+    state: &RunState,
     thread_id: &Value,
-    turn_id: Option<&Value>,
-    turn_completed: bool,
     advice: &Option<Value>,
     error: &Option<String>,
-    cleanup_seconds: f64,
 ) -> Result<()> {
-    let cleanup_deadline = Instant::now() + Duration::from_secs_f64(cleanup_seconds);
+    let JobRun {
+        job,
+        path: job_path,
+        job_id,
+        result,
+        result_path,
+        fault_path,
+        active_path,
+        cleanup_seconds,
+        ..
+    } = run;
+    let turn_id = state.turn_id.as_ref();
+    let turn_completed = state.turn_completed;
+    let cleanup_deadline = Instant::now() + Duration::from_secs_f64(*cleanup_seconds);
     let outcome = (|| -> Result<()> {
         let socket = job
             .get("binding")
@@ -2593,12 +2456,16 @@ fn run_attempt(
     let (thread_id, turn_id) = start_thread(
         &mut *client,
         &run.job,
-        &job_path_text,
-        &mut run.result,
-        &run.result_path,
-        &run.active_path,
+        &CreationPaths {
+            job_path: &job_path_text,
+            active_path: &run.active_path,
+        },
+        &mut RunProgress {
+            result: &mut run.result,
+            result_path: &run.result_path,
+            state: &mut *(state),
+        },
         deadline,
-        state,
     )?;
     wait_completed_turn(
         &mut *client,
@@ -2740,22 +2607,7 @@ fn cleanup_and_summarize(
     advice: Option<Value>,
     error: Option<String>,
 ) -> Result<Value> {
-    cleanup_thread(
-        factory,
-        &run.job,
-        &run.path,
-        &run.job_id,
-        &mut run.result,
-        &run.result_path,
-        &run.fault_path,
-        &run.active_path,
-        &thread_id,
-        state.turn_id.as_ref(),
-        state.turn_completed,
-        &advice,
-        &error,
-        run.cleanup_seconds,
-    )?;
+    cleanup_thread(factory, run, state, &thread_id, &advice, &error)?;
     result_summary(&run.path)
 }
 

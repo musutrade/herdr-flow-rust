@@ -391,6 +391,99 @@ fn batch_offer_freeze_integrate_and_snapshot() {
 }
 
 #[test]
+fn batch_gate_repair_imports_verified_range_before_private_ref_update() {
+    let repo = Repo::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("batch-repair");
+    std::fs::create_dir(&workspace).unwrap();
+    let bare = workspace.join("objects.git");
+    git(
+        &workspace,
+        &["init", "--bare", "-q", bare.to_str().unwrap()],
+    );
+    git(
+        &bare,
+        &[
+            "fetch",
+            "--no-tags",
+            repo.root.to_str().unwrap(),
+            &repo.base,
+        ],
+    );
+    git(&bare, &["update-ref", "refs/herdr/candidate", &repo.base]);
+
+    let mut owner = task(&repo);
+    owner["candidate"] = json!(repo.base);
+    owner["lane"] = json!({
+        "repo": "o/r",
+        "host": "github.com",
+        "workspace_root": tmp.path(),
+        "active": {
+            "id": "batch-repair",
+            "base": repo.base,
+            "phase": "gate_failed",
+            "workspace": workspace,
+            "corrections": [],
+            "integration": {"mapping": [], "offset": 0}
+        }
+    });
+    owner["operations"]["repair-op"] = json!({
+        "phase": "accepted",
+        "assignment": "a1",
+        "intent": {
+            "workspace": repo.root,
+            "batch_repair": {"batch": "batch-repair"}
+        }
+    });
+    let mut s = queue_state(owner);
+    s["events"]["repair-result"] = json!({
+        "id": "repair-result",
+        "applied": true,
+        "outcome": "complete",
+        "binding": {"task": "o/r#1", "epoch": 1, "assignment": "a1", "candidate": repo.base}
+    });
+    let repaired = batch::lane::repair(
+        &mut s,
+        &json!({
+            "task": "o/r#1", "state_version": 1, "batch": "batch-repair",
+            "operation": "repair-op", "event": "repair-result", "checkout": repo.root,
+            "head": repo.head, "evidence": "verified isolated repair"
+        }),
+        20.0,
+    )
+    .unwrap();
+    let active = &repaired["lane"]["active"];
+    assert_eq!(repaired["candidate"], repo.head);
+    assert_eq!(active["phase"], "integrated");
+    assert_eq!(active["repair_update"]["parent"], repo.base);
+    assert_eq!(active["repair_update"]["head"], repo.head);
+    assert_eq!(active["repair_update"]["operation"], "repair-op");
+    assert_eq!(active["corrections"][0]["own_commits"], json!([repo.head]));
+    assert_eq!(
+        active["corrections"][0]["evidence"],
+        "verified isolated repair"
+    );
+    assert_eq!(
+        output(&bare, &["rev-parse", "refs/herdr/candidate"]),
+        repo.base
+    );
+
+    batch::lane::repair_finish(
+        &mut s,
+        &json!({"task": "o/r#1", "state_version": repaired["state_version"], "batch": "batch-repair"}),
+        21.0,
+        &mut |_| Ok(()),
+    ).unwrap();
+    assert_eq!(
+        output(&bare, &["rev-parse", "refs/herdr/candidate"]),
+        repo.head
+    );
+    assert!(s["tasks"]["o/r#1"]["lane"]["active"]
+        .get("repair_update")
+        .is_none());
+}
+
+#[test]
 fn batch_git_rejects_dangerous_options_and_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let result = batch::git::run(

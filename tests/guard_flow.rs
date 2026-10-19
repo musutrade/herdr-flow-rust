@@ -14,6 +14,30 @@ const OLD: &str = "11111111-1111-1111-1111-111111111111";
 const NEW: &str = "22222222-2222-2222-2222-222222222222";
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn init_request_rejects_invalid_identity_before_reading_or_writing_state() {
+    let temp = TempDir::new().unwrap();
+    let transcript = temp.path().join("missing-transcript.jsonl");
+    for (session, epoch) in [("invalid-session", 1), (OLD, -1)] {
+        let request = guard::InitRequest {
+            root: temp.path(),
+            pane: "w1:p1",
+            session,
+            transcript_path: &transcript,
+            task: "o/r#1",
+            epoch,
+            role: "developer",
+            sessions_dir: temp.path(),
+            app_socket: None,
+            codex_binary: None,
+        };
+        let error = guard::init(&request).unwrap_err();
+        assert_eq!(error.message, "invalid session or epoch");
+        assert!(!temp.path().join("state.json").exists());
+        assert!(!transcript.exists());
+    }
+}
+
 #[derive(Clone)]
 struct FakeState {
     runtime: J,

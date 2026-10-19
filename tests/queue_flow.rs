@@ -263,6 +263,68 @@ fn delivery_is_submitted_and_acknowledged_once() {
 }
 
 #[test]
+fn inspected_resolution_preserves_delivery_identity_and_receipt_policy() {
+    for resolution in ["received", "not-delivered"] {
+        let h = Harness::new();
+        h.enable();
+        h.add("step1", None, json!({}));
+        queue::signal(&h.queue, "step1", "complete", "done", None).unwrap();
+        let before = h.tick(Some(util::now() + 1.0));
+        let delivery = model::string(&before, "active").unwrap();
+        let event = event_for(&before, "step1");
+        let reason = format!("inspected {resolution} in the registered pane");
+
+        let after = queue::resolve(&h.queue, &delivery, resolution, &reason).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(h.queue.join("queue.json")).unwrap(),
+            format!("{}\n", serde_json::to_string_pretty(&after).unwrap())
+        );
+        assert!(after["active"].is_null());
+        assert_eq!(after["notify"], false);
+        assert_eq!(after["delivery_status"], "resolved_delivery_disabled");
+        let record = &after["deliveries"][&delivery];
+        assert_eq!(record["id"], delivery);
+        assert_eq!(record["session"], SESSION);
+        assert_eq!(record["phase"], "resolved");
+        assert_eq!(record["resolution"], resolution);
+        assert_eq!(record["reason"], reason);
+        assert_eq!(
+            after["events"][&event]["acknowledged"],
+            resolution == "received"
+        );
+        let guard = util::read_json(&h.guard.join("state.json")).unwrap();
+        assert!(guard.get("external_delivery").is_none());
+        assert_eq!(h.agent.lock().unwrap().messages.len(), 1);
+    }
+}
+
+#[test]
+fn inspected_resolution_rejects_another_delivery_without_mutating_state() {
+    let h = Harness::new();
+    h.enable();
+    h.add("step1", None, json!({}));
+    queue::signal(&h.queue, "step1", "complete", "done", None).unwrap();
+    let before = h.tick(Some(util::now() + 1.0));
+    let delivery = model::string(&before, "active").unwrap();
+    let mut guard = util::read_json(&h.guard.join("state.json")).unwrap();
+    guard["external_delivery"]["delivery"] = json!("another-delivery");
+    util::atomic_write_json(&h.guard.join("state.json"), &guard).unwrap();
+    let queue_bytes = std::fs::read(h.queue.join("queue.json")).unwrap();
+    let guard_bytes = std::fs::read(h.guard.join("state.json")).unwrap();
+
+    let error = queue::resolve(&h.queue, &delivery, "received", "inspected pane").unwrap_err();
+    assert!(error.message.contains("another delivery"));
+    assert_eq!(
+        std::fs::read(h.queue.join("queue.json")).unwrap(),
+        queue_bytes
+    );
+    assert_eq!(
+        std::fs::read(h.guard.join("state.json")).unwrap(),
+        guard_bytes
+    );
+}
+
+#[test]
 fn result_association_is_persisted_before_ack() {
     let h = Harness::new();
     h.enable();
