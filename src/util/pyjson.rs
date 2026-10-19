@@ -11,6 +11,15 @@ use sha2::{Digest, Sha256};
 use crate::error::{FlowError, Result};
 use crate::util::time::now_ns;
 
+mod float;
+
+#[derive(Clone, Copy)]
+struct JsonFormat {
+    ascii: bool,
+    separators: Separators,
+    legacy: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Separators {
     /// `json.dumps` default: `", "` and `": "`.
@@ -22,54 +31,48 @@ pub enum Separators {
 /// Serialize a JSON value the way `json.dumps` does.
 pub fn dumps(value: &Value, ensure_ascii: bool, separators: Separators) -> String {
     let mut output = String::new();
-    write_value(value, ensure_ascii, separators, &mut output);
+    let format = JsonFormat {
+        ascii: ensure_ascii,
+        separators,
+        legacy: false,
+    };
+    write_value(value, format, &mut output);
     output
 }
 
-fn write_value(value: &Value, ensure_ascii: bool, separators: Separators, out: &mut String) {
+fn write_value(value: &Value, format: JsonFormat, out: &mut String) {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(number) => out.push_str(&format_number(number)),
-        Value::String(text) => write_string(text, ensure_ascii, out),
-        Value::Array(items) => write_array(items, ensure_ascii, separators, out),
-        Value::Object(map) => write_object(map, ensure_ascii, separators, out),
+        Value::Number(number) => out.push_str(&encoded_number(number, format.legacy)),
+        Value::String(text) => write_string(text, format, out),
+        Value::Array(items) => write_array(items, format, out),
+        Value::Object(map) => write_object(map, format, out),
     }
 }
 
-fn write_array(items: &[Value], ensure_ascii: bool, separators: Separators, out: &mut String) {
+fn write_array(items: &[Value], format: JsonFormat, out: &mut String) {
     out.push('[');
     for (index, item) in items.iter().enumerate() {
-        write_array_item(item, index, ensure_ascii, separators, out);
+        write_array_item(item, index, format, out);
     }
     out.push(']');
 }
 
-fn write_array_item(
-    item: &Value,
-    index: usize,
-    ensure_ascii: bool,
-    separators: Separators,
-    out: &mut String,
-) {
+fn write_array_item(item: &Value, index: usize, format: JsonFormat, out: &mut String) {
     if index > 0 {
-        push_separator(separators, out);
+        push_separator(format.separators, out);
     }
-    write_value(item, ensure_ascii, separators, out);
+    write_value(item, format, out);
 }
 
-fn write_object(
-    map: &Map<String, Value>,
-    ensure_ascii: bool,
-    separators: Separators,
-    out: &mut String,
-) {
+fn write_object(map: &Map<String, Value>, format: JsonFormat, out: &mut String) {
     out.push('{');
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     for (index, key) in keys.into_iter().enumerate() {
-        write_object_entry(map, key, index, ensure_ascii, separators, out);
+        write_object_entry(map, key, index, format, out);
     }
     out.push('}');
 }
@@ -78,16 +81,15 @@ fn write_object_entry(
     map: &Map<String, Value>,
     key: &str,
     index: usize,
-    ensure_ascii: bool,
-    separators: Separators,
+    format: JsonFormat,
     out: &mut String,
 ) {
     if index > 0 {
-        push_separator(separators, out);
+        push_separator(format.separators, out);
     }
-    write_string(key, ensure_ascii, out);
-    push_colon(separators, out);
-    write_value(&map[key], ensure_ascii, separators, out);
+    write_string(key, format, out);
+    push_colon(format.separators, out);
+    write_value(&map[key], format, out);
 }
 
 fn push_separator(separators: Separators, out: &mut String) {
@@ -104,24 +106,30 @@ fn push_colon(separators: Separators, out: &mut String) {
     });
 }
 
+fn encoded_number(number: &serde_json::Number, legacy: bool) -> String {
+    if legacy {
+        legacy_number(number)
+    } else {
+        format_number(number)
+    }
+}
+
 fn format_number(number: &serde_json::Number) -> String {
+    if number.is_f64() {
+        float::format(&number.to_string())
+    } else {
+        number.to_string()
+    }
+}
+
+fn legacy_number(number: &serde_json::Number) -> String {
     if let Some(value) = number.as_i64() {
         return value.to_string();
     }
     if let Some(value) = number.as_u64() {
         return value.to_string();
     }
-    let value = number.as_f64().unwrap_or(f64::NAN);
-    if value.is_nan() {
-        return "NaN".to_string();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-Infinity".to_string()
-        } else {
-            "Infinity".to_string()
-        };
-    }
+    let value = number.as_f64().expect("finite JSON number");
     let mut text = format!("{value}");
     if !text.contains('.') && !text.contains('e') && !text.contains('E') {
         text.push_str(".0");
@@ -129,15 +137,15 @@ fn format_number(number: &serde_json::Number) -> String {
     text
 }
 
-fn write_string(text: &str, ensure_ascii: bool, out: &mut String) {
+fn write_string(text: &str, format: JsonFormat, out: &mut String) {
     out.push('"');
     for character in text.chars() {
-        write_string_character(character, ensure_ascii, out);
+        write_string_character(character, format, out);
     }
     out.push('"');
 }
 
-fn write_string_character(character: char, ensure_ascii: bool, out: &mut String) {
+fn write_string_character(character: char, format: JsonFormat, out: &mut String) {
     if let Some(escaped) = simple_escape(character) {
         out.push_str(escaped);
         return;
@@ -146,11 +154,28 @@ fn write_string_character(character: char, ensure_ascii: bool, out: &mut String)
         out.push_str(&format!("\\u{:04x}", character as u32));
         return;
     }
-    if ensure_ascii && !character.is_ascii() {
+    if format.ascii && ascii_escape(character, format.legacy) {
         write_non_ascii(character, out);
         return;
     }
     out.push(character);
+}
+
+fn ascii_escape(character: char, legacy: bool) -> bool {
+    !character.is_ascii() || (character == '\u{7f}' && !legacy)
+}
+
+/// Only for detecting old Rust advisor reservations. New identities always use
+/// Python encoding; old ambiguous operations must never be silently replayed.
+pub(crate) fn legacy_canonical(value: &Value) -> Vec<u8> {
+    let format = JsonFormat {
+        ascii: true,
+        separators: Separators::Compact,
+        legacy: true,
+    };
+    let mut output = String::new();
+    write_value(value, format, &mut output);
+    output.into_bytes()
 }
 
 fn simple_escape(character: char) -> Option<&'static str> {

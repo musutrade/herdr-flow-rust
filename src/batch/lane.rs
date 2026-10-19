@@ -4013,7 +4013,7 @@ fn repair_finish_done(
     model::remove(&mut batch_state.batch, "repair_update");
     batch_state.lane["active"] = batch_state.batch;
     batch_state.task["lane"] = batch_state.lane;
-    save(s, batch_state.task.clone(), now, "batch_repair_ref_updated")?;
+    batch_state.task = save(s, batch_state.task, now, "batch_repair_ref_updated")?;
     repair_finish_checkpoint(s, checkpoint, batch_state.task)
 }
 

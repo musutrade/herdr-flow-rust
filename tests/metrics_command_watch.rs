@@ -1,5 +1,7 @@
 //! Read-only metrics, one-shot command capture and watcher liveness.
 
+pub mod common;
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -12,7 +14,6 @@ use herdr_flow::queue;
 use herdr_flow::util::{self, FileLock};
 use herdr_flow::watch_service;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -86,7 +87,7 @@ fn metric_state() -> J {
 
 #[test]
 fn metrics_report_spans_unknowns_and_open_waits() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     util::atomic_write_json(&tmp.path().join("queue.json"), &metric_state()).unwrap();
     let report = metrics::report(tmp.path(), Some(160.0)).unwrap();
     let task = &report["tasks"][0];
@@ -152,7 +153,7 @@ fn metrics_report_spans_unknowns_and_open_waits() {
 
 #[test]
 fn metrics_unknown_and_clock_anomaly_are_not_zero() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let mut state = metric_state();
     state["events"]["e1"]["applied"] = json!(false);
     state["events"]["e1"]
@@ -245,9 +246,9 @@ fn metrics_unknown_and_clock_anomaly_are_not_zero() {
 
 #[test]
 fn command_wrapper_captures_once_and_signals_status() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let root = tmp.path().join("queue");
-    std::fs::create_dir_all(&root).unwrap();
+    common::create_dir_all(&root).unwrap();
     queue::init(&root, None, 30).unwrap();
     queue::add(
         &root,
@@ -291,9 +292,9 @@ fn command_wrapper_captures_once_and_signals_status() {
 
 #[test]
 fn missing_command_binary_becomes_decision() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let root = tmp.path().join("queue");
-    std::fs::create_dir_all(&root).unwrap();
+    common::create_dir_all(&root).unwrap();
     queue::init(&root, None, 30).unwrap();
     queue::add(
         &root,
@@ -326,7 +327,7 @@ fn missing_command_binary_becomes_decision() {
 }
 
 fn healthy_watcher(dir: &Path) -> FileLock {
-    std::fs::create_dir_all(dir).unwrap();
+    common::create_dir_all(dir).unwrap();
     let pid = std::process::id();
     util::atomic_write_json(
         &dir.join("watch.json"),
@@ -347,7 +348,7 @@ fn healthy_watcher(dir: &Path) -> FileLock {
 
 #[test]
 fn watcher_health_distinguishes_stopped_heartbeat_and_lock() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let root = tmp.path().join("watch");
     let lock = healthy_watcher(&root);
     assert!(model::bool_or(
@@ -383,9 +384,9 @@ fn watcher_health_distinguishes_stopped_heartbeat_and_lock() {
 
 #[test]
 fn command_uses_the_configured_cwd() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let root = tmp.path().join("queue");
-    std::fs::create_dir_all(&root).unwrap();
+    common::create_dir_all(&root).unwrap();
     queue::init(&root, None, 30).unwrap();
     queue::add(
         &root,
@@ -402,7 +403,7 @@ fn command_uses_the_configured_cwd() {
     )
     .unwrap();
     let cwd = tmp.path().join("work");
-    std::fs::create_dir_all(&cwd).unwrap();
+    common::create_dir_all(&cwd).unwrap();
     let code = queue::run_command(
         &root,
         "pwd",

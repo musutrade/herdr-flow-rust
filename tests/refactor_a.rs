@@ -1,5 +1,7 @@
 //! Behaviour-preservation tests for the decomposed guard entry points.
 
+pub mod common;
+
 use std::path::Path;
 
 use herdr_flow::guard;
@@ -79,7 +81,7 @@ fn advice_absent_reports_not_requested_or_disabled() {
 
 #[test]
 fn review_events_absent_reports_not_observed() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = common::tempdir().unwrap();
     let events = guard::review_events(directory.path(), &json!({})).unwrap();
     assert_eq!(
         model::string(&events, "status").as_deref(),

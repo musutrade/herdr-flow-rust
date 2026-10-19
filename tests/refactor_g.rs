@@ -1,5 +1,7 @@
 //! Regression coverage for the refactored queue CLI parser and dispatcher.
 
+pub mod common;
+
 use herdr_flow::queue::cli;
 
 fn args(values: &[&str]) -> Vec<String> {
@@ -59,7 +61,7 @@ fn cli_usage_errors_exit_two_without_touching_state() {
 
 #[test]
 fn cli_init_and_status_work_offline() {
-    let tmp = tempfile::tempdir().expect("temp dir");
+    let tmp = common::tempdir().expect("temp dir");
     let root = tmp.path().join("queue");
     assert_eq!(
         cli::cli(&args(&[

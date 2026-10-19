@@ -38,12 +38,11 @@ pub fn queue_error(message: impl Into<String>) -> FlowError {
 }
 
 pub fn load_queue(root: &Path) -> Result<J> {
-    util::read_json(&root.join("queue.json"))
+    util::read_state_json(root, "queue.json")
 }
 
 pub fn locked(root: &Path, blocking: bool) -> Result<util::FileLock> {
-    let root = util::resolve_path(root);
-    std::fs::create_dir_all(&root)?;
+    let root = util::state_dir(root, true)?;
     match util::FileLock::acquire(&root.join("queue.lock"), blocking)? {
         Some(lock) => Ok(lock),
         None => Err(FlowError::new(
@@ -54,6 +53,7 @@ pub fn locked(root: &Path, blocking: bool) -> Result<util::FileLock> {
 }
 
 pub fn save(root: &Path, s: &mut J) -> Result<()> {
+    util::ensure_private_dir(root, true)?;
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&root.join("queue.json"), s)
 }
@@ -62,25 +62,11 @@ pub fn init(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
     if !(10..=900).contains(&interval) {
         return Err(queue_error("poll interval must be 10..900 seconds"));
     }
-    let root = util::resolve_path(root);
+    let root = util::state_dir(root, true)?;
     if root.join("queue.json").exists() {
         return Err(queue_error("queue already exists"));
     }
-    let mut receiver = Value::Null;
-    let mut stored_guard: Value = Value::Null;
-    if let Some(guard_dir) = guard_dir {
-        let guard_dir = util::resolve_path(guard_dir);
-        let state = util::read_json(&guard_dir.join("state.json"))?;
-        receiver = guard::scope(&state);
-        let cwd = model::string(&receiver, "cwd")
-            .ok_or_else(|| queue_error("receiver registration invalid"))?;
-        if util::inside_checkout(&root, Path::new(&cwd)) {
-            return Err(queue_error(
-                "keep queue state outside the receiver checkout",
-            ));
-        }
-        stored_guard = json!(guard_dir.display().to_string());
-    }
+    let (receiver, stored_guard) = initial_receiver(&root, guard_dir)?;
     let mut s = json!({
         "version": 1,
         "id": uuid_hex(),
@@ -97,6 +83,25 @@ pub fn init(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
     });
     save(&root, &mut s)?;
     Ok(s)
+}
+
+fn initial_receiver(root: &Path, guard_dir: Option<&Path>) -> Result<(J, J)> {
+    let mut receiver = Value::Null;
+    let mut stored_guard: Value = Value::Null;
+    if let Some(guard_dir) = guard_dir {
+        let guard_dir = util::state_dir(guard_dir, false)?;
+        let state = util::read_state_json(&guard_dir, "state.json")?;
+        receiver = guard::scope(&state);
+        let cwd = model::string(&receiver, "cwd")
+            .ok_or_else(|| queue_error("receiver registration invalid"))?;
+        if util::inside_checkout(root, Path::new(&cwd)) {
+            return Err(queue_error(
+                "keep queue state outside the receiver checkout",
+            ));
+        }
+        stored_guard = json!(guard_dir.display().to_string());
+    }
+    Ok((receiver, stored_guard))
 }
 
 pub fn enable(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()> {
@@ -140,7 +145,7 @@ fn enable_locked(
     factory: &ReceiverFactory,
     guard_path: &Path,
 ) -> Result<()> {
-    let g = util::read_json(&guard_path.join("state.json"))?;
+    let g = util::read_state_json(guard_path, "state.json")?;
     enable_scope(root, s, factory, guard_path, &g)
 }
 
@@ -731,7 +736,7 @@ fn observe_guard(_root: &Path, w: &J, _now: f64) -> Result<Option<Observed>> {
 }
 
 fn observe_guard_state(source: &str) -> Result<J> {
-    util::read_json(&Path::new(source).join("state.json"))
+    util::read_state_json(Path::new(source), "state.json")
 }
 
 fn observe_guard_checked(source: &str, w: &J, g: &J) -> Result<Option<Observed>> {
@@ -928,12 +933,12 @@ fn ci_source_available(source: &Path) -> bool {
 }
 
 fn observe_ci_identity(source: &Path, w: &mut J, now: f64) -> Result<Option<Observed>> {
-    let identity = util::read_json(&source.join("identity.json"))?;
+    let identity = util::read_state_json(source, "identity.json")?;
     observe_ci_status(source, w, now, &identity)
 }
 
 fn observe_ci_status(source: &Path, w: &mut J, now: f64, identity: &J) -> Result<Option<Observed>> {
-    let status = util::read_json(&source.join("status.json"))?;
+    let status = util::read_state_json(source, "status.json")?;
     observe_ci_pinned(source, w, now, identity, &status)
 }
 
@@ -1381,7 +1386,7 @@ fn operator_notice_call(
     factory: &ReceiverFactory,
     guard_dir: &Path,
 ) -> Result<()> {
-    let g = util::read_json(&guard_dir.join("state.json"))?;
+    let g = util::read_state_json(guard_dir, "state.json")?;
     operator_notice_receiver(root, s, delivery, title, body, factory, &g)
 }
 
@@ -1649,7 +1654,7 @@ fn deliver_locked(
     guard_dir: &Path,
     factory: &ReceiverFactory,
 ) -> Result<()> {
-    let mut g = util::read_json(&guard_dir.join("state.json"))?;
+    let mut g = util::read_state_json(guard_dir, "state.json")?;
     deliver_guard_checked(root, s, pending, guard_dir, factory, &mut g)
 }
 
@@ -1970,7 +1975,7 @@ fn acknowledge_guard_state(
     d: J,
     guard_dir: &Path,
 ) -> Result<J> {
-    let g = util::read_json(&guard_dir.join("state.json"))?;
+    let g = util::read_state_json(guard_dir, "state.json")?;
     acknowledge_receiver(root, s, delivery, session, d, guard_dir, g)
 }
 
@@ -2183,7 +2188,7 @@ fn resolve_guard_state(
     d: J,
     guard_dir: &Path,
 ) -> Result<J> {
-    let g = util::read_json(&guard_dir.join("state.json"))?;
+    let g = util::read_state_json(guard_dir, "state.json")?;
     resolve_marker(root, s, delivery_resolution, d, guard_dir, g)
 }
 

@@ -60,8 +60,7 @@ pub fn scope(g: &J) -> J {
 }
 
 pub fn locked(root: &Path) -> Result<util::FileLock> {
-    let root = util::resolve_path(root);
-    std::fs::create_dir_all(&root)?;
+    let root = util::state_dir(root, true)?;
     match util::FileLock::acquire(&root.join("guard.lock"), false)? {
         Some(lock) => Ok(lock),
         None => Err(FlowError::new(
@@ -72,15 +71,17 @@ pub fn locked(root: &Path) -> Result<util::FileLock> {
 }
 
 pub fn save(root: &Path, s: &mut J) -> Result<()> {
+    util::ensure_private_dir(root, true)?;
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&util::resolve_path(root).join("state.json"), s)
 }
 
 fn read_state(root: &Path) -> Result<J> {
-    util::read_json(&util::resolve_path(root).join("state.json"))
+    util::read_state_json(root, "state.json")
 }
 
 pub fn review_events(root: &Path, s: &J) -> Result<J> {
+    util::ensure_private_dir(root, false)?;
     let path = util::resolve_path(root).join("review-events.json");
     if !path.exists() {
         return Ok(review_events_absent());
@@ -2138,7 +2139,7 @@ fn handle_phase(root: &Path, s: &mut J, h: &mut dyn GuardAdapter) -> Result<()> 
 }
 
 pub fn once(root: &Path, h: &mut dyn GuardAdapter) -> Result<J> {
-    let root = util::resolve_path(root);
+    let root = util::state_dir(root, false)?;
     let s = load_guard_state(&root)?;
     once_state(&root, h, s)
 }
@@ -2256,7 +2257,7 @@ fn once_handoff_overdue(s: &J) -> bool {
 }
 
 pub fn reconcile(root: &Path, session: &str, h: &mut dyn GuardAdapter, shell: bool) -> Result<J> {
-    let root = util::resolve_path(root);
+    let root = util::state_dir(root, false)?;
     let s = read_state(&root)?;
     reconcile_state(root, session, h, shell, s)
 }
@@ -2539,7 +2540,7 @@ fn reconcile_successor_ready(root: &Path, mut s: J) -> Result<J> {
 }
 
 pub fn ack(root: &Path, session: &str) -> Result<J> {
-    let root = util::resolve_path(root);
+    let root = util::state_dir(root, false)?;
     let s = read_state(&root)?;
     ack_version(root, session, s)
 }
@@ -2886,7 +2887,7 @@ fn guard_failure_without_adapter(root: &Path, error: &FlowError) -> J {
 }
 
 pub fn watch(root: &Path, ready_fd: Option<std::os::fd::RawFd>, one: bool) -> Result<()> {
-    let root = util::resolve_path(root);
+    let root = util::state_dir(root, false)?;
     watch_service::run(
         &root,
         || {
@@ -3086,7 +3087,7 @@ fn bind_runtime_register(
 }
 
 fn bind_marker(root: &Path) -> Result<J> {
-    util::read_json(&util::resolve_path(root).join("tui.json"))
+    util::read_state_json(root, "tui.json")
 }
 
 fn bind_runtime_marker(s: &mut J, marker: J) -> Result<J> {
@@ -3192,7 +3193,7 @@ fn init_transcript_session(request: &InitRequest<'_>, data: J) -> Result<J> {
 }
 
 fn init_root(request: &InitRequest<'_>, data: J) -> Result<J> {
-    let root = util::resolve_path(request.root);
+    let root = util::state_dir(request.root, true)?;
     if root.join("state.json").exists() {
         return Err(guard_error(
             "state exists; use it or choose a new state directory",
@@ -3284,7 +3285,7 @@ fn init_bind(request: &InitRequest<'_>, mut s: J, root: PathBuf) -> Result<J> {
 
 fn init_register(request: &InitRequest<'_>, s: J, root: PathBuf) -> Result<J> {
     let registry = util::xdg_state_home().join("herdr-issue-flow/pane-guards");
-    std::fs::create_dir_all(&registry)?;
+    util::ensure_private_dir(&registry, true)?;
     init_binding(request, s, root, registry)
 }
 
@@ -3493,7 +3494,7 @@ fn cmd_migrate_lock(root: &Path, args: &Args, s: J) -> Result<J> {
 }
 
 fn cmd_migrate_watcher(root: &Path) -> Result<Option<util::FileLock>> {
-    let watcher_path = util::resolve_path(root).join("watch.lock");
+    let watcher_path = util::state_dir(root, false)?.join("watch.lock");
     util::FileLock::acquire(&watcher_path, false)
 }
 
@@ -4208,8 +4209,7 @@ pub fn cli(args: &[String]) -> i32 {
 }
 
 fn cli_parsed(parsed: &Args) -> i32 {
-    let root = util::resolve_path(&parsed.state_dir);
-    cli_action(parsed, root)
+    util::state_dir(&parsed.state_dir, true).map_or_else(cli_error, |root| cli_action(parsed, root))
 }
 
 fn cli_action(parsed: &Args, root: PathBuf) -> i32 {

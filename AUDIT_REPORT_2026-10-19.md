@@ -116,6 +116,7 @@
 
 ### H7. 状态/工作区目录没有统一的 ownership/mode 检查
 
+- **P2 Issue #7 已修复**：queue/guard/CI/watch、命令与 batch/advisor 状态目录统一使用 owner/type/mode 检查，递归创建 0700，拒绝既有共享可写目录及符号链接；锁和状态读取也检查普通文件归属。以下为审计基线；本地信任仍不等于跨用户认证。
 - `queue`/`guard`/`ci` 在写状态前 `create_dir_all`；umask 022 下新目录 0755，预先存在的 0777 目录保持 0777。`ensure_private_dir` 存在但未被这些入口调用。
 - 若目录可被其他本地用户写，可替换 `queue.json`/`state.json`；guard 会使用其中的 `codex_binary`，batch 会执行 lane 的 `gate.verifier`；`watch.log`/command stdout/stderr 的 open 也没有 `O_NOFOLLOW`，可被 symlink 利用。
 - batch workspace/bare repo 默认 0755/0644，私有仓库内容可能被其他用户读取。
@@ -150,9 +151,10 @@
 
 ### H13. Python 兼容 JSON 的浮点格式导致持久化 hash/identity 失配
 
+- **P2 Issue #8 已修复**：使用 shortest-round-trip、ties-to-even 数字，按 Python 指数阈值、符号和位数呈现；ensure_ascii 转义 DEL，并启用精确浮点解析。626 个 CPython 对照值及哈希测试通过；旧 advisor reservation 不自动重放。升级方式见 README；下述未修结论为审计基线记录。
 - `src/util/pyjson.rs:107-130` 用 Rust `Display` 格式化浮点；Python `json.dumps` 用 `repr`。差分 223 个随机 double 有 208 个不同（`123.45678901234567` → Rust `…568`，Python `…567`；`1e-7`/`1e20` 也不同）。
 - 这些 hash 用于 CI 配置身份、PR/batch 标识、advisor handoff digest、CI 事件去重。结果：同一份含浮点的 CI wait 配置，Python 生成的事件可被 Python 消费，HEAD Rust 却报 `CI task/epoch/config mismatch`。
-- **本轮未修**；跨实现状态目录复用会受影响。建议用与 Python `repr` 等价的 shortest-round-trip + exponent 规则，并加 Python/Rust 双实现的 hash 差分测试。
+- **审计基线未修**；跨实现状态目录复用会受影响。P2 修复及迁移规则见第 11 节和 README。
 
 ### H14. `resolve_path` 先做词法 `..` 折叠，语义与 Python `Path.resolve` 不同
 
@@ -228,7 +230,7 @@
 
 1. **先修门禁**：纳入 `src/crap.rs`、统计闭包、加门禁自测和模块覆盖率下限；在门禁可信前不要再用“全绿”作为重构依据。
 2. **修 Critical 运行时路径**：guard watcher（本轮已修）、queue result 持久化（已修）、advisor 锁生命周期（已修）、state 目录权限/`O_NOFOLLOW`（未修）。
-3. **修 High 数据/安全边界**：batch corrections/versions（已修）、integrate 版本（已修）、verifier 身份/权限/receipt 认证（部分）、Git 环境隔离、超时硬上限。
+3. **修 High 数据/安全边界**：batch corrections/versions（已修）、integrate 版本（已修）、verifier 身份/权限/receipt 认证（部分）、Git 环境隔离（P1 已修）、超时硬上限（P1 已修）。
 4. **补真实接入测试**：RPC client 的 Unix socket WebSocket server、真实 Herdr adapter、guard CLI/daemon、watch/queue/CI 后台生命周期；至少一组 live-gated 测试。
 5. **补故障注入**：SIGKILL 在 journal/atomic 之间、ENOSPC、只读目录、损坏/截断 state、socket swap、子进程后台持有 pipe。
 6. **清理重构债务**：死代码、重复 helper、`too_many_arguments`、未用 public API；用 context struct 替代 10+ 参数 helper。
@@ -265,3 +267,14 @@
 - [#3](https://github.com/musutrade/herdr-flow-rust/issues/3)：checkpoint 将 `failure_token` 写回 canonical batch，再保存至任务状态，最终返回不再丢失 token。真实 Git 冲突回归检查 checkpoint、最终返回、保存重载、使用保存 token 创建修复、拒绝过期/重复 token，以及 checkpoint 报错后的状态一致性。
 
 新增 `tests/p1_boundaries.rs` 的 7 项测试；其中 4 项修复前失败，复现了三个 P1。修复后全量 244 项测试通过；fmt、无 Clippy 豁免策略、Clippy `-D warnings` 和绝对 CRAP 门禁通过（4,095 个函数、约 68.1% 行覆盖、0 violations、无 baseline）。这些本地回归不替代真实 Herdr/GitHub 发布验收。
+
+## 11. P2 Issue 修复（相对 `0e97085`）
+
+- [#4](https://github.com/musutrade/herdr-flow-rust/issues/4)：指纹增加 v2 版本域；文件名/链接目标按长度编码，普通文件使用类型、固定宽度 mode 和独立内容摘要，消除条目拼接歧义。
+- [#5](https://github.com/musutrade/herdr-flow-rust/issues/5)：Unix 文件名保留原始字节用于路径查找，回归覆盖非 UTF-8 文件及替换字符诱饵存在/不存在。
+- [#6](https://github.com/musutrade/herdr-flow-rust/issues/6)：逐分量 `openat(O_DIRECTORY|O_NOFOLLOW)` 固定父目录，通过目录 fd 执行临时文件写入及原子替换；拒绝存在/悬空的叶节点链接及祖先链接，文件和目录分别 fsync。独占 reservation 使用同一目录边界。
+- [#7](https://github.com/musutrade/herdr-flow-rust/issues/7)：queue/guard/CI/watch 及命令、batch、advisor 状态入口共享目录信任校验，读状态及加锁拒绝符号链接/非普通/非当前用户所有/共享可写文件。新目录为 0700，既有 0700/0755 可用，0770/0777/sticky 可写状态根拒绝；可信祖先检查保留 root sticky 临时目录语义。测试夹具显式使用私有权限，避免依赖 shell umask。
+- [#8](https://github.com/musutrade/herdr-flow-rust/issues/8)：浮点数字按 shortest-round-trip、ties-to-even 及 Python 固定/指数阈值输出，补齐指数符号和位数、DEL 转义；开启 `float_roundtrip` 精确解析。626 个 CPython 3.14.4 边界/随机值、两种 separator、往返位模式及独立哈希通过。旧 Rust advisor reservation 检测后拒绝自动重放；旧指纹及 CI 哈希按 README 明确重新检查/绑定，不自动改旧 ID。
+- [#9](https://github.com/musutrade/herdr-flow-rust/issues/9)：保留 `save` 返回的最新任务再 checkpoint/返回；真实 Git 修复测试经公共 `batch::action` 验证返回任务与持久化状态（版本/history）一致，使用返回版本成功接续 snapshot。
+
+修复前新增的 7 项 P2 边界回归均失败；修复后全量 255 项测试通过。fmt、Clippy `-D warnings`、禁止 Clippy 豁免策略及绝对 CRAP 门禁通过：4,110 个函数、约 68.6% 行覆盖、0 violations、无 baseline/阈值放宽。这里的本地文件系统/Git/状态机回归不替代真实 Herdr/GitHub 的完整发布验收。

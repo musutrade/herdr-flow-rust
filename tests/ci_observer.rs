@@ -1,5 +1,7 @@
 //! Read-only CI observer and external Check policy over fake GitHub APIs.
 
+pub mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -7,7 +9,6 @@ use herdr_flow::ci::{checks, policy, watch};
 use herdr_flow::model::{self, J};
 use herdr_flow::util;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -282,7 +283,7 @@ fn check_validation_rejects_ambiguous_inventory() {
 
 #[test]
 fn persistence_is_deduplicated_and_atomic() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let root = tmp.path().join("state");
     for _ in 0..3 {
         watch::persist(&root, "hash", &json!({"state": "pending"})).unwrap();
@@ -299,9 +300,9 @@ fn safe_json_depth_and_atomic_symlink_rejection() {
     // The parser limit is internal; at minimum a normal nested object loads.
     assert!(watch::safe_json_load(br#"{"a":[{"b":1}],"c":"x"}"#).is_ok());
     assert!(watch::safe_json_load(&vec![b'1'; 10 * 1024 * 1024 + 1]).is_err());
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let real = tmp.path().join("real");
-    std::fs::create_dir_all(&real).unwrap();
+    common::create_dir_all(&real).unwrap();
     let link = tmp.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(util::atomic_write_json(&link.join("state.json"), &json!({"ok": true})).is_err());

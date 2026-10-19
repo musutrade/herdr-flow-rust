@@ -1,4 +1,6 @@
 //! Regressions for the three P1 audit findings; all repositories are local.
+pub mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,7 +40,7 @@ fn command_deadline_covers_descendant_pipes_and_blocked_stdin() {
 
 #[test]
 fn timeout_kills_owned_process_group_only() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let marker = tmp.path().join("survived");
     let mut unrelated = Command::new("sleep").arg("2").spawn().unwrap();
     let script = format!(
@@ -102,7 +104,7 @@ fn commit(root: &Path, content: &str) -> String {
 }
 
 fn repository(root: &Path, content: &str) -> String {
-    fs::create_dir_all(root).unwrap();
+    common::create_dir_all(root).unwrap();
     git(root, &["init", "-q"]);
     git(root, &["config", "user.name", "P1 regression"]);
     git(root, &["config", "user.email", "p1@example.invalid"]);
@@ -153,7 +155,7 @@ fn git_environment_child() {
 
 #[test]
 fn git_environment_cannot_redirect_provenance_or_fingerprint_including_worktrees() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let a = tmp.path().join("a");
     let b = tmp.path().join("b");
     let base = repository(&a, "A base");
@@ -268,7 +270,7 @@ fn conflict_state(tmp: &Path) -> (J, String) {
 }
 
 fn seed_bare(workspace: &Path, source: &Path, base: &str, heads: &[&str]) -> PathBuf {
-    fs::create_dir_all(workspace).unwrap();
+    common::create_dir_all(workspace).unwrap();
     util::atomic_write_json(
         &workspace.join("owner.json"),
         &json!({"batch": "batch-1", "repo": "o/r", "base": base}),
@@ -291,7 +293,7 @@ fn seed_bare(workspace: &Path, source: &Path, base: &str, heads: &[&str]) -> Pat
 
 #[test]
 fn conflict_token_survives_checkpoints_reload_and_authorizes_one_repair() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let (mut state, base) = conflict_state(tmp.path());
     let path = tmp.path().join("queue.json");
     let mut saw_conflict = false;
@@ -335,7 +337,7 @@ fn conflict_token_survives_checkpoints_reload_and_authorizes_one_repair() {
 
 #[test]
 fn conflict_token_is_retained_when_checkpoint_reports_failure() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir().unwrap();
     let (mut state, base) = conflict_state(tmp.path());
     let path = tmp.path().join("queue.json");
     let result = batch::lane::integrate(

@@ -1,5 +1,7 @@
 //! Guard transcript, checkpoint, rotation and review state-machine tests.
 
+pub mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +18,7 @@ const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
 fn init_request_rejects_invalid_identity_before_reading_or_writing_state() {
-    let temp = TempDir::new().unwrap();
+    let temp = common::tempdir().unwrap();
     let transcript = temp.path().join("missing-transcript.jsonl");
     for (session, epoch) in [("invalid-session", 1), (OLD, -1)] {
         let request = guard::InitRequest {
@@ -230,10 +232,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::tempdir().unwrap();
         let base = tmp.path().to_path_buf();
         let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        common::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["config", "user.email", "test@example.invalid"]);
         git(&repo, &["config", "user.name", "Test"]);
@@ -241,7 +243,7 @@ impl Harness {
         git(&repo, &["add", "a"]);
         git(&repo, &["commit", "-qm", "initial"]);
         let root = base.join("state");
-        std::fs::create_dir_all(&root).unwrap();
+        common::create_dir_all(&root).unwrap();
         let log = base.join(format!("rollout-{OLD}.jsonl"));
         write_log(&log, OLD, &repo, 130000);
         let mut state = json!({
@@ -340,6 +342,39 @@ impl Harness {
         }
         h
     }
+}
+
+#[test]
+fn init_and_reconcile_reject_untrusted_roots_before_using_an_agent() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new();
+    let request = guard::InitRequest {
+        root: &h.root,
+        pane: "w1:p1",
+        session: OLD,
+        transcript_path: &h.log,
+        task: "test#1",
+        epoch: 1,
+        role: "dev",
+        sessions_dir: &h.base,
+        app_socket: None,
+        codex_binary: None,
+    };
+    assert!(guard::init(&request)
+        .unwrap_err()
+        .message
+        .contains("state exists"));
+    std::fs::set_permissions(&h.root, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(guard::init(&request)
+        .unwrap_err()
+        .message
+        .contains("writable"));
+    let mut adapter = FakeGuard::new(h.shared.clone());
+    assert!(guard::reconcile(&h.root, OLD, &mut adapter, false)
+        .unwrap_err()
+        .message
+        .contains("writable"));
+    assert!(h.shared.lock().unwrap().messages.is_empty());
 }
 
 #[test]
@@ -553,7 +588,7 @@ fn diagnosis_distinguishes_telemetry_and_watcher_faults() {
 fn inside_checkout_uses_the_git_root() {
     let h = Harness::new();
     let sub = h.repo.join("pkg");
-    std::fs::create_dir_all(&sub).unwrap();
+    common::create_dir_all(&sub).unwrap();
     assert!(guard::inside_checkout(&h.repo.join("state"), &sub));
     assert!(guard::inside_checkout(&sub.join("state"), &sub));
     assert!(!guard::inside_checkout(&h.base.join("state"), &sub));
@@ -567,7 +602,7 @@ fn inside_checkout_uses_the_git_root() {
 fn fingerprint_binds_untracked_bytes_from_a_subdirectory() {
     let h = Harness::new();
     let sub = h.repo.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
+    common::create_dir_all(&sub).unwrap();
     let before = guard::fingerprint(&sub.display().to_string()).unwrap();
     std::fs::write(h.repo.join("other"), "new").unwrap();
     let after = guard::fingerprint(&sub.display().to_string()).unwrap();

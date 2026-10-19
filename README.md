@@ -122,12 +122,18 @@ herdr-flow queue metrics --state-dir /absolute/queue --json
 
 字段形状与旧实现保持一致；但它是独立实现，启用自动化前应在新的状态目录完成一次 `readiness`、一次结果投递/ACK 和一次只读 CI 观察。不要直接让新二进制接管存在未决 `*_sending` 相位的旧状态；先按文档检查并 `reconcile`。
 
+P2 修复后的升级规则：
+
+- checkout 指纹采用带版本域的 v2 编码；旧 checkpoint/handoff 的指纹不会被兼容接受，须重新检查工作区并生成 checkpoint、handoff 和相关 advice。
+- JSON 身份按 Python 的浮点格式及 ASCII 转义计算。原先字节一致的身份保持一致；含受影响浮点或 DEL 的旧 CI 配置须核对后在新 epoch 重新绑定。遇到旧 Rust 编码的 advisor reservation 会拒绝自动重放；先确认已有 thread/turn、结果及 cleanup，再使用新 epoch/状态目录，不自动修改旧 ID 或复用不匹配的哈希。
+- 新状态目录及中间目录以 0700 创建；既有目录须属于当前用户，允许 0700/0755，拒绝 group/world writable（包括常见的 0775）和符号链接。祖先目录也须可信（允许 root 所有的 sticky 临时目录）。已有不安全目录须先由操作者检查来源与内容，再修复权限或迁移到真实目录；程序不自动 chmod 后信任其内容。
+
 ## 安全边界
 
 - **只读观察**：CI 观察器、指标和外部 Checks 不重跑 CI、不合并 PR、不修改仓库设置；发布与合并仍需既有授权。
 - **本地信任不等于认证**：通用 `signal`、交接文件和 `producer_identity` 依赖本地文件系统信任，队列不认证生产者；协调者须独立核对 session/model、候选 SHA 和证据。
 - **命令与路径**：原生 Codex 的 Herdr 客户端和 shell 插值路径拒绝元字符；batch Git 仅允许白名单命令、拒绝全局配置覆盖并设置超时；工作区须为绝对路径且不得重叠。
-- **文件与传输**：状态/交接文件原子替换并限制为 0600，父目录不能是符号链接；app-server socket 必须属于当前用户且非全局可写；JSON-RPC 限制消息大小与嵌套深度，外部 Checks 清单最多 32 项，超过 1000 个 Check suite 时拒绝判定；错误输出会脱敏。
+- **文件与传输**：状态/交接文件在已打开的目录内原子替换并限制为 0600，拒绝末级及祖先符号链接；状态读写和锁统一检查目录信任，状态/锁文件须是当前用户所有的不可共享写普通文件；app-server socket 必须属于当前用户且非全局可写；JSON-RPC 限制消息大小与嵌套深度，外部 Checks 清单最多 32 项，超过 1000 个 Check suite 时拒绝判定；错误输出会脱敏。
 - **平台与能力**：上下文守护/自动换班仅在 Linux 验证；缺少 `/proc`、Unix socket 或 app-server 方法时明确失败。
 - 历史 Python 审计快照见 [SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)；Rust 移植的审计（含 live 验收缺口、CRAP 门禁口径和未修复项）见 [AUDIT_REPORT_2026-10-19.md](AUDIT_REPORT_2026-10-19.md)。
 
@@ -151,7 +157,7 @@ Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `carg
 - 每个函数的 `CRAP = CC² × (1 - coverage)³ + CC` 必须不超过 10。
 - CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。
 - 高复杂度函数必须拆分为小函数；低覆盖函数需要补测试。
-- 当前门禁测量 4,095 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 68.1%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
+- 当前门禁测量 4,110 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 68.6%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
 
 ```bash
 # 需要先安装 cargo-llvm-cov

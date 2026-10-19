@@ -375,6 +375,7 @@ pub fn fingerprint(cwd: &Path) -> Result<String> {
     let repo_root = repository_root(cwd)?;
     ensure_no_submodules(&repo_root)?;
     let mut hasher = Sha256::new();
+    hasher.update(b"herdr-checkout-fingerprint-v2\0");
     hash_tracked_state(&repo_root, &mut hasher)?;
     hash_untracked(&repo_root, &mut hasher)?;
     Ok(to_hex(&hasher.finalize()))
@@ -477,10 +478,8 @@ fn untracked_names(untracked: &[u8]) -> Vec<&[u8]> {
 }
 
 fn hash_untracked_entry(repo_root: &Path, name: &[u8], hasher: &mut Sha256) -> Result<()> {
-    hasher.update(name);
-    hasher.update([0u8]);
-    let name_text = String::from_utf8_lossy(name);
-    let path = repo_root.join(name_text.as_ref());
+    hash_length_prefixed(hasher, name);
+    let path = repo_root.join(std::ffi::OsStr::from_bytes(name));
     let metadata = fs::symlink_metadata(&path)
         .map_err(|error| FlowError::guard(format!("cannot inspect untracked path: {error}")))?;
     if metadata.file_type().is_symlink() {
@@ -498,21 +497,24 @@ fn hash_symlink(path: &Path, hasher: &mut Sha256) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     hasher.update(b"link:");
     let target = fs::read_link(path)?;
-    hasher.update(target.as_os_str().as_bytes());
+    hash_length_prefixed(hasher, target.as_os_str().as_bytes());
     Ok(())
 }
 
 fn hash_regular_file(path: &Path, metadata: &fs::Metadata, hasher: &mut Sha256) -> Result<()> {
-    hasher.update(metadata.mode().to_string().as_bytes());
+    hasher.update(b"file:");
+    hasher.update(metadata.mode().to_be_bytes());
     let mut file = File::open(path)?;
+    let mut content = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        content.update(&buffer[..read]);
     }
+    hasher.update(content.finalize());
     Ok(())
 }
 
@@ -594,7 +596,7 @@ pub fn spawn_with_ready(
 
 fn ensure_log_parent(log_path: &Path) -> Result<()> {
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::util::fs::ensure_private_dir(parent, true)?;
     }
     Ok(())
 }
@@ -713,7 +715,7 @@ fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
 /// queue command wrappers).
 pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> Result<Child> {
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::util::fs::ensure_private_dir(parent, true)?;
     }
     let log = OpenOptions::new()
         .create(true)
@@ -932,7 +934,7 @@ mod tests {
 
     #[test]
     fn existing_file_requires_a_regular_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let file = directory.path().join("evidence");
         fs::write(&file, b"x").unwrap();
         ensure_existing_file(&file).unwrap();
@@ -949,7 +951,7 @@ mod tests {
 
     #[test]
     fn spawn_with_ready_accepts_a_helper_frame() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let log = directory.path().join("helper.log");
         let argv = vec![
             "sh".to_string(),
@@ -963,7 +965,7 @@ mod tests {
 
     #[test]
     fn fingerprint_tracks_head_worktree_and_untracked_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let root = directory.path();
         let git = |arguments: &[&str]| {
             let status = Command::new("git")

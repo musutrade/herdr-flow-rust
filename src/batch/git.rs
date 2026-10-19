@@ -244,7 +244,7 @@ fn workspace_nonempty(root: &Path) -> bool {
 }
 
 fn prepare_claim(root: &Path, marker: &Path, owner: &J) -> Result<()> {
-    std::fs::create_dir_all(root)?;
+    util::ensure_private_dir(root, true)?;
     claim_owner(marker, owner)
 }
 

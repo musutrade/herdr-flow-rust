@@ -5,6 +5,8 @@
 //! WebSocket handshake observation, the review journal, marker/lock/socket
 //! ownership and one real byte-proxy run.
 
+pub mod common;
+
 use std::cell::RefCell;
 use std::fs;
 use std::io::{Read, Write};
@@ -311,7 +313,7 @@ struct ReviewFixture {
 
 impl ReviewFixture {
     fn new() -> Self {
-        let temporary = TempDir::new().expect("tempdir");
+        let temporary = common::tempdir().expect("tempdir");
         let root = temporary.path().to_path_buf();
         let store = Rc::new(RefCell::new(
             ReviewEvents::new(&root, "launch-one").expect("review events"),
@@ -849,7 +851,7 @@ fn file_mode(path: &Path) -> u32 {
 
 #[test]
 fn bridge_prepares_private_marker_lock_socket_and_cleanup() {
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let root = temporary.path().join("state");
     let mut first = ProxyBridge::new(&root, "/server", "/binary", "/cwd", "fresh", None);
     let mut second = ProxyBridge::new(&root, "/server", "/binary", "/cwd", "other", None);
@@ -879,7 +881,7 @@ fn bridge_prepares_private_marker_lock_socket_and_cleanup() {
 
 #[test]
 fn bridge_uses_proc_fd_alias_for_long_socket_paths() {
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let root = temporary.path().join("long-".repeat(24));
     let mut bridge = ProxyBridge::new(&root, "/server", "/binary", "/cwd", "fresh", None);
     bridge.prepare().expect("prepare");
@@ -896,10 +898,10 @@ fn bridge_uses_proc_fd_alias_for_long_socket_paths() {
 
 #[test]
 fn bridge_refuses_symlink_state_directory_and_non_socket_proxy() {
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let root = temporary.path().to_path_buf();
     let real = root.join("real");
-    fs::create_dir(&real).expect("real dir");
+    common::create_dir(&real).expect("real dir");
     let link = root.join("link");
     symlink(&real, &link).expect("symlink");
     let mut bridge = ProxyBridge::new(&link, "/server", "/binary", "/", "fresh", None);
@@ -918,7 +920,7 @@ fn cli_usage_errors_exit_two_runtime_errors_exit_one() {
     assert_eq!(cli(&[]), 2);
     assert_eq!(cli(&["--help".to_string()]), 0);
 
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let state = temporary.path().join("state");
     let args = vec![
         "--state-dir".to_string(),
@@ -967,7 +969,7 @@ fn bridge_validation_accepts_only_canonical_uuid_threads() {
         OLD
     );
 
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let mut bridge = ProxyBridge::new(
         temporary.path().join("state"),
         "/server",
@@ -1007,7 +1009,7 @@ fn read_until(stream: &mut std::os::unix::net::UnixStream, needle: &[u8], limit:
 
 #[test]
 fn real_byte_proxy_reports_ready_exit_and_reviews() {
-    let temporary = TempDir::new().expect("tempdir");
+    let temporary = common::tempdir().expect("tempdir");
     let root = temporary.path().to_path_buf();
     let state = root.join("state");
     let server_path = root.join("server.sock");

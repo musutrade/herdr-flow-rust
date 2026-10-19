@@ -1,10 +1,11 @@
 //! Focused offline coverage for the refactor group E functions.
 
+pub mod common;
+
 use herdr_flow::model::{self, J};
 use herdr_flow::progress;
 use herdr_flow::runtime;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
@@ -769,7 +770,7 @@ fn diagnose_reports_pending_result_and_successor_deadlines() {
 
 #[test]
 fn readiness_reports_session_queue_watch_and_guard_gaps() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::tempdir().unwrap();
     let root = dir.path();
     let queue = json!({
         "version": 1,
@@ -859,9 +860,9 @@ fn readiness_reports_session_queue_watch_and_guard_gaps() {
 
 #[test]
 fn register_reserves_initial_writer_and_enforces_queue_state() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::tempdir().unwrap();
     let workspace = dir.path().join("work");
-    std::fs::create_dir_all(&workspace).unwrap();
+    common::create_dir_all(&workspace).unwrap();
     let mut queue = base_queue();
     let mut spec = task_spec();
     spec["workspace"] = json!(workspace.display().to_string());
@@ -899,9 +900,9 @@ fn register_reserves_initial_writer_and_enforces_queue_state() {
 
 #[test]
 fn apply_dispatch_can_reserve_an_isolated_writer() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::tempdir().unwrap();
     let workspace = dir.path().join("successor");
-    std::fs::create_dir_all(&workspace).unwrap();
+    common::create_dir_all(&workspace).unwrap();
     let mut queue = apply_queue("a2");
     let mut action = dispatch_action();
     action["writes"] = json!(true);

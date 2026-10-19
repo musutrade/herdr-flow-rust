@@ -1,5 +1,7 @@
 //! End-to-end queue, delivery, task and progress behavior over real files.
 
+pub mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -66,7 +68,7 @@ fn factory(
 }
 
 fn healthy_watcher(dir: &Path) -> FileLock {
-    std::fs::create_dir_all(dir).unwrap();
+    common::create_dir_all(dir).unwrap();
     let pid = std::process::id();
     let ticks = util::process_start_ticks(pid).unwrap_or_default();
     util::atomic_write_json(
@@ -98,13 +100,13 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::tempdir().unwrap();
         let base = tmp.path().to_path_buf();
         let guard = base.join("guard");
         let queue_dir = base.join("queue");
-        std::fs::create_dir_all(&guard).unwrap();
-        std::fs::create_dir_all(&queue_dir).unwrap();
-        std::fs::create_dir_all(base.join("repo")).unwrap();
+        common::create_dir_all(&guard).unwrap();
+        common::create_dir_all(&queue_dir).unwrap();
+        common::create_dir_all(base.join("repo")).unwrap();
         let guard_state = json!({
             "version": 2,
             "task": "o/r#1",
@@ -237,7 +239,7 @@ fn validates_wait_inputs_and_queue_location() {
     );
     assert!(result.is_err());
     let inside = h.base.join("repo").join("queue-inside");
-    std::fs::create_dir_all(&inside).unwrap();
+    common::create_dir_all(&inside).unwrap();
     assert!(queue::init(&inside, Some(&h.guard), 30).is_err());
 }
 
@@ -406,7 +408,7 @@ fn writer_reservation_prevents_overlapping_workspaces() {
     let h = Harness::new();
     let s = queue::load_queue(&h.queue).unwrap();
     let workspace = h.base.join("work-one");
-    std::fs::create_dir_all(&workspace).unwrap();
+    common::create_dir_all(&workspace).unwrap();
     if model::get(&s, "tasks").is_none() {
         let mut initial = s.clone();
         initial["tasks"] = json!({});
@@ -437,7 +439,7 @@ fn writer_reservation_prevents_overlapping_workspaces() {
     )
     .is_err());
     let other = h.base.join("work-two");
-    std::fs::create_dir_all(&other).unwrap();
+    common::create_dir_all(&other).unwrap();
     assert!(herdr_flow::progress::reserve_writer(
         &s,
         &other.display().to_string(),
@@ -452,7 +454,7 @@ fn writer_reservation_prevents_overlapping_workspaces() {
 fn worker_guard_fault_becomes_a_decision_event() {
     let h = Harness::new();
     let worker = h.base.join("worker");
-    std::fs::create_dir_all(&worker).unwrap();
+    common::create_dir_all(&worker).unwrap();
     let mut state = util::read_json(&h.guard.join("state.json")).unwrap();
     state["task"] = json!("o/r#1");
     state["role"] = json!("review");
@@ -492,7 +494,7 @@ fn worker_guard_fault_becomes_a_decision_event() {
 fn ci_wait_identity_is_pinned_and_missing_source_is_an_error() {
     let h = Harness::new();
     let source = h.base.join("ci");
-    std::fs::create_dir_all(&source).unwrap();
+    common::create_dir_all(&source).unwrap();
     let config = json!({"task": "o/r#1", "epoch": 1, "sha": SHA});
     let hash = util::sha256_json_sorted(&config);
     util::atomic_write_json(

@@ -12,6 +12,8 @@ use tempfile::Builder;
 
 use crate::error::{FlowError, Result};
 
+mod secure;
+
 pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path)
         .map_err(|error| FlowError::io(format!("cannot read {}: {error}", path.display())))
@@ -147,45 +149,34 @@ pub fn codex_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".codex"))
 }
 
-fn check_parent_not_symlink(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if let Ok(metadata) = fs::symlink_metadata(parent) {
-            if metadata.file_type().is_symlink() {
-                return Err(FlowError::watch("parent directory cannot be a symlink"));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Atomic replacement with mode 0600 and an fsync before rename.
+/// Atomic replacement in an anchored directory, without following symlinks.
+/// The file is private, fsynced before rename, and its directory is fsynced after.
 pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<()> {
-    check_parent_not_symlink(path)?;
-    let path = resolve_path(path);
-    let parent = write_parent(&path)?;
-    ensure_parent(&parent)?;
-    let temporary = create_temporary(&parent)?;
-    write_temporary(temporary, data, &path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FlowError::io("write target has no filename"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| FlowError::io("write target has no parent"))?;
+    let directory = secure::directory(parent, true)?;
+    let anchor = secure::anchor(&directory);
+    let target = anchor.join(name);
+    reject_leaf_symlink(&target)?;
+    let temporary = create_temporary(&anchor)?;
+    write_temporary(temporary, data, &target)?;
+    directory.sync_all()?;
     Ok(())
 }
 
-fn write_parent(path: &Path) -> Result<PathBuf> {
-    path.parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| FlowError::io("write target has no parent directory"))
-}
-
-fn ensure_parent(parent: &Path) -> Result<()> {
-    if !parent.exists() {
-        create_private_parent(parent)?;
+fn reject_leaf_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(FlowError::io("write target cannot be a symlink"))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
-}
-
-fn create_private_parent(parent: &Path) -> Result<()> {
-    fs::create_dir_all(parent)?;
-    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-    Ok(())
 }
 
 fn create_temporary(parent: &Path) -> Result<tempfile::NamedTempFile> {
@@ -251,16 +242,14 @@ pub fn atomic_write_json_compact(path: &Path, value: &Value) -> Result<()> {
 pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
     // Python `open('x')` reservation semantics: create only if absent, and
     // never expose a partially written document to a concurrent reader.
-    let parent = path
-        .parent()
-        .ok_or_else(|| FlowError::io("write target has no parent directory"))?;
-    fs::create_dir_all(parent)?;
+    let (directory, path) = new_file_target(path)?;
+    let parent = secure::anchor(&directory);
     let mut text = serde_json::to_string_pretty(value)
         .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
     text.push('\n');
     let mut temporary = Builder::new()
         .prefix(".new-")
-        .tempfile_in(parent)
+        .tempfile_in(&parent)
         .map_err(|error| FlowError::io(format!("cannot create temporary file: {error}")))?;
     temporary
         .as_file_mut()
@@ -273,14 +262,28 @@ pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
         .as_file_mut()
         .sync_all()
         .map_err(|error| FlowError::io(format!("cannot fsync temporary file: {error}")))?;
-    temporary.persist_noclobber(path).map_err(|error| {
+    temporary.persist_noclobber(&path).map_err(|error| {
         if error.error.kind() == std::io::ErrorKind::AlreadyExists {
             FlowError::io(format!("{} already exists", path.display()))
         } else {
             FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
         }
     })?;
+    directory.sync_all()?;
     Ok(())
+}
+
+fn new_file_target(path: &Path) -> Result<(File, PathBuf)> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| FlowError::io("write target has no parent directory"))?;
+    let directory = secure::directory(parent, true)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FlowError::io("new file has no filename"))?;
+    let parent = secure::anchor(&directory);
+    let path = parent.join(name);
+    Ok((directory, path))
 }
 
 pub fn fsync_dir(path: &Path) -> Result<()> {
@@ -297,16 +300,22 @@ impl FileLock {
     /// Open (or create) `path` and take a `flock`. With `blocking=false`,
     /// returns `Ok(None)` when another process owns the lock.
     pub fn acquire(path: &Path, blocking: bool) -> Result<Option<Self>> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| FlowError::io("lock has no parent"))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| FlowError::io("lock has no filename"))?;
+        let directory = secure::directory(parent, false)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .mode(0o600)
             .truncate(false)
-            .open(path)
-            .map_err(|error| {
-                FlowError::io(format!("cannot open lock {}: {error}", path.display()))
-            })?;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(secure::anchor(&directory).join(name))?;
+        validate_state_file(&file)?;
         Self::from_file(file, blocking)
     }
 
@@ -375,33 +384,55 @@ pub fn is_owned_regular_file(path: &Path) -> bool {
     metadata.file_type().is_file() && metadata.uid() == unsafe { libc::geteuid() }
 }
 
-/// Ensure a private real directory (no symlink, owned by this user, mode 0700).
+/// Create missing directories as 0700. Existing 0700/0755 directories are
+/// accepted only when owned by this user and not group/world writable.
 pub fn ensure_private_dir(path: &Path, create: bool) -> Result<()> {
-    create_private_dir(path, create)?;
-    let metadata = private_dir_metadata(path)?;
+    let directory = secure::directory(path, create)?;
+    let metadata = directory.metadata()?;
     validate_private_dir_type(&metadata)?;
     validate_private_dir_owner(&metadata)?;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-    Ok(())
-}
-
-fn create_private_dir(path: &Path, create: bool) -> Result<()> {
-    if create {
-        create_private_dir_if_missing(path)?;
+    if metadata.mode() & 0o022 != 0 {
+        return Err(FlowError::guard(
+            "state directory must not be group/world writable",
+        ));
     }
     Ok(())
 }
 
-fn create_private_dir_if_missing(path: &Path) -> Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-    }
-    Ok(())
+pub fn state_dir(path: &Path, create: bool) -> Result<PathBuf> {
+    ensure_private_dir(path, create)?;
+    Ok(resolve_path(path))
 }
 
-fn private_dir_metadata(path: &Path) -> Result<fs::Metadata> {
-    fs::symlink_metadata(path)
-        .map_err(|error| FlowError::guard(format!("state directory unavailable: {error}")))
+pub fn read_state_json(root: &Path, name: &str) -> Result<Value> {
+    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+        return Err(FlowError::io("state filename must be a basename"));
+    }
+    ensure_private_dir(root, false)?;
+    let directory = secure::directory(root, false)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(secure::anchor(&directory).join(name))?;
+    validate_state_file(&file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn validate_state_file(file: &File) -> Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(FlowError::guard(
+            "state/lock file must be an owned regular file",
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(FlowError::guard(
+            "state/lock file must not be group/world writable",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_private_dir_type(metadata: &fs::Metadata) -> Result<()> {
@@ -490,7 +521,7 @@ mod tests {
 
     #[test]
     fn resolve_path_follows_symlinks_and_keeps_missing_suffix() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let target = directory.path().join("target");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("file"), b"x").unwrap();
@@ -503,7 +534,7 @@ mod tests {
 
     #[test]
     fn resolve_path_applies_parent_after_symlink_resolution() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let base = directory.path();
         let target = base.join("elsewhere").join("inner");
         fs::create_dir_all(&target).unwrap();
@@ -517,7 +548,7 @@ mod tests {
 
     #[test]
     fn atomic_writes_are_private_and_reject_symlink_parents() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let parent = directory.path().join("nested");
         let path = parent.join("state.json");
         atomic_write_bytes(&path, b"payload").unwrap();
@@ -540,7 +571,7 @@ mod tests {
 
     #[test]
     fn lock_probe_reports_free_and_held_states() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let path = directory.path().join("state.lock");
         assert!(lock_is_free(&path));
         let lock = FileLock::acquire(&path, false).unwrap().unwrap();
@@ -551,7 +582,7 @@ mod tests {
 
     #[test]
     fn private_directory_checks_and_removal() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let path = directory.path().join("private");
         ensure_private_dir(&path, true).unwrap();
         assert_eq!(
@@ -579,7 +610,7 @@ mod audit_write_tests {
 
     #[test]
     fn write_new_file_never_exposes_partial_content() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::util::fs::test_tempdir();
         let path = directory.path().join("reservation.json");
         write_new_file(&path, &serde_json::json!({"value": 1})).unwrap();
         assert!(write_new_file(&path, &serde_json::json!({"value": 2})).is_err());
@@ -590,4 +621,12 @@ mod audit_write_tests {
             0o600
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> tempfile::TempDir {
+    Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
 }

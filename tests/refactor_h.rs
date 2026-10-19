@@ -1,6 +1,8 @@
 //! Focused offline tests for the refactored CI observation, metrics and
 //! watcher-service helpers. Everything here is pure Rust and network-free.
 
+pub mod common;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,7 +14,6 @@ use herdr_flow::model;
 use herdr_flow::util;
 use herdr_flow::watch_service;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -422,7 +423,7 @@ fn suite_window_overflow_short_circuits_check_rows() {
 
 #[test]
 fn empty_metrics_report_formats_without_tasks() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     util::atomic_write_json(&tmp.path().join("queue.json"), &json!({"id": "q"})).unwrap();
     let report = metrics::report(tmp.path(), Some(10.0)).unwrap();
     let text = metrics::format_report(&report);
@@ -434,7 +435,7 @@ fn empty_metrics_report_formats_without_tasks() {
 
 #[test]
 fn acquire_lock_retries_and_then_fails_while_held() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let path = tmp.path().join("watch.lock");
     assert!(watch_service::acquire_lock(&path, 0, Duration::from_millis(1)).is_err());
     let lock = watch_service::acquire_lock(&path, 3, Duration::from_millis(1)).unwrap();

@@ -1,5 +1,7 @@
 //! OpenCode 1.19.3 adapter behavior and diagnostic CLI tests.
 
+pub mod common;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +13,6 @@ use herdr_flow::error::ErrorKind;
 use herdr_flow::model::J;
 use herdr_flow::opencode::{baseline_capabilities, create_opencode_adapter, OpenCodeAdapter};
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 fn state() -> J {
     json!({
@@ -367,7 +368,7 @@ fn cli_capabilities_prints_the_baseline() {
     let printed: Value = serde_json::from_slice(&output.stdout).expect("baseline JSON");
     assert_eq!(printed, baseline_capabilities());
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let output = std::process::Command::new(binary())
         .args([
             "opencode",
@@ -406,11 +407,11 @@ fn cli_errors_use_error_type_names_and_exit_two() {
 #[cfg(unix)]
 #[test]
 fn cli_verify_checks_pane_process_and_shell_identity_read_only() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     let state_dir = tmp.path().join("state");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&state_dir).unwrap();
+    common::create_dir_all(&bin).unwrap();
+    common::create_dir_all(&state_dir).unwrap();
     let log = tmp.path().join("herdr.log");
     let pid = std::process::id();
     let herdr = bin.join("herdr");
@@ -470,11 +471,11 @@ fn cli_verify_checks_pane_process_and_shell_identity_read_only() {
 #[cfg(unix)]
 #[test]
 fn cli_verify_reports_guard_errors() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     let state_dir = tmp.path().join("state");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&state_dir).unwrap();
+    common::create_dir_all(&bin).unwrap();
+    common::create_dir_all(&state_dir).unwrap();
     let pid = std::process::id();
     let herdr = bin.join("herdr");
     let script = "#!/bin/sh\n\
@@ -517,11 +518,11 @@ fn cli_verify_reports_guard_errors() {
 #[cfg(unix)]
 #[test]
 fn cli_verify_preserves_guard_and_transient_error_boundaries() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = common::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     let state_dir = tmp.path().join("state");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&state_dir).unwrap();
+    common::create_dir_all(&bin).unwrap();
+    common::create_dir_all(&state_dir).unwrap();
     let pid = std::process::id();
     let herdr = bin.join("herdr");
     let script = "#!/bin/sh\n\

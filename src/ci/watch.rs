@@ -853,6 +853,7 @@ pub fn observe(config: &J, api: &dyn GitHubApi) -> Result<J> {
 }
 
 pub fn persist(root: &Path, config_hash: &str, result: &J) -> Result<J> {
+    util::ensure_private_dir(root, true)?;
     let key = sha256_json_sorted(result);
     let mut event = Map::new();
     event.insert("id".to_string(), json!(key));
@@ -908,7 +909,8 @@ fn observer_identity(root: &Path, config_hash: &str, config: &J) -> Result<J> {
 }
 
 fn existing_observer_identity(identity_path: &Path, config_hash: &str) -> Result<J> {
-    let meta = util::read_json(identity_path)?;
+    let root = identity_path.parent().expect("observer identity parent");
+    let meta = util::read_state_json(root, "identity.json")?;
     require_observer_identity(&meta, config_hash).map(|()| meta)
 }
 
@@ -1116,8 +1118,7 @@ impl WatchState {
 }
 
 fn prepare_watch_root(root: &Path) -> Result<PathBuf> {
-    let root = util::resolve_path(root);
-    std::fs::create_dir_all(&root)?;
+    let root = util::state_dir(root, true)?;
     Ok(root)
 }
 
@@ -1217,8 +1218,7 @@ fn validate_background_config(config_path: &Path) -> Result<()> {
 }
 
 fn prepare_background_root(state_dir: &Path) -> Result<PathBuf> {
-    let root = util::resolve_path(state_dir);
-    std::fs::create_dir_all(&root)?;
+    let root = util::state_dir(state_dir, true)?;
     Ok(root)
 }
 
