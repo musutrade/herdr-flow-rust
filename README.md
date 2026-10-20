@@ -28,10 +28,15 @@
 依赖：
 
 - Linux（上下文守护/自动换班依赖 `/proc`、Unix domain socket 与 POSIX `flock`）
-- Rust 1.80+ 与 Cargo
+- Rust 1.85+ 与 Cargo（CI 独立验证最低版本 1.85.0）
 - 已认证的 GitHub CLI `gh`
 - 自动编排需要运行中的本地 Codex app-server 与同版本原生 TUI（已验证 0.162.1）
 - Herdr 编排需在 Herdr 管理的会话中进行
+
+CI 分别在 stable 和最低版本 1.85.0 上使用锁文件构建、测试。第三方 Actions
+固定到完整 commit SHA，由 Dependabot 每周提出 Actions 与 Cargo 更新；更新需要
+通过相同检查。依赖审计在 PR、main 更新和每周定时执行，使用当时的 RustSec
+数据库；历史审计通过不代表之后没有新公告。
 
 构建并安装：
 
@@ -143,7 +148,7 @@ P2 修复后的升级规则：
 cargo fmt --all -- --check
 cargo run --locked -- lint-policy
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets
+cargo test --all-targets --locked
 ```
 
 Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexity` 逐项设为 `forbid`；同时禁止覆盖已有 `forbid` lint 组的兼容性放行。源码和测试一律禁止通过 `allow`、`expect`、条件属性或宏中的属性豁免任何 Clippy 规则，也禁止用 `allow(warnings)` / `expect(warnings)` 隐藏诊断。`lint-policy` 检查整个仓库的 Rust 文件（包括未启用的条件分支），CI 在 Clippy 前执行；发现问题须修正代码，不能增加豁免或放宽阈值。

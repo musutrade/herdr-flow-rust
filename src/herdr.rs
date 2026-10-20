@@ -1179,7 +1179,7 @@ fn thread_id_matches(thread: &J, target: &str) -> bool {
 }
 
 fn thread_session_matches(thread: &J, target: &str) -> bool {
-    model::string(thread, "sessionId").map_or(true, |session| session == target)
+    model::string(thread, "sessionId").is_none_or(|session| session == target)
 }
 
 fn thread_cwd_matches(state: &J, thread: &J) -> bool {

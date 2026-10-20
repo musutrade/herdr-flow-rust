@@ -884,7 +884,7 @@ fn managed_thread_source(params: &Map<String, Value>) -> bool {
 fn thread_source_ok(params: &Map<String, Value>) -> bool {
     params
         .get("threadSource")
-        .map_or(true, |source| source == "user" || source.is_null())
+        .is_none_or(|source| source == "user" || source.is_null())
 }
 
 fn message_request_key(message: &J) -> Result<RequestKey> {

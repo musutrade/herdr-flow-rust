@@ -722,7 +722,7 @@ fn check_turn_identity(params: &Value, turn_id: Option<&str>) -> Result<()> {
 }
 
 fn turn_identity_ok(actual: Option<&Value>, expected: Option<&str>) -> bool {
-    expected.map_or(true, |expected| matches_thread(actual, expected))
+    expected.is_none_or(|expected| matches_thread(actual, expected))
 }
 
 fn check_item_event(event: &Value, params: &Value) -> Result<()> {
@@ -1027,7 +1027,7 @@ fn is_agent_message(item: &Value) -> bool {
 }
 
 fn final_phase(item: &Value) -> bool {
-    item.get("phase").map_or(true, phase_is_final)
+    item.get("phase").is_none_or(phase_is_final)
 }
 
 fn phase_is_final(phase: &Value) -> bool {
@@ -1725,7 +1725,7 @@ fn ensure_start_model(response: &Value) -> Result<()> {
 }
 
 fn valid_start_model(model: Option<&Value>) -> bool {
-    model.map_or(true, is_luna_model)
+    model.is_none_or(is_luna_model)
 }
 
 fn is_luna_model(model: &Value) -> bool {

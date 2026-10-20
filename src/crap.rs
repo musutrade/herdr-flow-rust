@@ -579,7 +579,7 @@ fn run_always_test(options: &Options, base: &str) -> Result<i32, String> {
 }
 
 fn run_tests_for_no_changes(options: &Options, base: &str) -> Result<i32, String> {
-    let output = run_command(&options.root, "cargo", &["test"])?;
+    let output = run_command(&options.root, "cargo", &["test", "--locked"])?;
     Ok(tests_outcome(base, &output))
 }
 
@@ -1940,6 +1940,7 @@ fn run_coverage_export(root: &Path, output_path: &Path) -> Result<(), String> {
         "cargo",
         &[
             "llvm-cov",
+            "--locked",
             "--json",
             "--output-path",
             &output_path.to_string_lossy(),
