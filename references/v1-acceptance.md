@@ -11,6 +11,9 @@
 > bugs. The current baseline is 1.19.3; this record does not validate its
 > end-to-end integration. Follow the [current policy](opencode-v2.md).
 
+For current Rust socket/process fixtures and the remaining deployment evidence,
+see [Rust acceptance](rust-acceptance.md).
+
 V1 combines durable result application, explicit successor takeover, local PR
 provenance and required-job decisions. External publication still uses an
 authorized publisher; these tools do not push, create PRs or merge them.
