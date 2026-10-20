@@ -262,15 +262,19 @@ pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
         .as_file_mut()
         .sync_all()
         .map_err(|error| FlowError::io(format!("cannot fsync temporary file: {error}")))?;
-    temporary.persist_noclobber(&path).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            FlowError::io(format!("{} already exists", path.display()))
-        } else {
-            FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
-        }
-    })?;
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| new_file_error(error, &path))?;
     directory.sync_all()?;
     Ok(())
+}
+
+fn new_file_error(error: tempfile::PersistError, path: &Path) -> FlowError {
+    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+        FlowError::io(format!("{} already exists", path.display()))
+    } else {
+        FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
+    }
 }
 
 fn new_file_target(path: &Path) -> Result<(File, PathBuf)> {

@@ -283,37 +283,7 @@ fn apply_review(root: &Path, s: &mut J, h: &mut dyn GuardAdapter, before: &J) ->
     s["phase"] = json!("review_config_sending");
     save(root, s)?;
     h.set_state(s);
-    let result = (|| -> Result<J> {
-        h.rpc(
-            "thread/settings/update",
-            &json!({
-                "threadId": s.get("session").cloned().unwrap_or(Value::Null),
-                "approvalPolicy": "on-request",
-                "approvalsReviewer": "auto_review",
-                "sandboxPolicy": expected.get("sandbox").cloned().unwrap_or(Value::Null)
-            }),
-        )?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let actual = h.snapshot(None)?;
-            match crate::herdr::verify_review_runtime(&expected, &actual) {
-                Ok(()) => break,
-                Err(error) => {
-                    if Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-        let actual = h.snapshot(None)?;
-        if fingerprint(&model::string(s, "cwd").unwrap_or_default())?
-            != change["checkout"].as_str().unwrap_or_default()
-        {
-            return Err(guard_error("checkout changed during review configuration"));
-        }
-        Ok(actual)
-    })();
+    let result = apply_review_settings(s, h, &expected, &change);
     match result {
         Ok(actual) => {
             s["phase"] = change
@@ -333,6 +303,41 @@ fn apply_review(root: &Path, s: &mut J, h: &mut dyn GuardAdapter, before: &J) ->
             Err(guard_error(
                 "review configuration unconfirmed; inspect then review-reconcile, never replay",
             ))
+        }
+    }
+}
+
+fn apply_review_settings(s: &J, h: &mut dyn GuardAdapter, expected: &J, change: &J) -> Result<J> {
+    h.rpc(
+        "thread/settings/update",
+        &json!({
+            "threadId":s.get("session").cloned().unwrap_or(Value::Null),
+            "approvalPolicy":"on-request", "approvalsReviewer":"auto_review",
+            "sandboxPolicy":expected.get("sandbox").cloned().unwrap_or(Value::Null)
+        }),
+    )?;
+    await_review_settings(h, expected)?;
+    let actual = h.snapshot(None)?;
+    if fingerprint(&model::string(s, "cwd").unwrap_or_default())?
+        != change["checkout"].as_str().unwrap_or_default()
+    {
+        return Err(guard_error("checkout changed during review configuration"));
+    }
+    Ok(actual)
+}
+
+fn await_review_settings(h: &mut dyn GuardAdapter, expected: &J) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let actual = h.snapshot(None)?;
+        match crate::herdr::verify_review_runtime(expected, &actual) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 }
@@ -2905,59 +2910,62 @@ pub fn watch(root: &Path, ready_fd: Option<std::os::fd::RawFd>, one: bool) -> Re
     let root = util::state_dir(root, false)?;
     watch_service::run(
         &root,
-        || {
-            let _lock = match locked(&root) {
-                Ok(lock) => lock,
-                Err(error) if error.kind == ErrorKind::StateBusy => {
-                    if one {
-                        return Err(error);
-                    }
-                    return Ok(false);
-                }
-                Err(error) => return Err(error),
-            };
-            let state = read_state(&root)?;
-            if model::string(&state, "phase").as_deref() == Some("released") {
-                return Ok(true);
-            }
-            let phase = model::string(&state, "phase").unwrap_or_default();
-            if matches!(phase.as_str(), "parked" | "needs_attention") {
-                if one {
-                    print_watch_state(&state)?;
-                }
-                return Ok(false);
-            }
-            if phase == "review_config_sending" {
-                let error = guard_error(
-                    "review configuration is ambiguous; inspect then review-reconcile without replay",
-                );
-                let s = guard_failure_without_adapter(&root, &error);
-                if one {
-                    print_watch_state(&s)?;
-                }
-                return Ok(false);
-            }
-            let mut h = match Herdr::new(&state) {
-                Ok(adapter) => adapter,
-                Err(error) => {
-                    let s = guard_failure_without_adapter(&root, &error);
-                    if one {
-                        print_watch_state(&s)?;
-                    }
-                    return Ok(false);
-                }
-            };
-            let s = guarded_once(&root, &mut h, true);
-            if one {
-                print_watch_state(&s)?;
-            }
-            Ok(false)
-        },
+        || watch_tick(&root, one),
         || validate_watch(&root),
         10,
         ready_fd,
         one,
     )
+}
+
+fn watch_lock(root: &Path, one: bool) -> Result<Option<util::FileLock>> {
+    match locked(root) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind == ErrorKind::StateBusy => {
+            if one {
+                return Err(error);
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn watch_tick(root: &Path, one: bool) -> Result<bool> {
+    let Some(_lock) = watch_lock(root, one)? else {
+        return Ok(false);
+    };
+    let state = read_state(root)?;
+    let phase = model::string(&state, "phase").unwrap_or_default();
+    if phase == "released" {
+        return Ok(true);
+    }
+    if matches!(phase.as_str(), "parked" | "needs_attention") {
+        return watch_report(&state, one);
+    }
+    if phase == "review_config_sending" {
+        let error = guard_error(
+            "review configuration is ambiguous; inspect then review-reconcile without replay",
+        );
+        return watch_report(&guard_failure_without_adapter(root, &error), one);
+    }
+    watch_active(root, &state, one)
+}
+
+fn watch_active(root: &Path, state: &J, one: bool) -> Result<bool> {
+    let mut h = match Herdr::new(state) {
+        Ok(adapter) => adapter,
+        Err(error) => return watch_report(&guard_failure_without_adapter(root, &error), one),
+    };
+    let state = guarded_once(root, &mut h, true);
+    watch_report(&state, one)
+}
+
+fn watch_report(state: &J, one: bool) -> Result<bool> {
+    if one {
+        print_watch_state(state)?;
+    }
+    Ok(false)
 }
 
 fn print_watch_state(s: &J) -> Result<()> {

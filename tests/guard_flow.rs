@@ -5,6 +5,7 @@ pub mod common;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use herdr_flow::error::ErrorKind;
 use herdr_flow::guard;
 use herdr_flow::herdr::GuardAdapter;
 use herdr_flow::model::{self, J};
@@ -413,6 +414,52 @@ fn transcript_tracks_usage_and_partial_records() {
     let third = guard::transcript_state(&h.log, Some(&cursor2)).unwrap();
     assert_eq!(model::int(&third, "user_messages"), Some(1));
     assert!(model::bool_or(&third, "caught_up", false));
+}
+
+#[test]
+fn advice_wait_without_request_returns_immediately() {
+    let h = Harness::new();
+    assert_eq!(
+        guard::wait_advice(&h.root, 0.0).unwrap()["status"],
+        "not_requested"
+    );
+}
+
+#[test]
+fn review_reconcile_requires_ambiguous_phase_and_its_journal() {
+    let h = Harness::new();
+    let mut fake = h.fake();
+    assert!(guard::reconcile_review(&h.root, &mut fake)
+        .unwrap_err()
+        .message
+        .contains("no ambiguous"));
+    for phase in ["review_config_sending", "needs_attention"] {
+        let mut state = h.state();
+        state["phase"] = json!(phase);
+        state["phase_before_error"] = json!("review_config_sending");
+        util::atomic_write_json(&h.root.join("state.json"), &state).unwrap();
+        assert!(guard::reconcile_review(&h.root, &mut fake)
+            .unwrap_err()
+            .message
+            .contains("journal"));
+    }
+}
+
+#[test]
+fn watch_refuses_busy_state_and_does_not_replay_ambiguous_review() {
+    let h = Harness::new();
+    let lock = guard::locked(&h.root).unwrap();
+    assert_eq!(
+        guard::watch(&h.root, None, true).unwrap_err().kind,
+        ErrorKind::StateBusy
+    );
+    drop(lock);
+    let mut state = h.state();
+    state["phase"] = json!("review_config_sending");
+    util::atomic_write_json(&h.root.join("state.json"), &state).unwrap();
+    guard::watch(&h.root, None, true).unwrap();
+    assert_eq!(h.state()["phase"], "needs_attention");
+    assert_eq!(h.shared.lock().unwrap().messages.len(), 0);
 }
 
 #[test]

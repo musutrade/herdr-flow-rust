@@ -1807,36 +1807,57 @@ fn serve_continue(service: &mut ProxyBridge, outcome: &Result<()>) -> bool {
     outcome.is_ok() && service.serve_should_continue()
 }
 
-fn executable_path(command: &str) -> Option<String> {
-    let access = |candidate: &Path| -> bool {
-        let metadata = match fs::metadata(candidate) {
-            Ok(metadata) => metadata,
-            Err(_) => return false,
-        };
-        if !metadata.is_file() {
-            return false;
-        }
-        let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
-            return false;
-        };
-        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+fn executable_access(candidate: &Path) -> bool {
+    let metadata = match fs::metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
     };
+    if !metadata.is_file() {
+        return false;
+    }
+    let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
+        return false;
+    };
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+}
+
+fn executable_path(command: &str) -> Option<String> {
     if command.is_empty() {
         return None;
     }
     if command.contains('/') {
         let path = Path::new(command);
-        return access(path).then(|| command.to_string());
+        return executable_access(path).then(|| command.to_string());
     }
     let path_var =
         std::env::var_os("PATH").unwrap_or_else(|| std::ffi::OsString::from("/bin:/usr/bin"));
     for directory in std::env::split_paths(&path_var) {
         let candidate = directory.join(command);
-        if access(&candidate) {
+        if executable_access(&candidate) {
             return Some(candidate.to_string_lossy().to_string());
         }
     }
     None
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+
+    #[test]
+    fn executable_lookup_checks_absolute_paths_path_search_and_access() {
+        assert_eq!(executable_path(""), None);
+        assert_eq!(executable_path("/nonexistent/herdr-native"), None);
+        assert_eq!(executable_path("/bin/sh"), Some("/bin/sh".into()));
+        assert!(executable_path("sh").is_some());
+        assert_eq!(
+            executable_path("nonexistent-herdr-native-acceptance-20261020"),
+            None
+        );
+        assert!(!executable_access(Path::new("/bin")));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(!executable_access(file.path()));
+    }
 }
 
 /// Nonblocking UNIX connect with the original two second upstream deadline.

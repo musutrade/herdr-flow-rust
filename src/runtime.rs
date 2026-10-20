@@ -60,10 +60,7 @@ fn readiness_report(
     if let Some(deliveries) = model::get(s, "deliveries").and_then(Value::as_object) {
         let mut candidates: Vec<&J> = deliveries
             .values()
-            .filter(|delivery| {
-                model::string(delivery, "phase").as_deref() == Some("acknowledged")
-                    && model::string(delivery, "session").as_deref() == session
-            })
+            .filter(|delivery| delivery_acknowledged_by(delivery, session))
             .collect();
         candidates.sort_by(|left, right| {
             model::number(left, "ack_at")
@@ -94,6 +91,11 @@ fn readiness_report(
         "last_confirmed_receipt": last_confirmed
     });
     Ok((result, gaps, next_steps))
+}
+
+fn delivery_acknowledged_by(delivery: &J, session: Option<&str>) -> bool {
+    model::string(delivery, "phase").as_deref() == Some("acknowledged")
+        && model::string(delivery, "session").as_deref() == session
 }
 
 fn verify_receiver(

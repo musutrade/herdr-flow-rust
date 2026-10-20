@@ -163,6 +163,29 @@ fn help_returns_success() {
 }
 
 #[test]
+fn branchy_closure_cannot_escape_the_gate() {
+    let directory = project(&[(
+        "src/lib.rs",
+        "pub fn wrapper() { let run = || { if true { if false {} } }; run(); }\n",
+    )]);
+    let root = directory.path();
+    // Only the closure branches: CC=3, CRAP=12 at zero coverage.
+    assert_eq!(
+        herdr_flow::crap::cli(&args(
+            root,
+            &[
+                "--all",
+                "--skip-tests",
+                "--no-baseline",
+                "--threshold",
+                "10"
+            ]
+        )),
+        1
+    );
+}
+
+#[test]
 fn incremental_baseline_grandfathers_existing_and_rejects_new_or_worse() {
     let simple = "pub fn simple() -> i32 { 1 }\n\
                   pub fn branchy(value: bool) -> i32 { if value { 1 } else { 2 } }\n";
