@@ -6,102 +6,130 @@ destruction releases the environment as a whole.
 
 ## Ownership model
 
-An environment is identified by `task_id` and owns:
+An environment is identified by `task_id` plus a random `instance_id`, and owns:
 
 | Resource | Location | Destroyed |
 | --- | --- | --- |
-| workspace root | `workspace_root` | yes |
-| temporary root | `temp_root` | yes |
-| worktrees | inside `workspace_root` | yes |
-| child processes | registered pids | terminated (with descendants) |
-| files kept open | `open_files` | handles closed, files removed |
+| workspace root | `workspace_root` | yes, identity-checked |
+| temporary root | `temp_root` | yes, identity-checked |
+| worktrees | inside `workspace_root` | removed from the recorded repo |
+| child processes | registered process groups | whole group terminated |
+| files kept open | `open_files` | handles closed, entries unlinked |
 | delivery targets | `delivery_targets` | **never** |
 
-Delivery targets are resolved with `util::resolve_path` and rejected when they
-resolve inside either disposable root, so a symlink alias cannot smuggle a
-delivery into the disposable region (or vice versa).
+Three facts make deletion safe:
+
+1. **Instance identity.** A handle may only act on the environment document
+   whose `instance_id` matches. A stale handle cannot release a newer
+   environment that reused the task id.
+2. **Root identity.** `(device, inode)` is recorded at creation. Cleanup
+   re-checks it with `fstatat(AT_SYMLINK_NOFOLLOW)`; a root swapped for a
+   symlink or a different directory is refused, and the slot stays occupied.
+3. **Per-task lock.** The live handle holds an exclusive `flock` on
+   `locks/<task>.lock`. `restore_environment` and `cleanup_failed_environment`
+   refuse to run while another handle owns the task, so descriptors and slots
+   are only ever released by their owner.
+
+Delivery targets are resolved and must not overlap either disposable root in
+either direction; this also closes the "protected directory contains the
+workspace" case where cleanup used to report a false success.
 
 ## Durable state
 
 ```
 $HERDR_TASK_ENV_ROOT (default ~/.herdr/flow/task_environments)
-├── registry.json          # live environments, guarded by registry.lock
+├── registry.json          # claimed roots, guarded by registry.lock
 ├── registry.lock
-├── <task-id>.json         # environment document
-└── cleanup/<task-id>.json # cleanup plan, only while destruction is pending
+├── envs/<task-id>.json    # environment document
+├── plans/<task-id>.json   # pending cleanup plan
+└── locks/<task-id>.lock   # per-task ownership lock
 ```
 
-All documents are written with `util::atomic_write_json` (private mode, fsync,
-rename). `HERDR_TASK_ENV_ROOT` overrides the root; tests use it to stay out of
-the real home directory.
+Separate subdirectories mean a task named `registry` or `cleanup` cannot collide
+with internal files. Documents are written with `util::atomic_write_json`.
+`HERDR_TASK_ENV_ROOT` exists so tests never touch the real home directory.
 
 ## Lifecycle
 
 `create_environment(task_id, workspace_root, delivery_targets, temp_root)`
 
-1. validate `task_id` (`[A-Za-z0-9._-]`, no traversal) and resolve all paths;
-2. reject delivery targets inside a disposable root, and overlapping roots;
-3. reject an existing non-empty, non-directory or symlinked root — the
-   environment only ever destroys what it created;
-4. reserve a resource slot in `registry.json` and write the environment
-   document **before** touching the filesystem;
-5. materialise the roots; on failure remove what this attempt created and
-   release the slot.
+1. take the per-task lock (one owner per task id);
+2. validate the id and resolve all paths;
+3. reject delivery targets that overlap a root, and roots that overlap;
+4. reject an existing non-empty, non-directory or symlinked root — the
+   environment only destroys what it created;
+5. write the environment document (`creating`) **before** any index entry or
+   directory, so a crash is always observable;
+6. claim the roots in the index under `registry.lock` (unique ownership and
+   `HERDR_TASK_ENV_LIMIT`, default 32);
+7. create the roots (their parents must already exist) and record `(dev, ino)`;
+8. mark the document `active`.
 
-`restore_environment(task_id)` returns the stored document as-is. It never
-allocates a second environment, including after a crash mid-create or
-mid-destroy (`creating` / `destroying` are preserved).
+Any failure between 5 and 8 removes the document, the claim and the partial
+directories, so an interrupted create leaves nothing unmanaged.
+
+`restore_environment(task_id)` re-acquires the per-task lock and returns the
+stored document unchanged (`creating` / `destroying` are preserved for
+recovery). It fails while a live handle owns the task.
 
 `destroy_environment(&env)`
 
-1. write the cleanup plan, mark the document `destroying`;
-2. release file handles, terminate processes (descendants collected first,
-   SIGTERM then SIGKILL, guarded by kernel start time against pid reuse);
-3. remove worktrees that live inside `workspace_root` (`.git` contents are
-   never trusted as a delete target);
-4. remove registered files and then the disposable roots, using
-   `symlink_metadata` walks that never chmod through a symlink;
-5. only when everything is gone: drop the plan, the document and the slot.
+1. verify the document's `instance_id` matches the handle;
+2. write the cleanup plan and mark the document `destroying`;
+3. close the environment's descriptors;
+4. terminate registered process groups (re-enumerating members after each
+   signal, so children spawned in a SIGTERM handler are also killed);
+5. remove worktrees through the repository recorded at registration and verify
+   with `git worktree list`; a leftover registration keeps the item pending;
+6. unlink registered files relative to an `O_NOFOLLOW` walk (a leaf swapped for
+   a symlink loses only the link), then remove roots whose identity still
+   matches, widening permissions on directories only;
+7. only when everything is gone: remove the plan, the document (if it is still
+   this instance) and the index entry.
 
-A failure keeps the plan and the slot, marks the document `destroy_failed`, and
-`cleanup_failed_environment(task_id)` resumes it. Retries are bounded by
-`MAX_ATTEMPTS` (5), after which the environment is reported as stuck instead of
-silently allocating a new one.
+A failure keeps the plan, the document (`destroy_failed`) and the slot.
+`cleanup_failed_environment(task_id)` resumes it, up to `MAX_ATTEMPTS`.
+`interrupted_tasks()` / `recover_interrupted(task_id)` handle environments left
+behind by a crash during create or destroy.
 
 ## Resource slots
 
-`registry::occupied_slots()` counts live environments plus pending cleanup
-plans. `registry::limit()` reads `HERDR_TASK_ENV_LIMIT` (default 32). A failed
-cleanup therefore keeps consuming capacity; callers cannot escape a broken
-environment by creating a fresh root. Registry mutation holds an exclusive
-`flock`, so concurrent registrations cannot lose updates.
+`occupied_slots()` counts environment documents plus pending cleanup plans;
+`limit()` reads `HERDR_TASK_ENV_LIMIT`. A failed cleanup therefore keeps
+consuming capacity. Registry mutation holds an exclusive `flock`, so concurrent
+registrations cannot lose updates, and root claims prevent two tasks from
+sharing an empty workspace.
 
 ## Adapter use (implementation 3 continues this)
 
 ```rust
 let env = create_environment("task-1", &ws, targets, &tmp)?;
-// before writing anything:
-validate_path(&env, &path)?;
-// register everything the adapters create:
-env.register_worktree(&worktree)?;
-env.register_process_with_start(child.id() as i32, None)?;
-env.register_file(&handle_path)?;
+validate_path(&env, &path)?;                       // before writing
+env.register_handle(&path, file)?;                 // transfer the descriptor
+env.register_process(child.id() as i32)?;          // child must lead its own pgroup
+env.register_worktree(&worktree)?;                 // repo captured from .git
 ```
 
-`is_disposable` / `is_delivery` classification and `ResourceBoundary` are the
-contract adapters use to reject writes outside managed paths. Wiring Git,
-command execution, Codex/OpenCode, and the "delivered" transition of
-`progress.rs` into this API is implementation step 3/5 — this step only
-provides the primitives and does not treat a bare destroy as business success.
+Registered processes must be spawned in their own session/process group
+(`setsid`, as `util::process::spawn_with_ready` already does); registration of a
+process sharing the supervisor's group is refused because its descendants could
+not be reclaimed.
+
+Wiring Git, command execution, Codex/OpenCode and the "delivered" transition of
+`progress.rs` into this API is implementation step 3/5 — this step provides the
+primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (18 tests) covers: round-trip create/destroy, restore
-without duplication, delivery survival, symlink alias rejection, pre-existing
-assets, delivery inside a root, protected permissions, forged `gitdir`,
-descriptor release, descendant termination, invalid pids, failed-destroy slot
-retention and retry, retry exhaustion, interrupted create, concurrent
-registrations, task-id traversal, boundary validation, and idempotent destroy.
+`tests/task_env_tests.rs` (25 tests) covers the round trip, delivery survival,
+both overlap directions, symlink alias rejection, pre-existing assets, shared
+empty root rejection, protected permissions with symlink and hard link, swapped
+root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
+descriptor ownership, stale-handle isolation, early-exit and SIGTERM-spawned
+descendants, process-group registration, failed-destroy slot retention and
+retry, retry exhaustion, interrupted create, interrupted-state recovery,
+concurrent registrations, task-id traversal, internal-name shadowing, boundary
+validation, and idempotent destroy.
 
 ```bash
 cargo test --test task_env_tests

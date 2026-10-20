@@ -1,35 +1,40 @@
 //! Task environment identity, ownership and lifecycle state.
+//!
+//! Ownership rests on three durable facts, not on paths alone:
+//!
+//! * an `instance_id` that names one concrete environment, so a stale handle
+//!   can never act on a newer environment that reused the same task id;
+//! * the `(device, inode)` identity of each disposable root, so a path that was
+//!   swapped for a symlink or another directory is rejected instead of removed;
+//! * a per-task exclusive lock held for the lifetime of the handle, so two
+//!   handles cannot own the same environment and release each other's slot.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FlowError, Result};
 use crate::util;
 
-use super::boundary::{validate_delivery_targets, DeliveryTarget};
+use super::boundary::DeliveryTarget;
 use super::registry;
 
 /// Lifecycle state of a task environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentState {
-    /// Registered, directories not yet fully materialised.
     Creating,
-    /// Fully created and usable.
     Active,
-    /// Cleanup plan written; resources are being released.
     Destroying,
-    /// Release failed and the slot stays occupied until a retry succeeds.
     DestroyFailed,
-    /// Everything was released and the slot is gone.
     Destroyed,
 }
 
 impl EnvironmentState {
-    /// False once the environment is no longer usable for new work.
     pub fn is_live(self) -> bool {
         matches!(
             self,
@@ -38,12 +43,44 @@ impl EnvironmentState {
     }
 }
 
-/// A registered child process, identified by pid and start time so a recycled
-/// pid cannot be mistaken for the original process.
+/// Stable identity of a directory, from `stat(2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl RootIdentity {
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+}
+
+/// A worktree owned by the environment, plus the repository it belongs to.
+///
+/// The repository is captured at registration time (from `.git`), so cleanup
+/// can remove the administrative record even if the working tree is already
+/// gone. `.git` is only ever used to locate the repository, never as a path to
+/// delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRegistration {
+    pub path: PathBuf,
+    pub repo: Option<PathBuf>,
+}
+
+/// A registered child process.
+///
+/// `pgid` must equal `pid`: the environment only takes ownership of processes
+/// that lead their own process group, which is what makes descendant cleanup
+/// airtight (a late child inherits the group). `start_time` guards against pid
+/// reuse after the original process exits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredProcess {
     pub pid: i32,
-    /// Kernel start time in clock ticks from `/proc/<pid>/stat` when known.
+    pub pgid: i32,
     pub start_time: Option<u64>,
 }
 
@@ -51,30 +88,33 @@ pub struct RegisteredProcess {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEnvironment {
     pub task_id: String,
-    /// Root that holds all disposable task work (resolved, real path).
+    pub instance_id: String,
     pub workspace_root: PathBuf,
-    /// Root for temporary files and caches (resolved, real path).
     pub temp_root: PathBuf,
-    /// Formal delivery targets, always outside the disposable roots.
+    pub workspace_identity: Option<RootIdentity>,
+    pub temp_identity: Option<RootIdentity>,
     pub delivery_targets: Vec<DeliveryTarget>,
     pub state: EnvironmentState,
     pub created_at: f64,
     pub updated_at: f64,
-    /// Git worktrees created inside the boundary that need removal.
-    pub worktree_registrations: Vec<PathBuf>,
-    /// Child processes that must be terminated before directories go away.
+    pub worktree_registrations: Vec<WorktreeRegistration>,
     pub child_processes: Vec<RegisteredProcess>,
-    /// Paths of files kept open by the environment owner.
     pub open_files: Vec<PathBuf>,
-    /// State document location.
     pub state_file: PathBuf,
-    /// Open descriptors kept alive for the lifetime of this handle only.
+    /// Descriptors owned by this handle (not durable).
     #[serde(skip, default = "new_handle_slot")]
-    file_handles: std::sync::Arc<Mutex<Vec<File>>>,
+    file_handles: Arc<Mutex<Vec<File>>>,
+    /// Per-task ownership lock (not durable).
+    #[serde(skip, default = "new_lock_slot")]
+    ownership_lock: Arc<Mutex<Option<File>>>,
 }
 
-fn new_handle_slot() -> std::sync::Arc<Mutex<Vec<File>>> {
-    std::sync::Arc::new(Mutex::new(Vec::new()))
+fn new_handle_slot() -> Arc<Mutex<Vec<File>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn new_lock_slot() -> Arc<Mutex<Option<File>>> {
+    Arc::new(Mutex::new(None))
 }
 
 impl TaskEnvironment {
@@ -82,7 +122,6 @@ impl TaskEnvironment {
         &self.state_file
     }
 
-    /// Persist the current document atomically.
     pub fn persist(&self) -> Result<()> {
         let value = serde_json::to_value(self)?;
         util::atomic_write_json(&self.state_file, &value)
@@ -106,42 +145,77 @@ impl TaskEnvironment {
         self.transition(EnvironmentState::DestroyFailed)
     }
 
-    pub fn mark_destroyed(&mut self) -> Result<()> {
-        self.transition(EnvironmentState::Destroyed)
+    /// Release the per-task ownership lock so a retry can proceed.
+    pub fn release_ownership(&self) {
+        self.ownership_lock
+            .lock()
+            .expect("ownership slot poisoned")
+            .take();
     }
 
-    /// Register a worktree that lives inside the disposable boundary.
+    /// Whether this handle still holds the ownership lock.
+    pub fn owns_lock(&self) -> bool {
+        self.ownership_lock
+            .lock()
+            .expect("ownership slot poisoned")
+            .is_some()
+    }
+
+    /// Register a worktree that lives inside the disposable workspace.
     pub fn register_worktree(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
-        if !util::is_relative_to(&resolved, &self.workspace_root) {
+        if !self.owns_path(&resolved) {
             return Err(FlowError::progress(format!(
-                "worktree {} is outside the disposable workspace {}",
-                resolved.display(),
-                self.workspace_root.display()
+                "worktree {} is outside the disposable boundary",
+                resolved.display()
             )));
         }
-        if !self.worktree_registrations.contains(&resolved) {
-            self.worktree_registrations.push(resolved);
-            self.persist()?;
+        if self
+            .worktree_registrations
+            .iter()
+            .any(|item| item.path == resolved)
+        {
+            return Ok(());
         }
-        Ok(())
+        let registration = WorktreeRegistration {
+            repo: discover_repository(&resolved),
+            path: resolved,
+        };
+        self.worktree_registrations.push(registration);
+        self.persist()
     }
 
-    /// Register a child process. Non-positive pids are rejected because
-    /// `kill(-1, ...)` would signal unrelated processes.
+    /// Take ownership of a child process.
+    ///
+    /// The process must lead its own process group (spawn with `setsid` or
+    /// `setpgid(0, 0)`); otherwise descendants cannot be reclaimed reliably
+    /// and registration is refused.
     pub fn register_process(&mut self, pid: i32) -> Result<()> {
-        self.register_process_with_start(pid, None)
-    }
-
-    /// Register a child process together with its kernel start time.
-    pub fn register_process_with_start(&mut self, pid: i32, start_time: Option<u64>) -> Result<()> {
         if pid <= 1 {
             return Err(FlowError::progress(format!(
                 "invalid process id {pid}: must be greater than 1"
             )));
         }
-        let start_time = start_time.or_else(|| process_start_time(pid));
-        let entry = RegisteredProcess { pid, start_time };
+        let pgid = process_group(pid).ok_or_else(|| {
+            FlowError::progress(format!("cannot read process group of pid {pid}"))
+        })?;
+        // SAFETY: getpgrp takes no pointers and has no caller preconditions.
+        let own_group = unsafe { libc::getpgrp() };
+        if pgid != pid {
+            return Err(FlowError::progress(format!(
+                "pid {pid} is in process group {pgid}, not its own group; spawn it with setsid so its descendants can be reclaimed"
+            )));
+        }
+        if pgid == own_group {
+            return Err(FlowError::progress(format!(
+                "pid {pid} shares the supervisor's process group"
+            )));
+        }
+        let entry = RegisteredProcess {
+            pid,
+            pgid,
+            start_time: process_start_time(pid),
+        };
         if !self.child_processes.contains(&entry) {
             self.child_processes.push(entry);
             self.persist()?;
@@ -151,10 +225,8 @@ impl TaskEnvironment {
 
     /// Take ownership of an already-open descriptor.
     ///
-    /// The descriptor is closed when the environment is destroyed, so a file
-    /// the task opened cannot keep its storage alive past cleanup. Only the
-    /// owner of a descriptor can close it: a handle kept by another process or
-    /// by the caller itself is outside this contract.
+    /// Only the owner of a descriptor can close it, so this is the supported
+    /// way to guarantee a file does not outlive the environment.
     pub fn register_handle(&mut self, path: &Path, handle: File) -> Result<()> {
         let resolved = util::resolve_path(path);
         if self.open_files.contains(&resolved) {
@@ -168,24 +240,29 @@ impl TaskEnvironment {
         self.persist()
     }
 
-    /// Open `path` and take ownership of the descriptor.
+    /// Open `path` without following a final symlink and take ownership.
     pub fn register_file(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
         if self.open_files.contains(&resolved) {
             return Ok(());
         }
-        let handle = File::open(&resolved).map_err(|error| {
-            FlowError::progress(format!(
-                "cannot open {} for registration: {error}",
-                resolved.display()
-            ))
-        })?;
+        let handle = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&resolved)
+            .map_err(|error| {
+                FlowError::progress(format!(
+                    "cannot open {} for registration: {error}",
+                    resolved.display()
+                ))
+            })?;
         self.register_handle(&resolved, handle)
     }
 
     pub fn unregister_worktree(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
-        self.worktree_registrations.retain(|item| item != &resolved);
+        self.worktree_registrations
+            .retain(|item| item.path != resolved);
         self.persist()
     }
 
@@ -214,7 +291,6 @@ impl TaskEnvironment {
             .clear();
     }
 
-    /// Number of descriptors this handle still keeps open.
     pub fn open_handle_count(&self) -> usize {
         self.file_handles
             .lock()
@@ -222,24 +298,74 @@ impl TaskEnvironment {
             .len()
     }
 
-    /// True when `path` lies inside the disposable boundary.
+    /// True when `path` lexically lies inside the disposable boundary.
     pub fn owns_path(&self, path: &Path) -> bool {
         let resolved = util::resolve_path(path);
         util::is_relative_to(&resolved, &self.workspace_root)
             || util::is_relative_to(&resolved, &self.temp_root)
     }
+
+    /// Durable roots with their recorded identities.
+    pub fn roots(&self) -> [(PathBuf, Option<RootIdentity>); 2] {
+        [
+            (self.workspace_root.clone(), self.workspace_identity),
+            (self.temp_root.clone(), self.temp_identity),
+        ]
+    }
+
+    fn attach_lock(&self, lock: File) {
+        *self.ownership_lock.lock().expect("ownership slot poisoned") = Some(lock);
+    }
 }
 
-/// Read the kernel start time of a process, if it is visible.
+/// Process group of `pid`, if visible.
+pub fn process_group(pid: i32) -> Option<i32> {
+    // SAFETY: getpgid takes only a scalar and performs no memory access.
+    let pgid = unsafe { libc::getpgid(pid) };
+    if pgid > 0 {
+        Some(pgid)
+    } else {
+        None
+    }
+}
+
+/// Kernel start time of a process.
 pub fn process_start_time(pid: i32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The comm field may contain spaces and parentheses, so parse after the
-    // last ')' and take starttime (field 22, index 19 after the split).
     let rest = stat.rsplit_once(')')?.1;
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Kernel state letter of a process from `/proc/<pid>/stat`, if visible.
+/// Locate the main repository of a linked worktree from its `.git` file.
+///
+/// Only used to find the repository for `git worktree` commands. The parsed
+/// path is verified to sit at `<repo>/.git/worktrees/<name>`.
+pub fn discover_repository(worktree: &Path) -> Option<PathBuf> {
+    let git = worktree.join(".git");
+    let metadata = std::fs::symlink_metadata(&git).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&git).ok()?;
+    let gitdir = text.strip_prefix("gitdir:")?.trim();
+    let gitdir = Path::new(gitdir);
+    let admin = if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        worktree.join(gitdir)
+    };
+    let admin = admin.canonicalize().ok()?;
+    let worktrees = admin.parent()?;
+    if worktrees.file_name()? != "worktrees" {
+        return None;
+    }
+    let dot_git = worktrees.parent()?;
+    if dot_git.file_name()? != ".git" {
+        return None;
+    }
+    dot_git.parent().map(Path::to_path_buf)
+}
+
 fn process_state(pid: i32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.rsplit_once(')')?.1;
@@ -247,9 +373,6 @@ fn process_state(pid: i32) -> Option<char> {
 }
 
 /// Whether a registered process is still the same live (non-zombie) process.
-///
-/// A zombie still has `/proc/<pid>`, but it has already released the resources
-/// the environment cares about, so it counts as exited.
 pub fn process_is_alive(entry: &RegisteredProcess) -> bool {
     if entry.pid <= 1 {
         return false;
@@ -257,20 +380,23 @@ pub fn process_is_alive(entry: &RegisteredProcess) -> bool {
     if matches!(process_state(entry.pid), Some('Z') | None) {
         return false;
     }
-    let Some(current) = process_start_time(entry.pid) else {
-        return false;
-    };
-    match entry.start_time {
-        Some(expected) => expected == current,
-        None => true,
+    match (process_start_time(entry.pid), entry.start_time) {
+        (Some(current), Some(expected)) => current == expected,
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 
 /// Create a new task environment.
 ///
-/// Ordering matters for crash recovery: the resource slot and the state
-/// document exist before any directory is created, so an interrupted create is
-/// observable and its partial directories are reclaimed by destroy.
+/// Protocol (each step leaves a recoverable state):
+/// 1. take the per-task lock (exclusive ownership);
+/// 2. validate ids, paths, targets and root claims;
+/// 3. write the environment document with `creating` **before** any directory
+///    or index entry exists, so a crash here is always visible;
+/// 4. claim the roots in the index (unique ownership, resource limit);
+/// 5. materialise the roots and record their identities;
+/// 6. mark the document `active`.
 pub fn create(
     task_id: &str,
     workspace_root: &Path,
@@ -279,11 +405,27 @@ pub fn create(
 ) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
 
+    let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
+        FlowError::progress(format!(
+            "environment for task {task_id} is already owned by another live handle"
+        ))
+    })?;
+
     let workspace_root = util::resolve_path(workspace_root);
     let temp_root = util::resolve_path(temp_root);
     let delivery_targets =
-        validate_delivery_targets(delivery_targets, &workspace_root, &temp_root)?;
-
+        super::boundary::validate_delivery_targets(delivery_targets, &workspace_root, &temp_root)?;
+    for target in &delivery_targets {
+        for root in [&workspace_root, &temp_root] {
+            if util::overlap(&target.path, root) {
+                return Err(FlowError::progress(format!(
+                    "delivery target {} overlaps with disposable root {}",
+                    target.path.display(),
+                    root.display()
+                )));
+            }
+        }
+    }
     if util::overlap(&workspace_root, &temp_root) {
         return Err(FlowError::progress(format!(
             "workspace {} and temp root {} overlap",
@@ -292,8 +434,6 @@ pub fn create(
         )));
     }
 
-    // Refuse to take ownership of an existing non-empty directory: the
-    // environment may only ever destroy what it created itself.
     require_vacant(&workspace_root)?;
     require_vacant(&temp_root)?;
     validate_ancestors(&workspace_root)?;
@@ -302,15 +442,18 @@ pub fn create(
     let state_file = registry::environment_state_path(task_id)?;
     if state_file.exists() {
         return Err(FlowError::progress(format!(
-            "environment for task {task_id} already exists"
+            "environment for task {task_id} already exists; destroy or recover it first"
         )));
     }
 
     let now = util::now();
     let mut env = TaskEnvironment {
         task_id: task_id.to_string(),
+        instance_id: util::uuid_hex(),
         workspace_root: workspace_root.clone(),
         temp_root: temp_root.clone(),
+        workspace_identity: None,
+        temp_identity: None,
         delivery_targets,
         state: EnvironmentState::Creating,
         created_at: now,
@@ -320,31 +463,74 @@ pub fn create(
         open_files: Vec::new(),
         state_file: state_file.clone(),
         file_handles: new_handle_slot(),
+        ownership_lock: new_lock_slot(),
     };
+    env.attach_lock(lock);
 
-    // Reserve the slot and write the state before touching the filesystem.
-    registry::register_environment(task_id, &state_file)?;
+    // Step 3: durable intent first.
     if let Err(error) = env.persist() {
-        let _ = registry::unregister_environment(task_id);
+        env.release_ownership();
         return Err(error);
     }
 
+    // Step 4: unique root claim and resource slot.
+    let entry = registry::RegistryEntry {
+        task_id: task_id.to_string(),
+        instance_id: env.instance_id.clone(),
+        workspace_root: workspace_root.clone(),
+        temp_root: temp_root.clone(),
+        state_file: state_file.clone(),
+        registered_at: now,
+    };
+    if let Err(error) = registry::register_environment(entry) {
+        let _ = std::fs::remove_file(&state_file);
+        env.release_ownership();
+        return Err(error);
+    }
+
+    // Step 5: create and fingerprint the roots.
     if let Err(error) = materialize(&workspace_root, &temp_root) {
-        // Reclaim whatever this attempt created, then drop the slot.
         let _ = remove_created(&workspace_root);
         let _ = remove_created(&temp_root);
         let _ = std::fs::remove_file(&state_file);
-        let _ = registry::unregister_environment(task_id);
+        let _ = registry::unregister_environment(task_id, &env.instance_id);
+        env.release_ownership();
         return Err(error);
     }
+    let identities = fingerprint(&workspace_root, &temp_root);
+    let (workspace_identity, temp_identity) = match identities {
+        Ok(pair) => pair,
+        Err(error) => {
+            let _ = remove_created(&workspace_root);
+            let _ = remove_created(&temp_root);
+            let _ = std::fs::remove_file(&state_file);
+            let _ = registry::unregister_environment(task_id, &env.instance_id);
+            env.release_ownership();
+            return Err(error);
+        }
+    };
+    env.workspace_identity = Some(workspace_identity);
+    env.temp_identity = Some(temp_identity);
 
-    env.mark_active()?;
+    // Step 6: usable.
+    if let Err(error) = env.mark_active() {
+        env.release_ownership();
+        return Err(error);
+    }
     Ok(env)
 }
 
-/// Load a live environment document, initialising transient fields.
+/// Load a live environment document and take ownership of it.
+///
+/// Fails while another live handle owns the task, which prevents a restored
+/// handle from releasing descriptors or slots it does not own.
 pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
+    let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
+        FlowError::progress(format!(
+            "environment for task {task_id} is owned by another live handle"
+        ))
+    })?;
     let state_file = registry::environment_state_path(task_id)?;
     if !state_file.exists() {
         return Err(FlowError::progress(format!(
@@ -352,13 +538,32 @@ pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
         )));
     }
     let text = std::fs::read_to_string(&state_file)?;
-    let mut env: TaskEnvironment = serde_json::from_str(&text)?;
+    let mut env: TaskEnvironment = serde_json::from_str(&text).map_err(|error| {
+        FlowError::progress(format!("cannot parse {}: {error}", state_file.display()))
+    })?;
     env.state_file = state_file;
     env.file_handles = new_handle_slot();
+    env.ownership_lock = new_lock_slot();
+    env.attach_lock(lock);
     Ok(env)
 }
 
-/// Reject paths that already hold data owned by someone else.
+/// Recover an environment left behind by an interrupted create or destroy.
+pub fn recover_interrupted(task_id: &str) -> Result<bool> {
+    registry::validate_task_id(task_id)?;
+    let state_file = registry::environment_state_path(task_id)?;
+    if !state_file.exists() {
+        return Ok(false);
+    }
+    let env = restore(task_id)?;
+    if !env.state.is_live() {
+        return Ok(false);
+    }
+    super::cleanup::destroy(&env)?;
+    Ok(true)
+}
+
+/// Refuse to take over an existing directory that already holds data.
 fn require_vacant(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -376,8 +581,7 @@ fn require_vacant(path: &Path) -> Result<()> {
                     path.display()
                 )));
             }
-            let mut entries = std::fs::read_dir(path)?;
-            if entries.next().is_some() {
+            if std::fs::read_dir(path)?.next().is_some() {
                 return Err(FlowError::progress(format!(
                     "refusing to claim non-empty directory {}",
                     path.display()
@@ -388,13 +592,21 @@ fn require_vacant(path: &Path) -> Result<()> {
     }
 }
 
-/// Create the disposable roots. Missing ancestors are created private.
+/// Create only the roots themselves. Parents must already exist, so an
+/// environment never becomes the owner of directories it did not record.
 fn materialize(workspace_root: &Path, temp_root: &Path) -> Result<()> {
     for root in [workspace_root, temp_root] {
         if root.exists() {
             continue;
         }
-        std::fs::create_dir_all(root).map_err(|error| {
+        let parent_ok = root.parent().map(Path::is_dir).unwrap_or(false);
+        if !parent_ok {
+            return Err(FlowError::progress(format!(
+                "parent of {} must already exist",
+                root.display()
+            )));
+        }
+        std::fs::create_dir(root).map_err(|error| {
             FlowError::progress(format!("cannot create {}: {error}", root.display()))
         })?;
     }
@@ -409,19 +621,35 @@ fn remove_created(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Largest acceptable ancestor mode: owner-writable, not group/world writable.
+fn fingerprint(workspace_root: &Path, temp_root: &Path) -> Result<(RootIdentity, RootIdentity)> {
+    let workspace = std::fs::symlink_metadata(workspace_root)?;
+    let temp = std::fs::symlink_metadata(temp_root)?;
+    if workspace.file_type().is_symlink() || !workspace.is_dir() {
+        return Err(FlowError::progress(format!(
+            "workspace {} must be a real directory",
+            workspace_root.display()
+        )));
+    }
+    if temp.file_type().is_symlink() || !temp.is_dir() {
+        return Err(FlowError::progress(format!(
+            "temp root {} must be a real directory",
+            temp_root.display()
+        )));
+    }
+    Ok((RootIdentity::of(&workspace), RootIdentity::of(&temp)))
+}
+
+/// Largest acceptable ancestor mode: owner-writable, not group/world writable
+/// (a root-owned sticky directory such as `/tmp` is acceptable).
 fn ancestor_is_trusted(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
     // SAFETY: geteuid takes no pointers and has no caller preconditions.
     let uid = unsafe { libc::geteuid() };
     let owner_ok = metadata.uid() == uid || metadata.uid() == 0;
-    // A root-owned sticky directory such as /tmp is writable but cannot have
-    // its entries replaced, which is the property that matters here.
     let root_sticky = metadata.uid() == 0 && metadata.mode() & libc::S_ISVTX != 0;
     owner_ok && (metadata.mode() & 0o022 == 0 || root_sticky)
 }
 
-/// Verify that every ancestor of `path` is trusted and not a symlink.
+/// Verify no ancestor of `path` is a symlink or untrusted directory.
 pub fn validate_ancestors(path: &Path) -> Result<()> {
     let mut cursor = path.to_path_buf();
     while let Some(parent) = cursor.parent() {
@@ -443,4 +671,155 @@ pub fn validate_ancestors(path: &Path) -> Result<()> {
         cursor = parent.to_path_buf();
     }
     Ok(())
+}
+
+/// Open a directory without following symlinks.
+pub(crate) fn open_dir_nofollow(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| FlowError::progress(format!("cannot open {}: {error}", path.display())))
+}
+
+/// Open `relative` beneath an already-open directory, component by component,
+/// never following a symlink.
+pub(crate) fn open_beneath(root: &File, relative: &Path) -> Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut current = root.try_clone()?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(FlowError::progress(format!(
+                "invalid relative path {}",
+                relative.display()
+            )));
+        };
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| FlowError::progress("path component contains NUL"))?;
+        // SAFETY: current is a live directory fd and name is NUL-terminated.
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(FlowError::progress(format!(
+                "cannot open {} beneath root: {}",
+                relative.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: successful openat returns a fresh descriptor we now own.
+        current = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    }
+    Ok(current)
+}
+
+/// Identity of an entry relative to an open directory, without following a
+/// final symlink.
+pub(crate) fn identity_at(dir: &File, name: &std::ffi::OsStr) -> Result<Option<RootIdentity>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))?;
+    // SAFETY: zeroed stat is a valid initial value for fstatat to fill.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dir is live, name is NUL-terminated, stat is writable.
+    let result = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Ok(Some(RootIdentity {
+            dev: stat.st_dev,
+            ino: stat.st_ino,
+        }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(None);
+    }
+    Err(FlowError::progress(format!(
+        "cannot stat {name:?}: {error}"
+    )))
+}
+
+/// Entry kind relative to an open directory, without following a symlink.
+pub(crate) fn kind_at(dir: &File, name: &std::ffi::OsStr) -> Result<Option<EntryKind>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name_c = CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))?;
+    // SAFETY: zeroed stat is a valid initial value for fstatat to fill.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dir is live, name is NUL-terminated, stat is writable.
+    let result = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name_c.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(FlowError::progress(format!(
+            "cannot stat {name:?}: {error}"
+        )));
+    }
+    let mode = stat.st_mode & libc::S_IFMT;
+    let kind = if mode == libc::S_IFLNK {
+        EntryKind::Symlink
+    } else if mode == libc::S_IFDIR {
+        EntryKind::Directory
+    } else if mode == libc::S_IFREG {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    };
+    Ok(Some(kind))
+}
+
+/// Kind of a directory entry, from `lstat` semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Unlink an entry relative to an open directory. Removes the link itself; a
+/// symlink target is never touched.
+pub(crate) fn unlink_at(dir: &File, name: &std::ffi::OsStr) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))?;
+    // SAFETY: dir is live and name is NUL-terminated; flags are zero.
+    let result = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(());
+    }
+    Err(FlowError::progress(format!(
+        "cannot unlink {name:?}: {error}"
+    )))
 }

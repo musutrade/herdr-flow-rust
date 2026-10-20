@@ -1,15 +1,22 @@
-//! Global registry of live task environments.
+//! Durable index of live task environments.
 //!
-//! The registry is a single JSON document guarded by a `flock` for the whole
-//! read-modify-write operation, so concurrent registrations cannot lose
-//! updates. Every live environment also occupies a resource slot: an
-//! environment whose cleanup failed keeps its registry entry (or its cleanup
-//! plan) until the resources are actually released, which prevents callers
-//! from escaping a failed cleanup by creating fresh directories.
+//! Directory layout under the state root:
+//!
+//! ```text
+//! envs/<task>.json      environment documents
+//! plans/<task>.json     pending cleanup plans
+//! locks/<task>.lock     per-task exclusive ownership lock
+//! registry.json         index of claimed roots, guarded by registry.lock
+//! registry.lock
+//! ```
+//!
+//! Task ids therefore never collide with internal file names, and one task can
+//! never claim a root that another live task already owns.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,45 +24,35 @@ use serde::{Deserialize, Serialize};
 use crate::error::{FlowError, Result};
 use crate::util;
 
-/// Default number of live task environments allowed at the same time.
+/// Default number of live environments allowed at once.
 pub const DEFAULT_LIMIT: usize = 32;
 
-/// Maximum length accepted for a task identifier.
 const MAX_TASK_ID: usize = 128;
 
-/// A registry entry for one live task environment.
+/// One live environment claim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
     pub task_id: String,
+    pub instance_id: String,
+    pub workspace_root: PathBuf,
+    pub temp_root: PathBuf,
     pub state_file: PathBuf,
     pub registered_at: f64,
 }
 
-/// The durable registry document.
+/// The durable index document.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     entries: BTreeMap<String, RegistryEntry>,
 }
 
 impl Registry {
-    fn add(&mut self, task_id: &str, state_file: &Path, now: f64) {
-        self.entries.insert(
-            task_id.to_string(),
-            RegistryEntry {
-                task_id: task_id.to_string(),
-                state_file: state_file.to_path_buf(),
-                registered_at: now,
-            },
-        );
-    }
-
-    fn remove(&mut self, task_id: &str) -> bool {
-        self.entries.remove(task_id).is_some()
-    }
-
-    /// All registered entries, ordered by task identifier.
     pub fn entries(&self) -> impl Iterator<Item = &RegistryEntry> {
         self.entries.values()
+    }
+
+    pub fn get(&self, task_id: &str) -> Option<&RegistryEntry> {
+        self.entries.get(task_id)
     }
 
     pub fn contains(&self, task_id: &str) -> bool {
@@ -69,9 +66,13 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    fn insert(&mut self, entry: RegistryEntry) {
+        self.entries.insert(entry.task_id.clone(), entry);
+    }
 }
 
-/// Reject task identifiers that could escape a directory or alias another.
+/// Reject ids that could escape a directory or alias an internal file.
 pub fn validate_task_id(task_id: &str) -> Result<()> {
     let valid = !task_id.is_empty()
         && task_id.len() <= MAX_TASK_ID
@@ -90,25 +91,6 @@ pub fn validate_task_id(task_id: &str) -> Result<()> {
     }
 }
 
-/// Root directory that holds environment state and cleanup plans.
-pub fn state_root() -> Result<PathBuf> {
-    if let Some(root) = std::env::var_os("HERDR_TASK_ENV_ROOT") {
-        let root = PathBuf::from(root);
-        ensure_private_dir(&root)?;
-        return Ok(util::resolve_path(&root));
-    }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| FlowError::progress("HOME environment variable not set"))?;
-    let herdr = PathBuf::from(home).join(".herdr");
-    ensure_private_dir(&herdr)?;
-    let flow = herdr.join("flow");
-    ensure_private_dir(&flow)?;
-    let root = flow.join("task_environments");
-    ensure_private_dir(&root)?;
-    Ok(util::resolve_path(&root))
-}
-
-/// Create `path` as a private directory when missing, then reject unsafe modes.
 fn ensure_private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -124,6 +106,13 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             path.display()
         )));
     }
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(FlowError::guard(format!(
+            "{} must be owned by this user",
+            path.display()
+        )));
+    }
     let mut permissions = metadata.permissions();
     if permissions.mode() & 0o077 != 0 {
         permissions.set_mode(0o700);
@@ -132,36 +121,68 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Path of the durable environment document for one task.
+/// Root directory that holds environment state and cleanup plans.
+pub fn state_root() -> Result<PathBuf> {
+    let root = match std::env::var_os("HERDR_TASK_ENV_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| FlowError::progress("HOME environment variable not set"))?;
+            PathBuf::from(home)
+                .join(".herdr")
+                .join("flow")
+                .join("task_environments")
+        }
+    };
+    ensure_private_dir(&root)?;
+    Ok(util::resolve_path(&root))
+}
+
+fn subdir(name: &str) -> Result<PathBuf> {
+    let dir = state_root()?.join(name);
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Environment documents directory.
+pub fn env_dir() -> Result<PathBuf> {
+    subdir("envs")
+}
+
+/// Cleanup plans directory.
+pub fn plan_dir() -> Result<PathBuf> {
+    subdir("plans")
+}
+
+fn lock_dir() -> Result<PathBuf> {
+    subdir("locks")
+}
+
+/// Document path for one environment. Never collides with internal files.
 pub fn environment_state_path(task_id: &str) -> Result<PathBuf> {
     validate_task_id(task_id)?;
-    Ok(state_root()?.join(format!("{task_id}.json")))
+    Ok(env_dir()?.join(format!("{task_id}.json")))
 }
 
-/// Path of the durable cleanup plan for one task.
+/// Cleanup plan path for one environment.
 pub fn cleanup_state_path(task_id: &str) -> Result<PathBuf> {
     validate_task_id(task_id)?;
-    let dir = state_root()?.join("cleanup");
-    ensure_private_dir(&dir)?;
-    Ok(dir.join(format!("{task_id}.json")))
+    Ok(plan_dir()?.join(format!("{task_id}.json")))
 }
 
-/// Path of the registry document.
 pub fn registry_path() -> Result<PathBuf> {
     Ok(state_root()?.join("registry.json"))
 }
 
-fn registry_lock_path() -> Result<PathBuf> {
-    Ok(state_root()?.join("registry.lock"))
-}
-
-/// Acquire the exclusive registry lock, releasing it when the handle drops.
-pub fn lock_registry() -> Result<std::fs::File> {
-    let path = registry_lock_path()?;
+/// Acquire the exclusive index lock.
+fn lock_registry() -> Result<std::fs::File> {
+    let path = state_root()?.join("registry.lock");
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| {
             FlowError::progress(format!("failed to open {}: {error}", path.display()))
@@ -170,7 +191,34 @@ pub fn lock_registry() -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// Load the registry without taking the lock (callers that mutate take it).
+/// Acquire the per-task ownership lock.
+///
+/// The lock is held by the live [`crate::task_env::TaskEnvironment`] handle, so
+/// a second handle (including one produced by `restore_environment`) cannot
+/// own the same environment at the same time. Returns `Ok(None)` when the task
+/// is already owned.
+pub fn try_lock_task(task_id: &str) -> Result<Option<std::fs::File>> {
+    validate_task_id(task_id)?;
+    let path = lock_dir()?.join(format!("{task_id}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|error| {
+            FlowError::progress(format!("failed to open {}: {error}", path.display()))
+        })?;
+    if util::flock_try_exclusive(file.as_raw_fd())? {
+        Ok(Some(file))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Load the index without locking; writers hold [`lock_registry`] first.
 pub fn load_registry() -> Result<Registry> {
     let path = registry_path()?;
     if !path.exists() {
@@ -183,40 +231,31 @@ pub fn load_registry() -> Result<Registry> {
 }
 
 fn save_registry(registry: &Registry) -> Result<()> {
-    let path = registry_path()?;
     let value = serde_json::to_value(registry)?;
-    util::atomic_write_json(&path, &value)
+    util::atomic_write_json(&registry_path()?, &value)
 }
 
-/// Number of resource slots currently occupied.
-///
-/// A registry entry occupies a slot while the environment lives. A cleanup
-/// plan also occupies a slot, so a failed cleanup keeps consuming capacity
-/// until it succeeds instead of letting the caller allocate another root.
+/// Number of live environments plus pending cleanup plans.
 pub fn occupied_slots() -> Result<usize> {
-    let registry = load_registry()?;
-    let mut used = registry.len();
-    for entry in std::fs::read_dir(state_root()?.join("cleanup"))
-        .into_iter()
-        .flatten()
-    {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let task_id = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if !registry.contains(task_id) {
-            used += 1;
+    Ok(count_json_files(&env_dir()?)? + count_json_files(&plan_dir()?)?)
+}
+
+fn count_json_files(dir: &Path) -> Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
+            count += 1;
         }
     }
-    Ok(used)
+    Ok(count)
 }
 
-/// Configured environment limit (`HERDR_TASK_ENV_LIMIT`, default 32).
+/// Configured limit (`HERDR_TASK_ENV_LIMIT`, default 32).
 pub fn limit() -> usize {
     std::env::var("HERDR_TASK_ENV_LIMIT")
         .ok()
@@ -225,46 +264,79 @@ pub fn limit() -> usize {
         .unwrap_or(DEFAULT_LIMIT)
 }
 
-/// Reserve a resource slot for `task_id`, failing when the limit is reached.
-pub fn register_environment(task_id: &str, state_file: &Path) -> Result<()> {
-    validate_task_id(task_id)?;
+/// Claim the environment's roots in the index.
+///
+/// Fails when another live entry already claims an overlapping root, and when
+/// the resource limit is reached. The caller holds the per-task lock, so no
+/// concurrent claim for this task can interleave.
+pub fn register_environment(entry: RegistryEntry) -> Result<()> {
+    validate_task_id(&entry.task_id)?;
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
-    if registry.contains(task_id) {
-        return Err(FlowError::progress(format!(
-            "environment for task {task_id} is already registered"
-        )));
+
+    if let Some(existing) = registry.get(&entry.task_id) {
+        if existing.instance_id != entry.instance_id {
+            return Err(FlowError::progress(format!(
+                "task {} is already claimed by environment instance {}",
+                entry.task_id, existing.instance_id
+            )));
+        }
     }
+
+    for other in registry.entries() {
+        if other.task_id == entry.task_id {
+            continue;
+        }
+        for (mine, theirs) in [
+            (&entry.workspace_root, &other.workspace_root),
+            (&entry.temp_root, &other.temp_root),
+            (&entry.workspace_root, &other.temp_root),
+            (&entry.temp_root, &other.workspace_root),
+        ] {
+            if util::overlap(mine, theirs) {
+                return Err(FlowError::progress(format!(
+                    "root {} overlaps with root {} claimed by task {}",
+                    mine.display(),
+                    theirs.display(),
+                    other.task_id
+                )));
+            }
+        }
+    }
+
     let used = occupied_slots()?;
     let cap = limit();
-    if used >= cap {
+    if used > cap {
         return Err(FlowError::progress(format!(
-            "task environment limit reached ({used}/{cap}); finish or clean up pending environments first"
+            "task environment limit reached ({used}/{cap}); clean up pending environments first"
         )));
     }
-    registry.add(task_id, state_file, util::now());
+
+    registry.insert(entry);
     save_registry(&registry)
 }
 
-/// Release the resource slot held by `task_id`. Missing entries are ignored so
-/// destroy remains idempotent across crash recovery.
-pub fn unregister_environment(task_id: &str) -> Result<()> {
+/// Release the index entry, but only when it belongs to `instance_id`.
+pub fn unregister_environment(task_id: &str, instance_id: &str) -> Result<()> {
     validate_task_id(task_id)?;
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
-    if !registry.remove(task_id) {
-        return Ok(());
+    match registry.get(task_id) {
+        Some(entry) if entry.instance_id == instance_id => {
+            registry.entries.remove(task_id);
+            save_registry(&registry)
+        }
+        // Already released, or a different instance now owns the id: never
+        // touch the newer owner.
+        _ => Ok(()),
     }
-    save_registry(&registry)
 }
 
-/// Check whether a live environment is registered.
 pub fn is_registered(task_id: &str) -> Result<bool> {
     validate_task_id(task_id)?;
     Ok(load_registry()?.contains(task_id))
 }
 
-/// All registered task identifiers, ordered.
 pub fn list_registered() -> Result<Vec<String>> {
     Ok(load_registry()?
         .entries()
@@ -272,7 +344,36 @@ pub fn list_registered() -> Result<Vec<String>> {
         .collect())
 }
 
-/// A read-only snapshot of the registry.
+/// Tasks whose document shows an interrupted create or destroy.
+pub fn interrupted_tasks() -> Result<Vec<String>> {
+    let mut tasks = Vec::new();
+    let envs = env_dir()?;
+    for entry in std::fs::read_dir(envs)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let state = value
+            .get("state")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if matches!(state, "creating" | "destroying" | "destroy_failed") {
+            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                tasks.push(task_id.to_string());
+            }
+        }
+    }
+    tasks.sort();
+    Ok(tasks)
+}
+
+/// Read-only snapshot of the index.
 pub struct EnvironmentRegistry {
     registry: Registry,
 }
@@ -297,8 +398,7 @@ impl EnvironmentRegistry {
 
     pub fn get_state_file(&self, task_id: &str) -> Option<PathBuf> {
         self.registry
-            .entries()
-            .find(|entry| entry.task_id == task_id)
+            .get(task_id)
             .map(|entry| entry.state_file.clone())
     }
 }

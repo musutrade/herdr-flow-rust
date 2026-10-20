@@ -1,25 +1,23 @@
 //! Integration tests for task environment lifecycle and its boundaries.
 //!
-//! Each test uses an isolated `HERDR_TASK_ENV_ROOT`, so state never touches the
-//! real `~/.herdr` tree and tests can run in parallel.
+//! The registry root is process-global, so every test holds one mutex and
+//! points `HERDR_TASK_ENV_ROOT` at an isolated temporary directory.
 
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, MutexGuard};
 
 use herdr_flow::task_env::*;
 use tempfile::TempDir;
 
-/// The registry root is process-global, so tests that point it somewhere else
-/// take this lock for their whole duration.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Isolated environment harness: owns a temp dir and points the registry at it.
 struct Harness {
     root: TempDir,
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl Harness {
@@ -32,6 +30,7 @@ impl Harness {
             .tempdir()
             .unwrap();
         std::env::set_var("HERDR_TASK_ENV_ROOT", root.path().join("state"));
+        std::env::remove_var("HERDR_TASK_ENV_LIMIT");
         Self {
             root,
             _guard: guard,
@@ -42,15 +41,26 @@ impl Harness {
         self.root.path()
     }
 
-    fn workspace(&self, name: &str) -> PathBuf {
-        self.path().join(name).join("workspace")
+    fn workspace(&self, task_id: &str) -> PathBuf {
+        self.path().join(task_id).join("workspace")
     }
 
-    fn temp(&self, name: &str) -> PathBuf {
-        self.path().join(name).join("temp")
+    fn temp(&self, task_id: &str) -> PathBuf {
+        self.path().join(task_id).join("temp")
+    }
+
+    /// Create the parent directory the roots live in (the environment never
+    /// creates unowned ancestors).
+    fn prepare(&self, task_id: &str) {
+        let dir = self.path().join(task_id);
+        fs::create_dir_all(&dir).unwrap();
+        // Keep ancestors private regardless of the process umask; creation
+        // rejects group/world-writable ancestors by design.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     fn create(&self, task_id: &str) -> TaskEnvironment {
+        self.prepare(task_id);
         create_environment(
             task_id,
             &self.workspace(task_id),
@@ -65,6 +75,7 @@ impl Harness {
         task_id: &str,
         targets: Vec<DeliveryTarget>,
     ) -> herdr_flow::Result<TaskEnvironment> {
+        self.prepare(task_id);
         create_environment(
             task_id,
             &self.workspace(task_id),
@@ -76,6 +87,39 @@ impl Harness {
 
 fn delivery(path: PathBuf) -> DeliveryTarget {
     DeliveryTarget::new(path, "file".to_string())
+}
+
+/// Spawn a shell in its own session/process group.
+fn spawn_detached(script: &str, arg: &Path) -> std::process::Child {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script).arg("herdr-test").arg(arg);
+    // SAFETY: setsid has no memory arguments; called in the child before exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().unwrap()
+}
+
+fn wait_for_pid_file(path: &Path) -> i32 {
+    for _ in 0..1000 {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse() {
+                return pid;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("pid file {} was never written", path.display());
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: kill(pid, 0) only probes a positive pid.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[test]
@@ -95,19 +139,17 @@ fn create_and_destroy_round_trip() {
 }
 
 #[test]
-fn restore_returns_the_same_environment_and_never_duplicates_it() {
+fn restore_refuses_a_second_owner_and_reopens_after_release() {
     let harness = Harness::new();
-    let first = harness.create("restore");
-    let restored = restore_environment("restore").unwrap();
-    assert_eq!(first.task_id, restored.task_id);
-    assert_eq!(first.workspace_root, restored.workspace_root);
-    assert_eq!(first.created_at, restored.created_at);
+    let env = harness.create("restore");
+    // The live handle owns the environment.
+    assert!(restore_environment("restore").is_err());
 
-    // A second create must be rejected rather than allocating another root.
-    let duplicate = harness.create_with_targets("restore", vec![]);
-    assert!(duplicate.is_err());
-
-    destroy_environment(&restored).unwrap();
+    destroy_environment(&env).unwrap();
+    assert!(restore_environment("restore").is_err());
+    // A second create with the same id is allowed once the first is gone.
+    let second = harness.create("restore");
+    destroy_environment(&second).unwrap();
 }
 
 #[test]
@@ -120,12 +162,28 @@ fn delivery_targets_survive_destroy() {
         .create_with_targets("delivery", vec![delivery(delivered.clone())])
         .unwrap();
     destroy_environment(&env).unwrap();
-
     assert_eq!(fs::read_to_string(&delivered).unwrap(), "formal delivery");
 }
 
 #[test]
-fn symlink_alias_cannot_hide_a_delivery_target_inside_the_workspace() {
+fn delivery_containing_a_root_is_rejected() {
+    let harness = Harness::new();
+    let workspace = harness.workspace("nested");
+    fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+    // Delivery target is an ancestor of the workspace.
+    let err = create_environment(
+        "nested",
+        &workspace,
+        vec![delivery(workspace.parent().unwrap().to_path_buf())],
+        &harness.temp("nested"),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn symlink_alias_cannot_hide_a_delivery_target() {
     let harness = Harness::new();
     let workspace = harness.workspace("alias");
     fs::create_dir_all(&workspace).unwrap();
@@ -134,14 +192,13 @@ fn symlink_alias_cannot_hide_a_delivery_target_inside_the_workspace() {
     let smuggled = alias.join("delivered.txt");
     fs::write(&smuggled, "formal delivery").unwrap();
 
+    harness.prepare("alias");
     let result = create_environment(
         "alias",
         &workspace,
         vec![delivery(smuggled.clone())],
         &harness.temp("alias"),
     );
-    // Either the create is rejected, or the resolved target is recognised as
-    // being inside the workspace and rejected; it must never be accepted.
     assert!(
         result.is_err(),
         "symlink alias defeated boundary validation"
@@ -163,20 +220,27 @@ fn preexisting_user_assets_are_never_destroyed() {
 }
 
 #[test]
-fn delivery_inside_workspace_or_temp_is_rejected() {
+fn one_empty_workspace_cannot_be_claimed_twice() {
     let harness = Harness::new();
-    let workspace = harness.workspace("inside-workspace");
-    let err = harness
-        .create_with_targets("inside-workspace", vec![delivery(workspace.join("out"))])
-        .unwrap_err();
-    assert!(err.to_string().contains("inside disposable root"));
-    assert!(!workspace.exists());
+    harness.prepare("shared");
+    let shared = harness.workspace("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let temp = harness.temp("inside-temp");
-    let err = harness
-        .create_with_targets("inside-temp", vec![delivery(temp.join("out"))])
-        .unwrap_err();
-    assert!(err.to_string().contains("inside disposable root"));
+    let first = {
+        harness.prepare("first");
+        create_environment("first", &shared, vec![], &harness.temp("first")).unwrap()
+    };
+
+    harness.prepare("second");
+    let second = create_environment("second", &shared, vec![], &harness.temp("second"));
+    assert!(second.is_err(), "two environments claimed the same root");
+
+    fs::write(shared.join("second-data"), "belongs to first").unwrap();
+    destroy_environment(&first).unwrap();
+    // First owned the root, so its destroy removes it; the second environment
+    // never existed and left no trace.
+    assert!(!shared.exists());
 }
 
 #[test]
@@ -189,13 +253,58 @@ fn protected_file_permissions_are_not_changed_by_cleanup() {
     let env = harness
         .create_with_targets("chmod", vec![delivery(protected.clone())])
         .unwrap();
-    // A symlink inside the workspace pointing at the protected file must not
-    // let the writable walk escape.
+    // Symlink and hard link inside the workspace both point at the delivery.
     symlink(&protected, env.workspace_root.join("link")).unwrap();
+    fs::hard_link(&protected, env.workspace_root.join("hard")).unwrap();
     destroy_environment(&env).unwrap();
 
     let mode = fs::metadata(&protected).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o400);
+    assert_eq!(mode, 0o400, "cleanup changed the delivery file mode");
+    assert!(protected.exists());
+}
+
+#[test]
+fn swapped_root_symlink_cannot_delete_the_delivery_directory() {
+    let harness = Harness::new();
+    let delivered = harness.path().join("delivered-dir");
+    fs::create_dir(&delivered).unwrap();
+    fs::write(delivered.join("payload"), "formal delivery").unwrap();
+
+    let env = harness
+        .create_with_targets("swap-root", vec![delivery(delivered.clone())])
+        .unwrap();
+    let workspace = env.workspace_root.clone();
+    fs::remove_dir(&workspace).unwrap();
+    symlink(&delivered, &workspace).unwrap();
+
+    let result = destroy_environment(&env);
+    assert!(result.is_err(), "destroy followed a swapped root symlink");
+    assert_eq!(
+        fs::read_to_string(delivered.join("payload")).unwrap(),
+        "formal delivery"
+    );
+    // The slot stays occupied while the root is unsafe.
+    assert!(is_registered("swap-root").unwrap());
+}
+
+#[test]
+fn swapped_file_symlink_removes_only_the_link() {
+    let harness = Harness::new();
+    let delivered = harness.path().join("delivery-file");
+    fs::write(&delivered, "formal delivery").unwrap();
+
+    let mut env = harness
+        .create_with_targets("swap-file", vec![delivery(delivered.clone())])
+        .unwrap();
+    let registered = env.workspace_root.join("registered");
+    fs::write(&registered, "task data").unwrap();
+    env.register_file(&registered).unwrap();
+    fs::remove_file(&registered).unwrap();
+    symlink(&delivered, &registered).unwrap();
+
+    destroy_environment(&env).unwrap();
+    assert_eq!(fs::read_to_string(&delivered).unwrap(), "formal delivery");
+    assert!(!registered.exists(), "the link itself should be removed");
 }
 
 #[test]
@@ -222,32 +331,58 @@ fn forged_gitdir_cannot_delete_a_protected_directory() {
 }
 
 #[test]
-fn registered_open_file_is_released_on_destroy() {
+fn real_git_worktree_registration_is_removed() {
     let harness = Harness::new();
-    let mut env = harness.create("open-file");
-    let path = env.workspace_root.join("open.txt");
-    fs::write(&path, b"payload").unwrap();
-    env.register_file(&path).unwrap();
-    assert_eq!(env.open_handle_count(), 1);
+    let repo = harness.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    fs::write(repo.join("file"), "base").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+
+    let mut env = harness.create("worktree");
+    let worktree = env.workspace_root.join("linked");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "-q", "-b", "linked"])
+        .arg(&worktree)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    env.register_worktree(&worktree).unwrap();
 
     destroy_environment(&env).unwrap();
 
-    // The environment's own descriptor must be closed and the path removed.
-    // A descriptor opened independently by the caller cannot be revoked from
-    // another owner, so this asserts the environment's ownership only.
-    assert_eq!(
-        env.open_handle_count(),
-        0,
-        "environment leaked its descriptor"
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.contains(worktree.to_string_lossy().as_ref()),
+        "worktree registration survived destroy: {listing}"
     );
-    assert!(!path.exists(), "registered file survived destroy");
 }
 
 #[test]
-fn transferred_descriptor_is_closed_by_destroy() {
+fn registered_file_handle_is_closed_by_destroy() {
     let harness = Harness::new();
-    let mut env = harness.create("transferred");
-    let path = env.workspace_root.join("owned.txt");
+    let mut env = harness.create("open-file");
+    let path = env.workspace_root.join("open.txt");
     let handle = fs::File::create(&path).unwrap();
     env.register_handle(&path, handle).unwrap();
     assert_eq!(env.open_handle_count(), 1);
@@ -258,52 +393,83 @@ fn transferred_descriptor_is_closed_by_destroy() {
 }
 
 #[test]
-fn destroy_terminates_registered_process_and_its_descendants() {
+fn destroying_a_stale_handle_cannot_touch_a_new_instance() {
     let harness = Harness::new();
-    let mut env = harness.create("descendants");
-    let pidfile = harness.path().join("child.pid");
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 60 & echo $! > \"$1\"; wait")
-        .arg("herdr-test")
-        .arg(&pidfile)
-        .spawn()
-        .unwrap();
+    let stale = harness.create("reused");
+    destroy_environment(&stale).unwrap();
 
-    for _ in 0..500 {
-        if fs::read_to_string(&pidfile)
-            .map(|text| !text.trim().is_empty())
-            .unwrap_or(false)
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    let descendant: i32 = fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    env.register_process(child.id() as i32).unwrap();
+    let current = harness.create("reused");
+    let result = destroy_environment(&stale);
+    assert!(result.is_err(), "stale handle acted on the new environment");
+    assert!(current.workspace_root.exists());
+    assert!(current.state_file().exists());
+    assert!(is_registered("reused").unwrap());
 
-    destroy_environment(&env).unwrap();
-    let _ = child.wait();
-    // SAFETY: kill(pid, 0) only probes liveness for a positive pid we spawned.
-    let alive = unsafe { libc::kill(descendant, 0) == 0 };
-    if alive {
-        // SAFETY: best-effort cleanup of the isolated descendant we spawned.
-        unsafe { libc::kill(descendant, libc::SIGKILL) };
-    }
-    assert!(!alive, "background descendant survived destroy");
+    destroy_environment(&current).unwrap();
 }
 
 #[test]
-fn non_positive_pids_are_rejected() {
+fn destroy_terminates_the_whole_registered_process_group() {
+    let harness = Harness::new();
+    let mut env = harness.create("descendants");
+    let pidfile = harness.path().join("child.pid");
+
+    // The parent stays alive just long enough to be registered, then exits and
+    // leaves a background child behind in the same process group.
+    let mut parent = spawn_detached("sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0", &pidfile);
+    let descendant = wait_for_pid_file(&pidfile);
+    env.register_process(parent.id() as i32).unwrap();
+    let _ = parent.wait();
+
+    destroy_environment(&env).unwrap();
+    let _ = parent.wait();
+    let still_alive = alive(descendant);
+    if still_alive {
+        // SAFETY: best-effort cleanup of the isolated descendant we spawned.
+        unsafe { libc::kill(descendant, libc::SIGKILL) };
+    }
+    assert!(!still_alive, "background descendant survived destroy");
+}
+
+#[test]
+fn child_spawned_in_sigterm_handler_is_also_killed() {
+    let harness = Harness::new();
+    let mut env = harness.create("sigterm-child");
+    let pidfile = harness.path().join("trap-child.pid");
+
+    let mut parent = spawn_detached(
+        "trap 'sleep 60 & echo $! > \"$1\"' TERM; while :; do sleep 0.05; done",
+        &pidfile,
+    );
+    let parent_pid = parent.id() as i32;
+    env.register_process(parent_pid).unwrap();
+
+    destroy_environment(&env).unwrap();
+    let _ = parent.wait();
+    let child = wait_for_pid_file(&pidfile);
+    let still_alive = alive(child);
+    if still_alive {
+        // SAFETY: best-effort cleanup of the isolated child we spawned.
+        unsafe { libc::kill(child, libc::SIGKILL) };
+    }
+    assert!(
+        !still_alive,
+        "child spawned during SIGTERM survived destroy"
+    );
+}
+
+#[test]
+fn processes_outside_their_own_group_are_rejected() {
     let harness = Harness::new();
     let mut env = harness.create("pid-guard");
     assert!(env.register_process(-1).is_err());
     assert!(env.register_process(0).is_err());
     assert!(env.register_process(1).is_err());
+    // A plain child shares the test process group and must be refused.
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    assert!(env.register_process(child.id() as i32).is_err());
+    let _ = child.kill();
+    let _ = child.wait();
     destroy_environment(&env).unwrap();
 }
 
@@ -311,45 +477,37 @@ fn non_positive_pids_are_rejected() {
 fn failed_destroy_keeps_the_slot_and_retry_completes_it() {
     let harness = Harness::new();
     let env = harness.create("retry");
-    // Replace the workspace with a regular file so removal fails.
     fs::remove_dir_all(&env.workspace_root).unwrap();
     fs::write(&env.workspace_root, "force ENOTDIR").unwrap();
 
     assert!(destroy_environment(&env).is_err());
-    assert!(
-        is_registered("retry").unwrap(),
-        "slot was released on failure"
-    );
+    assert!(is_registered("retry").unwrap());
     assert!(occupied_slots().unwrap() >= 1);
-    let restored = restore_environment("retry").unwrap();
-    assert_eq!(restored.state, EnvironmentState::DestroyFailed);
     fs::remove_file(&env.workspace_root).unwrap();
 
     cleanup_failed_environment("retry").unwrap();
-    assert!(!env.state_file().exists(), "retry left the state document");
+    assert!(!env.state_file().exists());
     assert!(!is_registered("retry").unwrap());
-    assert!(cleanup_state_path("retry")
-        .map(|p| !p.exists())
-        .unwrap_or(false));
+    assert!(!cleanup_state_path("retry").unwrap().exists());
 }
 
 #[test]
-fn repeatedly_failing_cleanup_exhausts_its_retries_instead_of_allocating_again() {
+fn failed_cleanup_exhausts_retries_and_keeps_the_slot() {
     let harness = Harness::new();
     std::env::set_var("HERDR_TASK_ENV_LIMIT", "1");
     let env = harness.create("stuck");
     fs::remove_dir_all(&env.workspace_root).unwrap();
     fs::write(&env.workspace_root, "force ENOTDIR").unwrap();
-    // Make the directory unremovable for the duration: a non-empty file tree
-    // is enough because remove_dir_all on a file fails.
     assert!(destroy_environment(&env).is_err());
 
-    // Slot is still occupied, so the limit blocks another environment.
-    let blocked = harness.create_with_targets("other", vec![]);
-    assert!(
-        blocked.is_err(),
-        "limit did not account for the failed cleanup"
+    harness.prepare("other");
+    let blocked = create_environment(
+        "other",
+        &harness.workspace("other"),
+        vec![],
+        &harness.temp("other"),
     );
+    assert!(blocked.is_err(), "limit ignored the pending cleanup");
 
     for _ in 0..MAX_ATTEMPTS {
         let _ = cleanup_failed_environment("stuck");
@@ -367,6 +525,7 @@ fn interrupted_create_leaves_no_untracked_workspace() {
     let blocked = harness.path().join("blocked");
     fs::write(&blocked, "not a directory").unwrap();
 
+    harness.prepare("interrupted");
     let result = create_environment(
         "interrupted",
         &harness.workspace("interrupted"),
@@ -376,9 +535,29 @@ fn interrupted_create_leaves_no_untracked_workspace() {
     assert!(result.is_err());
     assert!(!harness.workspace("interrupted").exists());
     assert!(!is_registered("interrupted").unwrap());
-    assert!(!environment_state_path("interrupted")
-        .map(|p| p.exists())
-        .unwrap_or(false));
+    assert!(!environment_state_path("interrupted").unwrap().exists());
+}
+
+#[test]
+fn interrupted_state_is_detected_and_recovered() {
+    let harness = Harness::new();
+    let env = harness.create("recover");
+    // Simulate a crash after the document was written but before the
+    // environment became usable.
+    let text = fs::read_to_string(env.state_file()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["state"] = serde_json::json!("creating");
+    fs::write(
+        env.state_file(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    drop(env);
+
+    assert_eq!(interrupted_tasks().unwrap(), vec!["recover".to_string()]);
+    assert!(recover_interrupted("recover").unwrap());
+    assert!(!environment_state_path("recover").unwrap().exists());
+    assert!(!is_registered("recover").unwrap());
 }
 
 #[test]
@@ -390,9 +569,18 @@ fn concurrent_registrations_do_not_lose_updates() {
     for index in 0..16 {
         let barrier = Arc::clone(&barrier);
         let state = harness.path().join(format!("registered-{index}.json"));
+        let root = harness.path().join(format!("concurrent-{index}"));
+        fs::create_dir(&root).unwrap();
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            register_environment(&format!("concurrent-{index}"), &state)
+            register_environment(RegistryEntry {
+                task_id: format!("concurrent-{index}"),
+                instance_id: format!("instance-{index}"),
+                workspace_root: root.join("workspace"),
+                temp_root: root.join("temp"),
+                state_file: state,
+                registered_at: 0.0,
+            })
         }));
     }
     for handle in handles {
@@ -400,18 +588,16 @@ fn concurrent_registrations_do_not_lose_updates() {
     }
     let registry = EnvironmentRegistry::load().unwrap();
     for index in 0..16 {
-        assert!(
-            registry.contains(&format!("concurrent-{index}")),
-            "concurrent registration {index} was overwritten"
-        );
+        assert!(registry.contains(&format!("concurrent-{index}")));
     }
     destroy_environment(&seed).unwrap();
 }
 
 #[test]
-fn task_id_cannot_escape_the_state_directory() {
+fn task_id_cannot_escape_or_shadow_internal_files() {
     let harness = Harness::new();
     for bad in ["../escape", "a/b", ".", "..", ""] {
+        harness.prepare("escape");
         let result = create_environment(
             bad,
             &harness.path().join("ws-escape"),
@@ -421,6 +607,11 @@ fn task_id_cannot_escape_the_state_directory() {
         assert!(result.is_err(), "accepted traversal task id {bad:?}");
     }
     assert!(!harness.path().join("escape.json").exists());
+
+    // A task called "registry" must not collide with internal files.
+    let env = harness.create("registry");
+    assert!(EnvironmentRegistry::load().is_ok());
+    destroy_environment(&env).unwrap();
 }
 
 #[test]
@@ -447,6 +638,5 @@ fn destroy_is_idempotent() {
     let harness = Harness::new();
     let env = harness.create("idempotent");
     destroy_environment(&env).unwrap();
-    // A second destroy finds no plan and no directory: it must succeed.
     destroy_environment(&env).unwrap();
 }

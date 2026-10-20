@@ -16,16 +16,18 @@ pub use boundary::{
     is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets,
     validate_no_overlap, validate_path, DeliveryTarget, ResourceBoundary,
 };
+pub use cleanup::PendingDirectory;
 pub use cleanup::{cleanup_failed_environment, CleanupState, MAX_ATTEMPTS};
 pub use env::{
-    process_is_alive, process_start_time, restore, validate_ancestors, EnvironmentState,
-    RegisteredProcess, TaskEnvironment,
+    discover_repository, process_is_alive, process_start_time, recover_interrupted, restore,
+    validate_ancestors, EnvironmentState, RegisteredProcess, RootIdentity, TaskEnvironment,
+    WorktreeRegistration,
 };
-pub use registry::register_environment;
 pub use registry::{
-    cleanup_state_path, environment_state_path, is_registered, limit, list_registered,
-    load_registry, occupied_slots, registry_path, state_root, unregister_environment,
-    validate_task_id, EnvironmentRegistry, Registry, RegistryEntry, DEFAULT_LIMIT,
+    cleanup_state_path, environment_state_path, interrupted_tasks, is_registered, limit,
+    list_registered, load_registry, occupied_slots, register_environment, registry_path,
+    state_root, unregister_environment, validate_task_id, EnvironmentRegistry, Registry,
+    RegistryEntry, DEFAULT_LIMIT,
 };
 
 use crate::error::Result;
