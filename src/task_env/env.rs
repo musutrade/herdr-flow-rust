@@ -197,15 +197,16 @@ impl TaskEnvironment {
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
         command.env(MARKER_ENV, &self.instance_id);
-        // SAFETY: setsid has no memory arguments and is called in the child
-        // between fork and exec.
+        let roots = vec![self.workspace_root.clone(), self.temp_root.clone()];
+        // SAFETY: pre_exec runs in the child after fork and before exec; it
+        // only performs syscalls and owns no Rust allocations that outlive it.
         unsafe {
             use std::os::unix::process::CommandExt as _;
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(())
+                confine_renames_to(&roots)
             });
         }
         command
@@ -484,6 +485,110 @@ pub fn direct_children_of(pid: i32) -> Vec<ProcessRecord> {
     }
     children.sort_by_key(|record| record.pid);
     children
+}
+
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+}
+
+#[repr(C, packed)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+/// Kernel-enforced protection of the environment's directory entries.
+///
+/// The child may create, rename and remove files *inside* its disposable roots,
+/// but it cannot remove or rename the roots themselves (that would require
+/// `REMOVE_DIR`/`REFER` on the parent, which is not granted). This makes the
+/// parent directory entry something the task cannot rewrite, so the final
+/// cleanup unlink operates on an entry the task cannot substitute.
+fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
+    // SAFETY: prctl takes scalar arguments only.
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    // SAFETY: a null ruleset with VERSION returns the supported ABI.
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<LandlockRulesetAttr>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if abi < 1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut handled = LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
+    if abi >= 2 {
+        handled |= LANDLOCK_ACCESS_FS_REFER;
+    }
+
+    let attr = LandlockRulesetAttr {
+        handled_access_fs: handled,
+    };
+    // SAFETY: attr is a plain C struct; the syscall only reads it.
+    let ruleset = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const LandlockRulesetAttr,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0u32,
+        )
+    };
+    if ruleset < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ruleset = ruleset as i32;
+
+    for root in roots {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(root)?;
+        let rule = LandlockPathBeneathAttr {
+            allowed_access: handled,
+            parent_fd: directory.as_raw_fd(),
+        };
+        // SAFETY: ruleset and rule are valid for the duration of the call.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset,
+                LANDLOCK_RULE_PATH_BENEATH,
+                &rule as *const LandlockPathBeneathAttr,
+                0u32,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: ruleset is a descriptor owned by this function.
+            unsafe { libc::close(ruleset) };
+            return Err(error);
+        }
+    }
+
+    // SAFETY: ruleset is live; restrict_self consumes no ownership.
+    let result = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: ruleset is still owned here and is not used afterwards.
+    unsafe { libc::close(ruleset) };
+    if result != 0 {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Whether a process carries the marker for `instance_id`.

@@ -51,6 +51,18 @@ pub struct PendingDirectory {
     pub identity: Option<RootIdentity>,
 }
 
+/// A root moved aside under an unpredictable name while it is being removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Quarantine {
+    pub root: PathBuf,
+    pub name: String,
+    /// Set immediately before the unlink. A crash after the unlink is
+    /// completed on retry; a missing quarantine without this flag is external
+    /// interference and keeps the slot.
+    #[serde(default)]
+    pub unlink_committed: bool,
+}
+
 /// Durable cleanup plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupState {
@@ -63,11 +75,11 @@ pub struct CleanupState {
     pub pending_files: Vec<PathBuf>,
     /// Roots still to release; a subset of `roots`.
     pub pending_root_removals: Vec<PathBuf>,
-    /// Root whose removal was committed to disk before unlinking. A crash
-    /// between unlink and the next save is completed on retry; a missing root
-    /// without this marker was renamed externally and keeps the slot.
+    /// Recorded quarantine of the root currently being removed. Persisted
+    /// before the rename and again before the unlink, so every crash point is
+    /// distinguishable from external interference.
     #[serde(default)]
-    pub removal_in_progress: Option<PathBuf>,
+    pub quarantine: Option<Quarantine>,
     pub started_at: f64,
     pub updated_at: f64,
     pub attempts: u32,
@@ -136,7 +148,7 @@ impl CleanupState {
             pending_worktrees: env.worktree_registrations.clone(),
             pending_files: env.open_files.clone(),
             pending_root_removals,
-            removal_in_progress: None,
+            quarantine: None,
             started_at: now,
             updated_at: now,
             attempts: 0,
@@ -149,6 +161,7 @@ impl CleanupState {
             && self.pending_worktrees.is_empty()
             && self.pending_files.is_empty()
             && self.pending_root_removals.is_empty()
+            && self.quarantine.is_none()
     }
 
     fn record(&mut self, error: Option<String>) {
@@ -323,11 +336,7 @@ fn run_cleanup(state: &mut CleanupState) -> Result<()> {
 
     // Positive attribution: every process started by this environment carries
     // its marker, including descendants that detached or were orphaned.
-    let mut targets = super::env::marked_processes(&state.instance_id);
-    for record in targets.clone() {
-        targets.extend(descendants_snapshot(record.pid));
-    }
-    if let Err(error) = terminate_records(&mut targets) {
+    if let Err(error) = terminate_marked(&state.instance_id) {
         errors.push(format!("processes: {error}"));
     }
     // A registered process that is still alive but unmarked cannot be proven
@@ -364,39 +373,28 @@ fn run_cleanup(state: &mut CleanupState) -> Result<()> {
             }
         });
 
-    let pending = std::mem::take(&mut state.pending_root_removals);
-    let mut remaining = Vec::new();
-    for path in pending {
-        let Some(root) = state.roots.iter().find(|root| root.path == path) else {
+    // Release one root at a time. The full pending set is persisted before
+    // every destructive step, so a crash never loses a root from the plan.
+    while let Some(path) = state.pending_root_removals.first().cloned() {
+        let Some(root) = state.roots.iter().find(|root| root.path == path).cloned() else {
             errors.push(format!("root {} is not owned by this plan", path.display()));
-            remaining.push(path);
-            continue;
+            break;
         };
-        let committed = state.removal_in_progress.as_deref() == Some(path.as_path());
-        if committed && !path.exists() {
-            // We committed to removing this root before the crash; the name is
-            // gone, so the removal completed.
-            state.removal_in_progress = None;
-            continue;
-        }
-        // Persist the commitment before deleting so a crash here is provable.
-        state.removal_in_progress = Some(path.clone());
-        if let Err(error) = save_plan(state) {
-            errors.push(format!("root {}: {error}", path.display()));
-            remaining.push(path);
-            continue;
-        }
-        match remove_root(root) {
+        match cleanup_one_root(state, &root) {
             Ok(()) => {
-                state.removal_in_progress = None;
+                state.pending_root_removals.retain(|item| item != &path);
+                state.quarantine = None;
+                if let Err(error) = save_plan(state) {
+                    errors.push(format!("root {}: {error}", path.display()));
+                    break;
+                }
             }
             Err(error) => {
                 errors.push(format!("root {}: {error}", path.display()));
-                remaining.push(path);
+                break;
             }
         }
     }
-    state.pending_root_removals = remaining;
 
     if errors.is_empty() {
         state.record(None);
@@ -407,6 +405,38 @@ fn run_cleanup(state: &mut CleanupState) -> Result<()> {
         Err(FlowError::progress(format!(
             "cleanup of task {} incomplete: {message}",
             state.task_id
+        )))
+    }
+}
+
+/// Repeatedly freeze and kill marked processes until a scan finds none.
+///
+/// A child forked between the scan and the freeze is missed by that pass; it
+/// still carries the marker, so the next scan finds it. Each pass freezes the
+/// whole set first, so the loop converges instead of racing.
+fn terminate_marked(instance_id: &str) -> Result<()> {
+    for _ in 0..8 {
+        let mut targets = super::env::marked_processes(instance_id);
+        for record in targets.clone() {
+            targets.extend(descendants_snapshot(record.pid));
+        }
+        targets.retain(process_record_is_alive);
+        if targets.is_empty() {
+            return Ok(());
+        }
+        terminate_records(&mut targets)?;
+    }
+    let mut remaining = super::env::marked_processes(instance_id);
+    remaining.retain(process_record_is_alive);
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(FlowError::progress(format!(
+            "marked processes keep reappearing: {:?}",
+            remaining
+                .iter()
+                .map(|record| record.pid)
+                .collect::<Vec<_>>()
         )))
     }
 }
@@ -523,13 +553,15 @@ fn owner_of<'a>(path: &Path, roots: &'a [PendingDirectory]) -> Option<&'a Pendin
         .find(|root| util::is_relative_to(path, &root.path))
 }
 
-/// Remove a root through a pinned descriptor and a quarantine name.
+/// Advance one root through the phased removal protocol.
 ///
-/// The final directory entry is never unlinked by its original name. It is
-/// renamed to an unpredictable name and its identity is verified there before
-/// unlinking, so a path swapped at the last moment is moved aside and left
-/// alone instead of being deleted. Any uncertainty keeps the slot.
-fn remove_root(root: &PendingDirectory) -> Result<()> {
+/// Invariants:
+/// * the plan always lists every pending root;
+/// * the quarantine name and unlink commit are durable before the operation
+///   they describe, so a crash is recoverable;
+/// * nothing is deleted unless its recorded `(device, inode)` was verified;
+/// * a replaced entry is never moved or deleted.
+fn cleanup_one_root(state: &mut CleanupState, root: &PendingDirectory) -> Result<()> {
     let Some(expected) = root.identity else {
         return Err(FlowError::progress(format!(
             "root {} has no recorded identity; refusing to remove",
@@ -542,49 +574,109 @@ fn remove_root(root: &PendingDirectory) -> Result<()> {
             root.path.display()
         )));
     };
-    let Some(name) = root.path.file_name() else {
+    let Some(root_name) = root.path.file_name() else {
         return Err(FlowError::progress(format!(
             "{} has no file name",
             root.path.display()
         )));
     };
-
     let parent = open_dir_nofollow(parent_path)?;
-    match kind_at(&parent, name)? {
-        None => {
-            return Err(FlowError::progress(format!(
-                "{} is missing; ownership cannot be confirmed",
-                root.path.display()
-            )))
+
+    // Resume a quarantine recorded by an earlier attempt.
+    if let Some(quarantine) = state
+        .quarantine
+        .clone()
+        .filter(|entry| entry.root == root.path)
+    {
+        let name = OsStr::new(&quarantine.name);
+        match kind_at(&parent, name)? {
+            Some(EntryKind::Directory) => {
+                let Some(check) = open_child_dir(&parent, name)? else {
+                    return Err(FlowError::progress("quarantined entry vanished"));
+                };
+                if RootIdentity::of(&check.metadata()?) != expected {
+                    return Err(FlowError::progress(format!(
+                        "quarantine {} was replaced; replacement preserved and slot retained",
+                        quarantine.name
+                    )));
+                }
+                if !quarantine.unlink_committed {
+                    state.quarantine.as_mut().expect("checked").unlink_committed = true;
+                    save_plan(state)?;
+                }
+                unlink_at_dir(&parent, name)?;
+                if check.metadata()?.nlink() != 0 {
+                    return Err(FlowError::progress(format!(
+                        "{} is still linked elsewhere; slot retained",
+                        root.path.display()
+                    )));
+                }
+                return Ok(());
+            }
+            None if quarantine.unlink_committed => {
+                // A crash after the unlink: the committed root is gone.
+                if kind_at(&parent, root_name)?.is_some() {
+                    return Err(FlowError::progress(format!(
+                        "{} reappeared after its committed removal; slot retained",
+                        root.path.display()
+                    )));
+                }
+                return Ok(());
+            }
+            None => {
+                // Not committed: either the crash happened before the rename
+                // (root still present) or the quarantine was renamed away.
+                if kind_at(&parent, root_name)?.is_some() {
+                    state.quarantine = None;
+                    save_plan(state)?;
+                } else {
+                    return Err(FlowError::progress(format!(
+                        "quarantine for {} vanished; slot retained",
+                        root.path.display()
+                    )));
+                }
+            }
+            Some(_) => {
+                return Err(FlowError::progress(format!(
+                    "quarantine for {} was replaced by a non-directory; slot retained",
+                    root.path.display()
+                )))
+            }
         }
+    }
+
+    // Fresh attempt: the root must be our directory.
+    match kind_at(&parent, root_name)? {
+        Some(EntryKind::Directory) => {}
         Some(EntryKind::Symlink) => {
             return Err(FlowError::progress(format!(
                 "{} was replaced by a symlink; refusing to follow it",
                 root.path.display()
             )))
         }
-        Some(EntryKind::Directory) => {}
         Some(_) => {
             return Err(FlowError::progress(format!(
                 "{} was replaced by a non-directory; refusing to remove",
                 root.path.display()
             )))
         }
+        None => {
+            return Err(FlowError::progress(format!(
+                "{} is missing without a completion record; slot retained",
+                root.path.display()
+            )))
+        }
     }
-
-    let Some(dir) = open_child_dir(&parent, name)? else {
+    let Some(dir) = open_child_dir(&parent, root_name)? else {
         return Err(FlowError::progress(format!(
             "{} changed while being opened",
             root.path.display()
         )));
     };
-    let actual = RootIdentity::of(&dir.metadata()?);
-    if actual != expected {
+    if RootIdentity::of(&dir.metadata()?) != expected {
         return Err(FlowError::progress(format!(
-            "{} was replaced by a different directory (inode {} -> {}); refusing to remove",
-            root.path.display(),
-            expected.ino,
-            actual.ino
+            "{} was replaced by a different directory; refusing to remove",
+            root.path.display()
         )));
     }
 
@@ -594,63 +686,59 @@ fn remove_root(root: &PendingDirectory) -> Result<()> {
         return Ok(());
     }
 
-    let quarantine = format!(".herdr-rm-{}", util::uuid_hex());
-    let quarantine_os = OsStr::new(&quarantine);
-    match rename_noreplace(&parent, name, quarantine_os) {
+    // Persist the quarantine name before renaming.
+    let quarantine = Quarantine {
+        root: root.path.clone(),
+        name: format!(".herdr-rm-{}", util::uuid_hex()),
+        unlink_committed: false,
+    };
+    state.quarantine = Some(quarantine.clone());
+    save_plan(state)?;
+
+    match rename_noreplace(&parent, root_name, OsStr::new(&quarantine.name)) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return if dir.metadata()?.nlink() == 0 {
-                Ok(())
+        Err(error) => {
+            state.quarantine = None;
+            save_plan(state)?;
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Err(FlowError::progress(format!(
+                    "{} vanished during quarantine; slot retained",
+                    root.path.display()
+                )))
             } else {
                 Err(FlowError::progress(format!(
-                    "{} was renamed during cleanup; slot retained",
+                    "cannot quarantine {}: {error}",
                     root.path.display()
                 )))
             };
         }
-        Err(error) => {
-            return Err(FlowError::progress(format!(
-                "cannot quarantine {}: {error}",
-                root.path.display()
-            )))
-        }
     }
 
-    // Whatever landed under the quarantine name must be our inode before it
-    // may be unlinked. A replacement is moved back untouched.
-    match kind_at(&parent, quarantine_os)? {
-        Some(EntryKind::Directory) => {
-            let Some(check) = open_child_dir(&parent, quarantine_os)? else {
-                return Err(FlowError::progress("quarantined entry vanished"));
-            };
-            if RootIdentity::of(&check.metadata()?) != expected {
-                let _ = rename_noreplace(&parent, quarantine_os, name);
-                return Err(FlowError::progress(format!(
-                    "{} was replaced during cleanup; replacement preserved and slot retained",
-                    root.path.display()
-                )));
-            }
-            unlink_at_dir(&parent, quarantine_os)?;
-            if dir.metadata()?.nlink() != 0 {
-                return Err(FlowError::progress(format!(
-                    "{} is still linked elsewhere; slot retained",
-                    root.path.display()
-                )));
-            }
-            Ok(())
-        }
-        Some(_) => {
-            let _ = rename_noreplace(&parent, quarantine_os, name);
-            Err(FlowError::progress(format!(
-                "{} was replaced by a non-directory during cleanup; slot retained",
-                root.path.display()
-            )))
-        }
-        None => Err(FlowError::progress(format!(
-            "quarantined copy of {} vanished; slot retained",
-            root.path.display()
-        ))),
+    let name = OsStr::new(&quarantine.name);
+    let Some(check) = open_child_dir(&parent, name)? else {
+        return Err(FlowError::progress("quarantined entry vanished"));
+    };
+    if RootIdentity::of(&check.metadata()?) != expected {
+        return Err(FlowError::progress(format!(
+            "quarantine {} was replaced; replacement preserved and slot retained",
+            quarantine.name
+        )));
     }
+
+    state
+        .quarantine
+        .as_mut()
+        .expect("set above")
+        .unlink_committed = true;
+    save_plan(state)?;
+    unlink_at_dir(&parent, name)?;
+    if check.metadata()?.nlink() != 0 {
+        return Err(FlowError::progress(format!(
+            "{} is still linked elsewhere; slot retained",
+            root.path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Atomically rename `from` to `to` in the same directory, never replacing `to`.

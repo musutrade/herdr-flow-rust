@@ -17,7 +17,7 @@ pub use boundary::{
     validate_no_overlap, validate_path, DeliveryTarget, ResourceBoundary,
 };
 pub use cleanup::PendingDirectory;
-pub use cleanup::{cleanup_failed_environment, CleanupState, MAX_ATTEMPTS};
+pub use cleanup::{cleanup_failed_environment, CleanupState, Quarantine, MAX_ATTEMPTS};
 pub use env::{
     discover_repository, marked_processes, process_has_marker, process_is_alive,
     process_record_is_alive, process_start_time, recover_interrupted, restore, validate_ancestors,

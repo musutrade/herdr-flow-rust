@@ -627,7 +627,11 @@ fn mismatched_process_identity_is_never_signalled() {
         "pgid": pid,
         "start_time": 1,
     }]);
-    plan["removal_in_progress"] = serde_json::json!(env.workspace_root);
+    plan["quarantine"] = serde_json::json!({
+        "root": env.workspace_root,
+        "name": ".herdr-rm-test",
+        "unlink_committed": true,
+    });
     fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
     fs::remove_file(&env.workspace_root).unwrap();
     drop(env);
@@ -847,12 +851,16 @@ fn retry_after_a_committed_root_removal_completes() {
     assert!(destroy_environment(&env).is_err());
     assert!(cleanup_state_path("gone-root").unwrap().exists());
 
-    // Simulate a crash after the commit was persisted and the root unlinked.
+    // Simulate a crash after the quarantine unlink was committed and executed.
     fs::remove_file(&workspace).unwrap();
     let plan_path = cleanup_state_path("gone-root").unwrap();
     let mut plan: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
-    plan["removal_in_progress"] = serde_json::json!(workspace);
+    plan["quarantine"] = serde_json::json!({
+        "root": workspace,
+        "name": ".herdr-rm-gone",
+        "unlink_committed": true,
+    });
     fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
     drop(env);
 
@@ -874,6 +882,149 @@ fn renamed_root_without_replacement_retains_the_slot() {
     assert!(env.state_file().exists());
     assert!(cleanup_state_path("renamed-root").unwrap().exists());
     assert!(moved.exists(), "the renamed root must not be deleted");
+}
+
+fn write_root_plan(env: &TaskEnvironment, quarantine: Option<Quarantine>, roots: Vec<PathBuf>) {
+    let plan = CleanupState {
+        task_id: env.task_id.clone(),
+        instance_id: env.instance_id.clone(),
+        roots: vec![
+            PendingDirectory {
+                path: env.workspace_root.clone(),
+                identity: env.workspace_identity,
+            },
+            PendingDirectory {
+                path: env.temp_root.clone(),
+                identity: env.temp_identity,
+            },
+        ],
+        pending_processes: Vec::new(),
+        pending_worktrees: Vec::new(),
+        pending_files: Vec::new(),
+        pending_root_removals: roots,
+        quarantine,
+        started_at: 0.0,
+        updated_at: 0.0,
+        attempts: 0,
+        last_error: None,
+    };
+    fs::write(
+        cleanup_state_path(&env.task_id).unwrap(),
+        serde_json::to_string_pretty(&plan).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn crash_before_quarantine_rename_is_retried_from_the_root() {
+    let harness = Harness::new();
+    let env = harness.create("pre-rename");
+    let roots = vec![env.workspace_root.clone()];
+    write_root_plan(
+        &env,
+        Some(Quarantine {
+            root: env.workspace_root.clone(),
+            name: ".herdr-rm-never-ran".to_string(),
+            unlink_committed: false,
+        }),
+        roots,
+    );
+    drop(env);
+
+    cleanup_failed_environment("pre-rename").unwrap();
+    assert!(!harness.workspace("pre-rename").exists());
+    assert!(!is_registered("pre-rename").unwrap());
+}
+
+#[test]
+fn crash_after_quarantine_rename_completes_on_retry() {
+    let harness = Harness::new();
+    let env = harness.create("post-rename");
+    let quarantine = format!(".herdr-rm-{}", "renamed");
+    fs::rename(
+        &env.workspace_root,
+        harness.path().join("post-rename").join(&quarantine),
+    )
+    .unwrap();
+    write_root_plan(
+        &env,
+        Some(Quarantine {
+            root: env.workspace_root.clone(),
+            name: quarantine.clone(),
+            unlink_committed: false,
+        }),
+        vec![env.workspace_root.clone()],
+    );
+    drop(env);
+
+    cleanup_failed_environment("post-rename").unwrap();
+    assert!(!harness
+        .path()
+        .join("post-rename")
+        .join(&quarantine)
+        .exists());
+    assert!(!is_registered("post-rename").unwrap());
+}
+
+#[test]
+fn replacement_at_quarantine_is_preserved_and_keeps_the_slot() {
+    let harness = Harness::new();
+    let env = harness.create("quarantine-swap");
+    let parent = harness.path().join("quarantine-swap");
+    let quarantine = ".herdr-rm-swapped".to_string();
+    fs::rename(&env.workspace_root, parent.join(&quarantine)).unwrap();
+    fs::rename(parent.join(&quarantine), parent.join("original")).unwrap();
+    fs::create_dir(parent.join(&quarantine)).unwrap();
+    write_root_plan(
+        &env,
+        Some(Quarantine {
+            root: env.workspace_root.clone(),
+            name: quarantine.clone(),
+            unlink_committed: false,
+        }),
+        vec![env.workspace_root.clone()],
+    );
+    drop(env);
+
+    assert!(cleanup_failed_environment("quarantine-swap").is_err());
+    assert!(parent.join(&quarantine).exists(), "replacement was deleted");
+    assert!(parent.join("original").exists());
+    assert!(is_registered("quarantine-swap").unwrap());
+    assert!(cleanup_state_path("quarantine-swap").unwrap().exists());
+}
+
+#[test]
+fn task_process_cannot_rewrite_entries_outside_its_roots() {
+    let harness = Harness::new();
+    let env = harness.create("landlock");
+    let outside = harness.path().join("outside.txt");
+    fs::write(&outside, "user asset").unwrap();
+
+    let remove = env
+        .command("sh")
+        .arg("-c")
+        .arg("rm -f \"$1\"")
+        .arg("herdr-test")
+        .arg(&outside)
+        .status()
+        .unwrap();
+    assert!(!remove.success(), "task removed a file outside its roots");
+
+    let moved = harness.path().join("moved-root");
+    let rename = env
+        .command("sh")
+        .arg("-c")
+        .arg("mv \"$1\" \"$2\"")
+        .arg("herdr-test")
+        .arg(&env.workspace_root)
+        .arg(&moved)
+        .status()
+        .unwrap();
+    assert!(!rename.success(), "task renamed its own root");
+    assert!(outside.exists());
+    assert!(!moved.exists());
+
+    destroy_environment(&env).unwrap();
 }
 
 #[test]

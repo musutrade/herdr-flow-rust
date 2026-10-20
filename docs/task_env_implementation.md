@@ -25,7 +25,13 @@ Three facts make deletion safe:
 2. **Root identity.** `(device, inode)` is recorded at creation. Cleanup
    re-checks it with `fstatat(AT_SYMLINK_NOFOLLOW)`; a root swapped for a
    symlink or a different directory is refused, and the slot stays occupied.
-3. **Process marker.** Every process the environment starts carries
+3. **Kernel-enforced task boundary.** `TaskEnvironment::command` applies a
+   Landlock ruleset in the child: the task may remove, rename and link files
+   *inside* its disposable roots, but `REMOVE_DIR`, `REMOVE_FILE` and `REFER`
+   on the roots' parent are denied. The task therefore cannot rewrite the
+   directory entries that cleanup operates on. If Landlock is unavailable the
+   spawn fails closed.
+4. **Process marker.** Every process the environment starts carries
    `HERDR_TASK_ENV_INSTANCE=<instance_id>` in its environment. The marker is
    inherited across `fork`/`exec`, survives `setsid()`, and stays readable at
    `/proc/<pid>/environ` after the process is orphaned. Cleanup kills exactly
@@ -33,7 +39,7 @@ Three facts make deletion safe:
    cannot hit an unrelated child or another environment's orphan, and another
    environment's bookkeeping cannot hide one of ours. Processes not started
    through `TaskEnvironment::command` are refused at registration.
-4. **Per-task lock.** The live handle holds an exclusive `flock` on
+5. **Per-task lock.** The live handle holds an exclusive `flock` on
    `locks/<task>.lock`. `restore_environment` and `cleanup_failed_environment`
    refuse to run while another handle owns the task, so descriptors and slots
    are only ever released by their owner. The handle is deliberately not
@@ -97,12 +103,13 @@ recovery). It fails while a live handle owns the task.
 6. unlink registered files relative to an `O_NOFOLLOW` walk (a leaf swapped for
    a symlink loses only the link), then remove roots through a pinned
    `O_NOFOLLOW` directory descriptor whose `(dev, ino)` still matches. The tree
-   is emptied with `unlinkat` relative to that descriptor. The final entry is
-   renamed to an unpredictable quarantine name, its identity is verified there,
-   and only then unlinked. A path swapped at the last moment is moved aside
-   untouched, and any rename or replacement keeps the plan (and slot) alive
-   instead of reporting a false success; directory modes are widened with
-   `fchmod` only;
+   is emptied with `unlinkat` relative to that descriptor. The final entry
+   follows a durable, phased protocol: the quarantine name is persisted, the
+   root is renamed to it, its identity is verified there, the unlink is
+   committed to the plan, and only then is it unlinked. A rename, replacement or
+   a missing quarantine at any phase keeps the plan and slot instead of
+   deleting unknown data or reporting a false success; directory modes are
+   widened with `fchmod` only;
 7. only when everything is gone: remove the plan, the document (if it is still
    this instance) and the index entry.
 
@@ -147,7 +154,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (37 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (41 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -159,7 +166,18 @@ validation, intent recovery that must not touch another task's root, recovery
 from a `destroying` state, retry after the root is already gone, and idempotent
 destroy, descendants spawned after registration, unrelated supervisor children,
 cross-environment orphan isolation, mismatched process identity, multi-root
-claim merging, renamed-root slot retention, and plan-only recovery.
+claim merging, renamed-root slot retention, plan-only recovery, every
+quarantine crash phase, quarantine replacement preservation, and a task
+process being denied rename/remove access outside its roots.
+
+## Boundaries
+
+The process marker is an ownership record, not kernel isolation from a process
+that deliberately clears its environment and detaches; the documented contract
+is that task processes inherit it. Cleanup rescans until no marked process
+remains, so children forked between a scan and the freeze are caught in the
+next pass. Landlock provides the kernel-enforced guarantee for the filesystem
+entries that cleanup itself touches.
 
 ```bash
 cargo test --test task_env_tests
