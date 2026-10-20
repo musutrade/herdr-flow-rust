@@ -15,6 +15,37 @@ use tempfile::TempDir;
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn cli_watch_once_handles_idle_and_busy_queues() {
+    let temp = common::tempdir().unwrap();
+    let root = temp.path().join("queue");
+    queue::init(&root, None, 30).unwrap();
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args([
+                "queue",
+                "watch",
+                "--state-dir",
+                root.to_str().unwrap(),
+                "--once",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = queue::locked(&root, false).unwrap();
+    let output = run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("busy"));
+    drop(lock);
+    assert!(run().status.success());
+}
+
 #[derive(Clone)]
 struct AgentState {
     messages: Vec<String>,

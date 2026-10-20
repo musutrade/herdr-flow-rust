@@ -1,10 +1,8 @@
-//! OpenCode 1.19.3 monitoring adapter.
+//! OpenCode 1.19.3 native sessions and legacy process monitoring.
 //!
-//! OpenCode does not expose an app-server RPC socket, a TUI bridge protocol or
-//! a programmatic runtime snapshot. Session continuity therefore rests on the
-//! shell PID plus `/proc` process identity, and the adapter deliberately keeps
-//! the same capability baseline and error boundaries as the original Python
-//! implementation.
+//! [`session`] implements the native HTTP receiver and durable producer path.
+//! The legacy [`OpenCodeAdapter`] below checks the shell PID and `/proc`
+//! process identity only; it does not control a native session.
 //!
 //! The adapter is read-only: the only Herdr commands it issues are
 //! `pane get` and `pane process-info`. Actions such as prompting, exiting,
@@ -22,6 +20,9 @@ use crate::error::{ErrorKind, FlowError, Result};
 use crate::model::{self, J};
 use crate::util;
 use crate::util::process::command;
+
+mod http;
+pub mod session;
 
 /// Human-readable adapter identity from the original capability baseline.
 pub const ADAPTER_NAME: &str = "OpenCode 1.19.3";
@@ -175,20 +176,20 @@ impl<'a> OpenCodeAdapter<'a> {
         }))
     }
 
-    /// OpenCode cannot determine idle state without RPC; check the shell only.
+    /// The process monitor checks shell readiness only, not native session idle.
     pub fn idle(&self) -> Result<bool> {
         self.shell_ready()
     }
 
-    /// OpenCode has no TUI bridge marker.
+    /// The process monitor has no Codex TUI bridge marker.
     pub fn marker(&self) -> Result<Option<J>> {
         Ok(None)
     }
 
-    /// OpenCode has no TUI process verification; verify the shell only.
+    /// Verify the registered shell identity only.
     ///
     /// `expected` is intentionally unused, matching the Python adapter: the
-    /// shell identity is the only continuity proof OpenCode exposes.
+    /// shell identity is this process monitor's only continuity proof.
     pub fn verify_tui(&self, _expected: &str) -> Result<J> {
         let processes = self.processes()?;
         self.verify_identity(&processes)
@@ -208,21 +209,21 @@ impl<'a> OpenCodeAdapter<'a> {
         Ok(identity)
     }
 
-    /// OpenCode cannot snapshot runtime settings.
+    /// The process monitor cannot snapshot runtime settings.
     pub fn snapshot(&self, _session: Option<&str>) -> Result<J> {
         Err(FlowError::guard(
             "OpenCode 1.19.3 does not support runtime snapshots",
         ))
     }
 
-    /// OpenCode has no app-server RPC socket.
+    /// The process monitor cannot invoke Codex app-server RPC methods.
     pub fn rpc(&self, method: &str, _params: &J) -> Result<J> {
         Err(FlowError::guard(format!(
             "OpenCode 1.19.3 does not support RPC method: {method}"
         )))
     }
 
-    /// OpenCode prompt is not implemented (no direct input API).
+    /// Prompting requires the separately registered native session adapter.
     pub fn prompt(&self, _text: &str) -> Result<String> {
         Err(FlowError::guard(
             "OpenCode 1.19.3 prompt requires manual input or file-based handoff",
@@ -261,7 +262,8 @@ impl<'a> OpenCodeAdapter<'a> {
 /// The exact OpenCode 1.19.3 capability baseline from `opencode_adapter.py`.
 pub fn baseline_capabilities() -> J {
     json!({
-        "available": true,
+        "available": false,
+        "probe_required": true,
         "adapter": ADAPTER_NAME,
         "server_info": {"name": "opencode", "version": "1.19.3"},
         "missing": [
@@ -272,16 +274,14 @@ pub fn baseline_capabilities() -> J {
             "context telemetry"
         ],
         "hints": [
-            "OpenCode session continuity: shell PID + process identity only",
+            "Monitoring diagnostics verify the shell only, not OpenCode session continuity",
             "Safe handoff: monitoring phase only (no active writes, no pending reviews)",
             "Recovery: manual inspection if session dies during handoff",
             "Context management: OpenCode handles compression internally"
         ],
         "supported_operations": [
             "pane process identity verification",
-            "shell readiness check",
-            "checkpoint state save/restore",
-            "successor session start (new opencode instance)"
+            "shell readiness check"
         ]
     })
 }
@@ -311,8 +311,13 @@ pub fn create_opencode_adapter(state: &J) -> Result<OpenCodeAdapter<'static>> {
     ))
 }
 
-const USAGE: &str = "Usage: herdr-flow opencode <capabilities|verify> [options]\n\
+const USAGE: &str = "Usage: herdr-flow opencode <action> [options]\n\
 Actions:\n\
+  register --state-dir DIR --spec FILE  bind a native OpenCode 1.19.3 session\n\
+  status --state-dir DIR                verify native identity and readiness\n\
+  dispatch --state-dir DIR --spec FILE  submit a bound managed task once\n\
+  collect --state-dir DIR               collect the bound result and signal\n\
+  watch --state-dir DIR [--once]        reconcile native submissions\n\
   capabilities [--state-dir DIR]  print the OpenCode 1.19.3 capability baseline\n\
   verify --state-dir DIR --pane PANE --terminal TERM --shell-pid PID\n\
                                   verify pane, process and shell identity (read-only)";
@@ -502,12 +507,17 @@ fn print_verify_output(output: &J) -> Result<()> {
     Ok(())
 }
 
-/// Diagnostic CLI for the OpenCode adapter.
+/// Native session actions and legacy process diagnostics.
 ///
 /// The original Python module had no CLI. These two actions are read-only:
 /// `capabilities` prints the baseline JSON, and `verify` checks the pane,
 /// process-info and shell identity against explicit expectations.
 pub fn cli(args: &[String]) -> i32 {
+    if args.first().is_some_and(|action| {
+        ["register", "status", "dispatch", "collect", "watch"].contains(&action.as_str())
+    }) {
+        return session::cli(args);
+    }
     let Some(action) = args.first() else {
         return cli_error(FlowError::usage(USAGE));
     };

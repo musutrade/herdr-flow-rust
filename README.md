@@ -2,14 +2,14 @@
 
 通过 Herdr 编排 issue 开发，以任务交接和独立 CI 监控减少 agent 长会话。
 
-本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 1.19.3 仅作为监控阶段适配器。
+本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
 
 ## 当前功能
 
 - 按 issue 和稳定阶段轮换会话，保留已有授权和有效验证证据。
 - 启动前探测 Linux `/proc`、Unix domain socket 和 app-server 方法；缺少所需能力时明确失败，不静默降级。
 - 本地安全边界：Herdr 参数拒绝 shell 元字符；batch Git 只允许白名单命令、拒绝全局配置覆盖并设置超时；状态与交接文件原子写入、权限 0600、拒绝符号链接父目录；app-server socket 校验同用户且非全局可写；JSON 消息限制大小与嵌套深度；子进程错误输出脱敏。
-- OpenCode 1.19.3 监控适配器：仅校验 pane/终端、shell PID 与进程身份；不支持 RPC、会话/上下文遥测、运行时快照、自动提示或自动换班，恢复需人工检查。
+- OpenCode 1.19.3 原生接入：显式绑定会话/模型/目录，检查忙碌和待审批状态，持久化派发与恢复记录，接续结果 signal、投递、ACK 和任务应用。保留 pane/shell 只读诊断；精确上下文遥测、运行时恢复和自动换班仍不支持。
 - 使用任务编号、epoch 和明确的写入归属协调开发、审计与发布。
 - 独立观察 GitHub Actions，绑定完整 SHA、workflow、事件和 run attempt；外部 Checks 需要固定 App、精确 run/head 与基线。
 - 可显式按必需 job 判定，保留 advisory 详情；取消、缺失等结果进入待决策而非代码修复失败。
@@ -28,10 +28,15 @@
 依赖：
 
 - Linux（上下文守护/自动换班依赖 `/proc`、Unix domain socket 与 POSIX `flock`）
-- Rust 1.80+ 与 Cargo
+- Rust 1.85+ 与 Cargo（CI 独立验证最低版本 1.85.0）
 - 已认证的 GitHub CLI `gh`
 - 自动编排需要运行中的本地 Codex app-server 与同版本原生 TUI（已验证 0.162.1）
 - Herdr 编排需在 Herdr 管理的会话中进行
+
+CI 分别在 stable 和最低版本 1.85.0 上使用锁文件构建、测试。第三方 Actions
+固定到完整 commit SHA，由 Dependabot 每周提出 Actions 与 Cargo 更新；更新需要
+通过相同检查。依赖审计在 PR、main 更新和每周定时执行，使用当时的 RustSec
+数据库；历史审计通过不代表之后没有新公告。
 
 构建并安装：
 
@@ -76,7 +81,7 @@ herdr-flow advisor --help
 - [V1 结果应用、后继接手与中断恢复](references/task-progress.md)
 - [CI 配置、后台运行与恢复](references/ci-monitor.md)
 - [V1 本地 PR 来源登记、同 PR 修复意图与恢复](references/pr-ledger.md)
-- [OpenCode 接入、结果返回、监控适配器与限制](references/opencode-v2.md)
+- [OpenCode 1.19.3 接入与限制（暂不接入 2.0）](references/opencode-v2.md)
 - [V1 基础循环验收与后续边界](references/v1-acceptance.md)
 - [V2 有界合批、整合与恢复](references/batching.md)
 - [可信门禁客户端接入契约](references/gate-client.md)
@@ -143,7 +148,7 @@ P2 修复后的升级规则：
 cargo fmt --all -- --check
 cargo run --locked -- lint-policy
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets
+cargo test --all-targets --locked
 ```
 
 Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexity` 逐项设为 `forbid`；同时禁止覆盖已有 `forbid` lint 组的兼容性放行。源码和测试一律禁止通过 `allow`、`expect`、条件属性或宏中的属性豁免任何 Clippy 规则，也禁止用 `allow(warnings)` / `expect(warnings)` 隐藏诊断。`lint-policy` 检查整个仓库的 Rust 文件（包括未启用的条件分支），CI 在 Clippy 前执行；发现问题须修正代码，不能增加豁免或放宽阈值。
@@ -155,9 +160,9 @@ Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexi
 Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `cargo llvm-cov`（或 `--coverage` 指定的 llvm-cov JSON）计算行覆盖。**默认阈值 10，全库绝对检查，不使用基线豁免**：
 
 - 每个函数的 `CRAP = CC² × (1 - coverage)³ + CC` 必须不超过 10。
-- CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。
+- CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。闭包（含嵌套闭包）中的分支计入所属函数；嵌套命名函数单独计量，避免重复统计。
 - 高复杂度函数必须拆分为小函数；低覆盖函数需要补测试。
-- 当前门禁测量 4,110 个函数（已包含 `src/crap.rs` 自身），均通过绝对阈值检查，行覆盖约 68.6%。注意：复杂度 visitor 不进入闭包，且 CC=1 函数即使零覆盖也按公式通过；因此“全绿”只是该门禁口径下的结果，不是行为或 live 验收的证明。
+- 门禁包含 `src/crap.rs` 自身，输出当前源码的函数数量、行覆盖率和超过绝对阈值的函数。闭包分支参与计量；宏展开中的分支仍不可见，且 CC=1 函数即使零覆盖也按公式通过。因此门禁通过不能代替行为测试或 live 验收证据。
 
 ```bash
 # 需要先安装 cargo-llvm-cov
@@ -183,7 +188,8 @@ src/
   queue/                   等待、任务、投递、命令包装与 CLI
   progress.rs              任务状态机与诊断
   runtime.rs               接收者能力检查
-  guard.rs                 上下文守护与换班状态机
+  guard.rs                 守护公共入口、共享状态与锁
+  guard/                   transcript、review、checkpoint、换班、观察与 CLI
   herdr.rs                 Herdr / app-server / TUI 运行时绑定
   codex/                   JSON-RPC、TUI 代理、交接顾问
   ci/                      只读 Actions/Checks 观察与策略

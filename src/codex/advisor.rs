@@ -722,7 +722,7 @@ fn check_turn_identity(params: &Value, turn_id: Option<&str>) -> Result<()> {
 }
 
 fn turn_identity_ok(actual: Option<&Value>, expected: Option<&str>) -> bool {
-    expected.map_or(true, |expected| matches_thread(actual, expected))
+    expected.is_none_or(|expected| matches_thread(actual, expected))
 }
 
 fn check_item_event(event: &Value, params: &Value) -> Result<()> {
@@ -1027,7 +1027,7 @@ fn is_agent_message(item: &Value) -> bool {
 }
 
 fn final_phase(item: &Value) -> bool {
-    item.get("phase").map_or(true, phase_is_final)
+    item.get("phase").is_none_or(phase_is_final)
 }
 
 fn phase_is_final(phase: &Value) -> bool {
@@ -1725,7 +1725,7 @@ fn ensure_start_model(response: &Value) -> Result<()> {
 }
 
 fn valid_start_model(model: Option<&Value>) -> bool {
-    model.map_or(true, is_luna_model)
+    model.is_none_or(is_luna_model)
 }
 
 fn is_luna_model(model: &Value) -> bool {
@@ -1972,70 +1972,15 @@ fn cleanup_thread(
     advice: &Option<Value>,
     error: &Option<String>,
 ) -> Result<()> {
+    let outcome = cleanup_attempt(factory, run, state, thread_id, advice, error);
     let JobRun {
-        job,
         path: job_path,
         job_id,
         result,
         result_path,
         fault_path,
-        active_path,
-        cleanup_seconds,
         ..
     } = run;
-    let turn_id = state.turn_id.as_ref();
-    let turn_completed = state.turn_completed;
-    let cleanup_deadline = Instant::now() + Duration::from_secs_f64(*cleanup_seconds);
-    let outcome = (|| -> Result<()> {
-        let socket = job
-            .get("binding")
-            .and_then(|binding| binding.get("app_server_socket"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| advisor("advisor binding missing"))?;
-        let mut client = factory(socket, remaining(cleanup_deadline)?)?;
-        if let Some(turn_id) = turn_id {
-            if !turn_completed {
-                persist(result, result_path, json!({"phase": "interrupt_sending"}))?;
-                client.call(
-                    "turn/interrupt",
-                    &json!({"threadId": thread_id, "turnId": turn_id}),
-                    Some(remaining(cleanup_deadline)?),
-                )?;
-            }
-        }
-        // Archive also shuts the loaded thread down, including an ambiguous
-        // turn/start for which no turn id was received.
-        persist(result, result_path, json!({"phase": "archive_sending"}))?;
-        client.call(
-            "thread/archive",
-            &json!({"threadId": thread_id}),
-            Some(remaining(cleanup_deadline)?),
-        )?;
-        persist(result, result_path, json!({"phase": "archive_verifying"}))?;
-        let thread_id = thread_id
-            .as_str()
-            .ok_or_else(|| advisor("advisor start returned an invalid thread identity"))?;
-        assert_unloaded(&mut *client, thread_id, cleanup_deadline)?;
-        fs::remove_file(active_path).map_err(|error| {
-            FlowError::io(format!("cannot remove active advisor reservation: {error}"))
-        })?;
-        let status = if advice.is_some() && error.is_none() {
-            "complete"
-        } else {
-            "failed"
-        };
-        persist(
-            result,
-            result_path,
-            json!({
-                "status": status,
-                "phase": "finished",
-                "lifecycle": "archived",
-                "advice": advice.clone().unwrap_or(Value::Null)
-            }),
-        )?;
-        Ok(())
-    })();
     if let Err(exc) = outcome {
         let reason = format!(
             "advisor cleanup could not be confirmed: {}",
@@ -2061,6 +2006,105 @@ fn cleanup_thread(
             }),
         )?;
     }
+    Ok(())
+}
+
+fn cleanup_attempt(
+    factory: &AdvisorClientFactory<'_>,
+    run: &mut JobRun,
+    state: &RunState,
+    thread_id: &Value,
+    advice: &Option<Value>,
+    error: &Option<String>,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs_f64(run.cleanup_seconds);
+    let mut client = cleanup_client(factory, &run.job, deadline)?;
+    cleanup_interrupt(&mut *client, run, state, thread_id, deadline)?;
+    cleanup_archive(&mut *client, run, thread_id, deadline)?;
+    cleanup_finish(run, advice, error)
+}
+
+fn cleanup_client(
+    factory: &AdvisorClientFactory<'_>,
+    job: &Value,
+    deadline: Instant,
+) -> Result<Box<dyn AdvisorClient>> {
+    let socket = job
+        .get("binding")
+        .and_then(|binding| binding.get("app_server_socket"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| advisor("advisor binding missing"))?;
+    factory(socket, remaining(deadline)?)
+}
+
+fn cleanup_interrupt(
+    client: &mut dyn AdvisorClient,
+    run: &mut JobRun,
+    state: &RunState,
+    thread_id: &Value,
+    deadline: Instant,
+) -> Result<()> {
+    if let Some(turn_id) = state.turn_id.as_ref() {
+        if !state.turn_completed {
+            persist(
+                &mut run.result,
+                &run.result_path,
+                json!({"phase":"interrupt_sending"}),
+            )?;
+            client.call(
+                "turn/interrupt",
+                &json!({"threadId":thread_id,"turnId":turn_id}),
+                Some(remaining(deadline)?),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_archive(
+    client: &mut dyn AdvisorClient,
+    run: &mut JobRun,
+    thread_id: &Value,
+    deadline: Instant,
+) -> Result<()> {
+    // Archive also shuts down an ambiguous turn/start with no received turn id.
+    persist(
+        &mut run.result,
+        &run.result_path,
+        json!({"phase":"archive_sending"}),
+    )?;
+    client.call(
+        "thread/archive",
+        &json!({"threadId":thread_id}),
+        Some(remaining(deadline)?),
+    )?;
+    persist(
+        &mut run.result,
+        &run.result_path,
+        json!({"phase":"archive_verifying"}),
+    )?;
+    let id = thread_id
+        .as_str()
+        .ok_or_else(|| advisor("advisor start returned an invalid thread identity"))?;
+    assert_unloaded(client, id, deadline)?;
+    fs::remove_file(&run.active_path).map_err(|error| {
+        FlowError::io(format!("cannot remove active advisor reservation: {error}"))
+    })?;
+    Ok(())
+}
+
+fn cleanup_finish(run: &mut JobRun, advice: &Option<Value>, error: &Option<String>) -> Result<()> {
+    let status = if advice.is_some() && error.is_none() {
+        "complete"
+    } else {
+        "failed"
+    };
+    persist(
+        &mut run.result,
+        &run.result_path,
+        json!({"status":status,"phase":"finished",
+        "lifecycle":"archived","advice":advice.clone().unwrap_or(Value::Null)}),
+    )?;
     Ok(())
 }
 

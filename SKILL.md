@@ -12,14 +12,21 @@ text recognition.
 
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
-`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor` and `herdr-flow crap`.
-Build it once with `cargo build --release`; use `herdr-flow <command> --help` for
-the exact options. Run `cargo test --all-targets` after changing the implementation.
+`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
+and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
+use `herdr-flow <command> --help` for the exact options. Run
+`cargo test --all-targets --locked` after changing the implementation.
 
-This automated path is for local Codex sessions. OpenCode may act as an external
-review producer through a registered signal; the OpenCode 1.19.3 adapter is
-monitoring-only (pane/shell/process identity, no RPC, context telemetry or
-automatic rotation). Follow [OpenCode integration](references/opencode-v2.md).
+This automated path is for local Codex sessions. The OpenCode baseline is
+1.19.3; at the user's direction, 2.0 integration is deferred because of reported
+bugs. Do not upgrade to 2.0 or use its API workflow for this integration.
+The native 1.19.3 adapter supports exact session/model/directory binding, HTTP
+submission/status, durable result collection and queue delivery/ACK/application.
+Use `opencode register` and its independent `opencode watch`; OpenCode receiver
+commands use `OPENCODE_SESSION_ID`, never a fabricated `CODEX_THREAD_ID`.
+Context telemetry, runtime restoration and automatic rotation remain unsupported.
+Keep the legacy pane/shell diagnostics distinct. Follow
+[OpenCode integration](references/opencode-v2.md).
 
 Use one issue per worker session, and durable task state across sessions. Keep the user's existing authorization and repository gates intact. This skill does not itself authorize publication, merging, messages to people, or infrastructure changes.
 
@@ -71,7 +78,7 @@ from a worker assignment or batch.
 
 ## Rotate sessions
 
-For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Do not register an OpenCode session with this guard; its adapter is monitoring-only and automatic rotation is unsupported. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
+For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Use `opencode register` / `opencode watch` for OpenCode; the Codex context guard and automatic rotation are unsupported for it. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
 
 After a worker publishes and signals its completed assignment, checkpoint a handoff with `assignment: {id, status: "completed", evidence}` (absolute existing report path). This parks the worker without a fresh-session wakeup, even at the context limit. Do not infer completion from Herdr idle/done. Before its next assignment, the coordinator supplies a new assignment ID; the parked worker checkpoints that new `pending` assignment and ends its turn so rotation can proceed. Never reuse a completed assignment ID. Coordinators waiting for events must remain monitoring, not parked.
 

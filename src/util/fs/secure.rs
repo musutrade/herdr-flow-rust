@@ -28,6 +28,7 @@ pub(super) fn directory(path: &Path, create: bool) -> Result<File> {
 
 fn trusted_ancestor(directory: &File) -> Result<()> {
     let metadata = directory.metadata()?;
+    // SAFETY: geteuid has no pointer arguments or caller preconditions.
     let uid = unsafe { libc::geteuid() };
     if metadata.uid() != uid && metadata.uid() != 0 {
         return Err(FlowError::guard(
@@ -59,6 +60,8 @@ fn descend(parent: &File, name: &OsStr, create: bool) -> Result<File> {
 }
 
 fn open_at(parent: &File, name: &CString) -> io::Result<File> {
+    // SAFETY: parent is a live borrowed directory fd and name is NUL-terminated
+    // for the call. No O_CREAT means no variadic mode argument is required.
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -69,10 +72,14 @@ fn open_at(parent: &File, name: &CString) -> io::Result<File> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: successful openat created this fd; it has no other Rust owner.
+    // Transfer it once to File so every subsequent path closes it via Drop.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn mkdir_at(parent: &File, name: &CString) -> io::Result<()> {
+    // SAFETY: parent remains open and name stays NUL-terminated through the
+    // call; mkdirat borrows both and receives a valid permission mode.
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
         return Ok(());
     }

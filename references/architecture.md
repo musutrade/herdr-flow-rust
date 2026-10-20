@@ -3,8 +3,9 @@
 This is a maintainability overview of the current source and the explicitly
 separate target mode. Implemented paths are drawn as current behavior. Target
 paths are labeled and remain gated by GateHouse #98 and the V1/V2 acceptance
-items in Issues #11/#12/#13. The OpenCode 1.19.3 adapter is a standalone
-monitoring helper, not an automatic rotation path. Detailed contracts live in
+items in Issues #11/#12/#13. OpenCode 1.19.3 has a native HTTP session adapter
+and a separate process monitoring helper; automatic rotation remains unsupported.
+Detailed contracts live in
 the linked references; do not copy these diagrams into multiple documents.
 
 ## 1. Responsibilities and data flow
@@ -50,6 +51,13 @@ identity and rotation; `herdr-flow ci` only reads checks. The coordinator still
 decides application and the next owner. See [waiting](waiting.md),
 [task progress](task-progress.md), [CI monitoring](ci-monitor.md), and the
 [gate client](gate-client.md).
+
+`guard.rs` preserves the public entry points and shared state/lock helpers.
+Private modules under `guard/` separate transcript cursors, review journals,
+handoff validation, advisor evidence, checkpointing, context observation,
+rotation/reconciliation, watcher failures, registration, diagnosis and CLI.
+Cross-module helpers have parent-only visibility; persisted fields, lock order
+and ambiguous-operation recovery retain their existing contracts.
 
 ## 2. Context rotation and recovery
 
@@ -218,8 +226,12 @@ repository's authorization, review or merge rules.
   absolute existing cwd and a timeout, and redacts credentials/user paths/tokens
   from diagnostics. Workspace overlap checks resolve paths before comparison.
 - **Transport:** the app-server Unix socket must be a socket owned by the current
-  user and must not be world-writable. JSON-RPC messages and headers have size
-  limits, and JSON nesting is bounded.
+  user and must not be world-writable. Both RPC and TUI also authenticate the
+  connected peer with Linux `SO_PEERCRED` before forwarding handshake or business
+  data; query failure or a different effective UID closes the connection. This
+  protects against cross-UID endpoint substitution, not malicious same-UID
+  processes. JSON-RPC messages and headers have size limits, and JSON nesting is
+  bounded.
 - **External observations:** external Checks bind an exact App, name,
   `external_id`, full SHA and base. The inventory is capped at 32 entries, and a
   commit with more than 1000 Check suites is refused rather than inferred green.
@@ -241,7 +253,7 @@ See [CI monitoring](ci-monitor.md), [wait queue](waiting.md) and
 | Result application and takeover | `src/progress.rs`, `herdr-flow queue`, `src/queue/cli.rs` | #11, #15 evidence |
 | Context guard and rotation | `herdr-flow guard` | #13 |
 | Native Codex transport, TUI lifecycle and runtime binding | `src/herdr.rs`, `src/codex/rpc.rs`, `herdr-flow tui` | #13 |
-| OpenCode 1.19.3 monitoring adapter | `src/opencode.rs` | #14; no automatic rotation |
+| OpenCode 1.19.3 | `src/opencode.rs`, `src/opencode/` | native dispatch/result return; no automatic rotation |
 | CI and external Check observation | `herdr-flow ci`, `src/ci/checks.rs` | #11 external Checks |
 | PR provenance and same-PR repair | `src/pr.rs` | #11 |
 | Read-only task and delivery metrics | `src/metrics.rs`, `src/queue/cli.rs` | #6 |

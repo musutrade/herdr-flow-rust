@@ -3,8 +3,17 @@
 > **Evidence caveat (2026-10-19 Rust audit):** the live observations below were
 > produced on 2026-10-17 by the upstream **Python** implementation, before the
 > Rust port existed. They are retained as historical reference and do **not**
-> constitute Rust live acceptance. No Rust-specific live Herdr/Codex/GitHub run
-> exists; the Rust suite uses fakes. See `AUDIT_REPORT_2026-10-19.md`.
+> constitute Rust live acceptance or a complete Rust Herdr/Codex/GitHub
+> publication/merge loop. See the original `AUDIT_REPORT_2026-10-19.md`;
+> current scoped Rust evidence is linked below.
+
+> **OpenCode policy (2026-10-20):** the v2 review observation below is historical
+> only. At the user's direction, 2.0 integration is deferred because of reported
+> bugs. The current baseline is 1.19.3; this record does not validate its
+> end-to-end integration. Follow the [current policy](opencode-v2.md).
+
+For current Rust socket/process fixtures and the remaining deployment evidence,
+see [Rust acceptance](rust-acceptance.md).
 
 V1 combines durable result application, explicit successor takeover, local PR
 provenance and required-job decisions. External publication still uses an

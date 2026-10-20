@@ -280,20 +280,23 @@ was not delivered; an ACK does not prove it was applied.
 
 ## 7. Other producers and current boundaries
 
-- **OpenCode:** use a registered `signal` wait and verify its exact session and
-  model independently. OpenCode can return results, but automatic rotation is
-  not supported. The 1.19.3 adapter adds only pane/shell/process checks; it does
-  not add RPC or automatic handoff. See [OpenCode integration](opencode-v2.md).
-  Do not apply Codex RPC or reset commands to it.
+- **OpenCode 1.19.3:** register an exact native session/model/directory, use
+  `opencode dispatch` / `collect` for managed result return, and run its dedicated
+  watcher. OpenCode receivers use `OPENCODE_SESSION_ID` for queue ACK and task
+  commands. Automatic rotation is unsupported; 2.0 integration remains deferred.
+  See [OpenCode integration](opencode-v2.md).
 - **CI:** use `herdr-flow ci` with a pinned config and a `ci` wait; the observer is
   read-only and never merges or reruns CI. See [CI monitoring](ci-monitor.md).
 - **Long command:** the existing `run` wrapper reserves the invocation before
   starting the child and records the real exit status; see
   [task progress](task-progress.md#dispatch-takeover-and-ambiguity).
 
-Current V1 evidence covers exact receiver arrival/ACK/application/takeover,
-same-PR normal/repair observation, and an external OpenCode review signal. It
-does not cover trusted App checks, local gate integration, V2 batching, or
+Historical upstream Python V1 evidence records exact receiver
+arrival/ACK/application/takeover, same-PR normal/repair observation, and an
+external OpenCode v2 review signal. It does not validate the Rust implementation
+or a 1.19.3 end-to-end workflow, and does not authorize the deferred 2.0
+integration. See [evidence limits](v1-acceptance.md). It also does not cover
+trusted App checks, local gate integration, V2 batching, or
 OpenCode automatic rotation. Those remain separate acceptance work; do not
 describe them as already verified.
 

@@ -262,15 +262,19 @@ pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
         .as_file_mut()
         .sync_all()
         .map_err(|error| FlowError::io(format!("cannot fsync temporary file: {error}")))?;
-    temporary.persist_noclobber(&path).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            FlowError::io(format!("{} already exists", path.display()))
-        } else {
-            FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
-        }
-    })?;
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| new_file_error(error, &path))?;
     directory.sync_all()?;
     Ok(())
+}
+
+fn new_file_error(error: tempfile::PersistError, path: &Path) -> FlowError {
+    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+        FlowError::io(format!("{} already exists", path.display()))
+    } else {
+        FlowError::io(format!("cannot create {}: {}", path.display(), error.error))
+    }
 }
 
 fn new_file_target(path: &Path) -> Result<(File, PathBuf)> {
@@ -321,6 +325,8 @@ impl FileLock {
 
     fn from_file(file: File, blocking: bool) -> Result<Option<Self>> {
         let operation = libc::LOCK_EX | if blocking { 0 } else { libc::LOCK_NB };
+        // SAFETY: file owns a live descriptor throughout flock; the syscall
+        // takes scalar flags and does not take descriptor ownership.
         let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
         if result == 0 {
             return Ok(Some(Self { file }));
@@ -340,6 +346,8 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
+        // SAFETY: self.file is still live during Drop. Unlock before File's own
+        // destructor closes the descriptor; flock does not consume it.
         unsafe {
             libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
@@ -381,6 +389,7 @@ pub fn is_owned_regular_file(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     metadata.file_type().is_file() && metadata.uid() == unsafe { libc::geteuid() }
 }
 
@@ -422,6 +431,7 @@ pub fn read_state_json(root: &Path, name: &str) -> Result<Value> {
 
 fn validate_state_file(file: &File) -> Result<()> {
     let metadata = file.metadata()?;
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
         return Err(FlowError::guard(
             "state/lock file must be an owned regular file",
@@ -445,6 +455,7 @@ fn validate_private_dir_type(metadata: &fs::Metadata) -> Result<()> {
 }
 
 fn validate_private_dir_owner(metadata: &fs::Metadata) -> Result<()> {
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     if metadata.uid() != unsafe { libc::geteuid() } {
         return Err(FlowError::guard(
             "state directory must be owned by this user",

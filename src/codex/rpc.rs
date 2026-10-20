@@ -596,6 +596,7 @@ fn check_socket_file_type(metadata: &fs::Metadata) -> Result<()> {
 }
 
 fn check_socket_owner(metadata: &fs::Metadata) -> Result<()> {
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     if metadata.uid() != unsafe { libc::geteuid() } {
         return reject_socket(
             "app-server socket owner mismatch",
@@ -689,6 +690,7 @@ impl Client {
     fn attach_stream(&mut self) -> Result<()> {
         let stream = UnixStream::connect(&self.socket_path)
             .map_err(|error| rpc_error(format!("WebSocket connection failed: {error}")))?;
+        super::peer::verify(&stream)?;
         self.stream = Some(stream);
         self.start_session()
     }
@@ -1565,6 +1567,8 @@ fn poll_stream(stream: &UnixStream, timeout: Duration) -> Result<bool> {
         revents: 0,
     };
     let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: poll_fd is one writable element and stream remains borrowed/open
+    // for the call. poll writes revents without taking descriptor ownership.
     let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
     if result < 0 {
         return poll_error();

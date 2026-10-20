@@ -16,8 +16,8 @@
 //! `while`, `loop`, `?` (`ExprTry`), `&&`, and `||`. A `try { .. }` block is
 //! counted once as the catch-like construct. `unsafe { .. }` is not a branch
 //! and is therefore not counted; Rust has no `catch` statement. Complexity is
-//! measured inside a function body only and deliberately excludes nested
-//! functions and closures (those nested functions are measured separately).
+//! measured inside a function body, including branches inside closures. Nested
+//! named functions are excluded from the parent and measured separately.
 //! Branches hidden inside macro invocations are not visible to `syn` and are
 //! not counted.
 //!
@@ -32,9 +32,7 @@
 //!
 //! Function identity, names and complexity come from `syn`'s AST
 //! (`ItemFn`, `ImplItemFn`, and `TraitItemFn` with a default body), including
-//! nested functions. `proc-macro2`'s `span-locations` feature is not enabled in
-//! this crate (and the dependency manifest must not be changed), so stable
-//! `Span::start()/end()` are unavailable. To recover line spans we tokenize the
+//! nested functions. To recover line spans we tokenize the
 //! source with a small lexer that is aware of comments, strings, raw strings,
 //! character literals, attributes and macro token trees, then map the `fn`
 //! declarations to the syn functions in source order. A function span starts at
@@ -579,7 +577,7 @@ fn run_always_test(options: &Options, base: &str) -> Result<i32, String> {
 }
 
 fn run_tests_for_no_changes(options: &Options, base: &str) -> Result<i32, String> {
-    let output = run_command(&options.root, "cargo", &["test"])?;
+    let output = run_command(&options.root, "cargo", &["test", "--locked"])?;
     Ok(tests_outcome(base, &output))
 }
 
@@ -820,9 +818,8 @@ impl<'ast> Visit<'ast> for FunctionCollector {
     }
 }
 
-/// McCabe complexity of one function body. Nested functions and closures are
-/// skipped: nested functions are reported separately and closures are not
-/// functions in this gate.
+/// McCabe complexity of one function body, including its closures. Nested named
+/// functions are reported separately to avoid counting their branches twice.
 struct Complexity {
     score: usize,
 }
@@ -839,8 +836,6 @@ impl<'ast> Visit<'ast> for Complexity {
     fn visit_impl_item_fn(&mut self, _node: &'ast syn::ImplItemFn) {}
 
     fn visit_trait_item_fn(&mut self, _node: &'ast syn::TraitItemFn) {}
-
-    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
         self.score += 1;
@@ -1940,6 +1935,7 @@ fn run_coverage_export(root: &Path, output_path: &Path) -> Result<(), String> {
         "cargo",
         &[
             "llvm-cov",
+            "--locked",
             "--json",
             "--output-path",
             &output_path.to_string_lossy(),
@@ -2795,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn complexity_counts_branches_but_not_nested_functions_or_closures() {
+    fn complexity_counts_closures_but_not_nested_named_functions() {
         let source = "\
 fn outer(x: bool) -> i32 {
     fn inner(y: bool) -> i32 {
@@ -2807,7 +2803,29 @@ fn outer(x: bool) -> i32 {
     }
     0
 }";
-        assert_eq!(first_complexity(source), 3);
+        assert_eq!(first_complexity(source), 4);
+        let functions = parse_functions(source);
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].cc, 4);
+        assert_eq!(functions[1].cc, 2);
+    }
+
+    #[test]
+    fn complexity_counts_nested_closure_control_flow() {
+        let source = r#"
+fn outer() {
+    let closure = || {
+        let nested = || { if true && false || true { return; } };
+        for x in [1,2] {
+            while x > 0 { break; }
+            loop { break; }
+            match x { 1 => nested(), _ => () }
+        }
+    };
+    closure();
+}"#;
+        // base + if + && + || + for + while + loop + non-default match arm
+        assert_eq!(first_complexity(source), 8);
     }
 
     #[test]

@@ -84,6 +84,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 }
 
 fn current_uid() -> u32 {
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     unsafe { libc::geteuid() }
 }
 
@@ -884,7 +885,7 @@ fn managed_thread_source(params: &Map<String, Value>) -> bool {
 fn thread_source_ok(params: &Map<String, Value>) -> bool {
     params
         .get("threadSource")
-        .map_or(true, |source| source == "user" || source.is_null())
+        .is_none_or(|source| source == "user" || source.is_null())
 }
 
 fn message_request_key(message: &J) -> Result<RequestKey> {
@@ -1636,6 +1637,8 @@ extern "C" fn forward_signal(signum: libc::c_int) {
     STOP_SIGNAL.store(signum, Ordering::SeqCst);
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
+        // SAFETY: kill takes scalar arguments and is async-signal-safe. The
+        // handler uses only lock-free atomics and kill, without allocation.
         unsafe {
             libc::kill(pid, signum);
         }
@@ -1645,13 +1648,20 @@ extern "C" fn forward_signal(signum: libc::c_int) {
 type PreviousSignals = Vec<(libc::c_int, libc::sigaction)>;
 
 fn set_signal_action(signum: libc::c_int, handler: libc::sighandler_t) -> Result<libc::sigaction> {
+    // SAFETY: Linux sigaction is a C record whose fields admit zero. We then
+    // initialize the handler, flags and signal mask before installation.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler;
     action.sa_flags = libc::SA_RESTART;
+    // SAFETY: sa_mask points to live writable sigset_t storage in action.
     unsafe {
         libc::sigemptyset(&mut action.sa_mask);
     }
+    // SAFETY: all-zero is valid storage for this Linux C record; sigaction
+    // fills the previous disposition on success before we use it.
     let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: both records live through the call. Callers pass either our
+    // extern-C one-int signal handler or a previously obtained disposition.
     let result = unsafe { libc::sigaction(signum, &action, &mut previous) };
     if result != 0 {
         return Err(FlowError::io(format!(
@@ -1664,6 +1674,8 @@ fn set_signal_action(signum: libc::c_int, handler: libc::sighandler_t) -> Result
 
 fn restore_signals(previous: &PreviousSignals) {
     for (signum, action) in previous {
+        // SAFETY: action is the saved disposition from a successful sigaction;
+        // it stays live during restoration, and null omits the output record.
         unsafe {
             libc::sigaction(*signum, action, std::ptr::null_mut());
         }
@@ -1807,36 +1819,59 @@ fn serve_continue(service: &mut ProxyBridge, outcome: &Result<()>) -> bool {
     outcome.is_ok() && service.serve_should_continue()
 }
 
-fn executable_path(command: &str) -> Option<String> {
-    let access = |candidate: &Path| -> bool {
-        let metadata = match fs::metadata(candidate) {
-            Ok(metadata) => metadata,
-            Err(_) => return false,
-        };
-        if !metadata.is_file() {
-            return false;
-        }
-        let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
-            return false;
-        };
-        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+fn executable_access(candidate: &Path) -> bool {
+    let metadata = match fs::metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
     };
+    if !metadata.is_file() {
+        return false;
+    }
+    let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: path is NUL-terminated and lives through access; X_OK is a valid
+    // scalar mode. This is an access probe, not a guarantee about a later exec.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+}
+
+fn executable_path(command: &str) -> Option<String> {
     if command.is_empty() {
         return None;
     }
     if command.contains('/') {
         let path = Path::new(command);
-        return access(path).then(|| command.to_string());
+        return executable_access(path).then(|| command.to_string());
     }
     let path_var =
         std::env::var_os("PATH").unwrap_or_else(|| std::ffi::OsString::from("/bin:/usr/bin"));
     for directory in std::env::split_paths(&path_var) {
         let candidate = directory.join(command);
-        if access(&candidate) {
+        if executable_access(&candidate) {
             return Some(candidate.to_string_lossy().to_string());
         }
     }
     None
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+
+    #[test]
+    fn executable_lookup_checks_absolute_paths_path_search_and_access() {
+        assert_eq!(executable_path(""), None);
+        assert_eq!(executable_path("/nonexistent/herdr-native"), None);
+        assert_eq!(executable_path("/bin/sh"), Some("/bin/sh".into()));
+        assert!(executable_path("sh").is_some());
+        assert_eq!(
+            executable_path("nonexistent-herdr-native-acceptance-20261020"),
+            None
+        );
+        assert!(!executable_access(Path::new("/bin")));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(!executable_access(file.path()));
+    }
 }
 
 /// Nonblocking UNIX connect with the original two second upstream deadline.
@@ -1848,6 +1883,8 @@ fn connect_unix_stream(path: &Path, timeout: Duration) -> Result<UnixStream> {
 }
 
 fn open_upstream_socket() -> Result<RawFd> {
+    // SAFETY: socket takes scalar protocol/flag arguments. A successful result
+    // is owned by connect_unix_stream until finish_connect transfers/closes it.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(socket_error("cannot create upstream socket"));
@@ -1864,10 +1901,16 @@ fn finish_connect(fd: RawFd, result: Result<()>) -> Result<UnixStream> {
         close_socket(fd);
         return Err(error);
     }
-    Ok(unsafe { UnixStream::from_raw_fd(fd) })
+    // SAFETY: open_upstream_socket created this owned fd and all error paths
+    // above close it. Transfer its sole ownership to the stream exactly once.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    crate::codex::peer::verify(&stream)?;
+    Ok(stream)
 }
 
 fn close_socket(fd: RawFd) {
+    // SAFETY: the connection error path owns this raw fd and has not converted
+    // it into UnixStream. It is closed once and never used afterward.
     unsafe {
         libc::close(fd);
     }
@@ -1884,6 +1927,8 @@ fn configure_nonblocking(fd: RawFd) -> Result<()> {
 }
 
 fn socket_flags(fd: RawFd) -> Result<libc::c_int> {
+    // SAFETY: the connect path owns fd for this call; F_GETFL takes no pointer
+    // and neither closes the descriptor nor transfers ownership.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(socket_error("cannot configure upstream socket"));
@@ -1892,6 +1937,8 @@ fn socket_flags(fd: RawFd) -> Result<libc::c_int> {
 }
 
 fn set_nonblocking(fd: RawFd, flags: libc::c_int) -> Result<()> {
+    // SAFETY: fd is still owned by the connect path; F_SETFL receives the
+    // previously queried flags plus O_NONBLOCK and no pointer argument.
     let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if result < 0 {
         return Err(socket_error("cannot configure upstream socket"));
@@ -1920,6 +1967,8 @@ fn socket_name(bytes: &[u8]) -> (&[u8], bool) {
 }
 
 fn fill_address(name: &[u8], abstract_socket: bool) -> Result<libc::sockaddr_un> {
+    // SAFETY: this Linux C record contains only integer/byte fields, so zero is
+    // valid. Family and a capacity-checked name are initialized before connect.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let capacity = address.sun_path.len();
@@ -1954,6 +2003,8 @@ fn address_length(name: &[u8], abstract_socket: bool) -> libc::socklen_t {
 }
 
 fn sockaddr_path_offset() -> usize {
+    // SAFETY: sockaddr_un admits zero; it is used solely to compute addresses
+    // of fields within this live record, without dereferencing raw pointers.
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     (&address.sun_path as *const _ as usize) - (&address as *const _ as usize)
 }
@@ -1964,6 +2015,8 @@ fn start_connect(
     length: libc::socklen_t,
     timeout: Duration,
 ) -> Result<()> {
+    // SAFETY: unix_address supplies a live sockaddr_un and a length within its
+    // storage. fd remains owned by the connect path while connect borrows it.
     let result = unsafe { libc::connect(fd, address as *const _ as *const libc::sockaddr, length) };
     if result == 0 {
         return Ok(());
@@ -1998,6 +2051,8 @@ fn poll_writable(fd: RawFd, timeout: Duration) -> Result<libc::c_int> {
         events: libc::POLLOUT,
         revents: 0,
     };
+    // SAFETY: poll_fd is one live writable element; fd stays owned by the
+    // connect path and poll only borrows it.
     let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
     if result >= 0 {
         return Ok(result);
@@ -2034,6 +2089,8 @@ fn verify_socket_connected(fd: RawFd) -> Result<()> {
 fn read_socket_error(fd: RawFd) -> Result<libc::c_int> {
     let mut code: libc::c_int = 0;
     let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: code and length are writable, correctly sized outputs that live
+    // through getsockopt. SO_ERROR writes a c_int; fd remains borrowed/open.
     let result = unsafe {
         libc::getsockopt(
             fd,
@@ -2170,6 +2227,8 @@ impl ProxyBridge {
     }
 
     fn install_directory_lock(&mut self, directory_fd: RawFd) -> Result<()> {
+        // SAFETY: open_directory_lock obtained this newly owned descriptor from
+        // open_dir_fd. No other File owns it; this is its sole ownership transfer.
         let directory = unsafe { File::from_raw_fd(directory_fd) };
         let lock_file = open_lock_file(&directory)?;
         self.attach_directory(directory, lock_file)
@@ -2578,6 +2637,8 @@ impl ProxyBridge {
 
     fn poll_events(&mut self) -> Result<Option<PollBatch>> {
         let mut batch = self.build_poll_batch();
+        // SAFETY: the vector is live, writable and not resized during poll;
+        // supplied count equals its length and the bridge retains the fd owners.
         let result =
             unsafe { libc::poll(batch.fds.as_mut_ptr(), batch.fds.len() as libc::nfds_t, 100) };
         if result < 0 {
@@ -2836,6 +2897,8 @@ fn prepare_proxy_listener(path: &Path, listener: &UnixListener) -> Result<()> {
 
 fn listen_on_socket(listener: &UnixListener) -> Result<()> {
     // Python listens with a small backlog (4).
+    // SAFETY: listener owns the bound socket throughout listen; the syscall
+    // takes scalar arguments and does not transfer descriptor ownership.
     let result = unsafe { libc::listen(listener.as_raw_fd(), 4) };
     if result != 0 {
         return Err(FlowError::io(format!(
@@ -2968,6 +3031,8 @@ fn terminate_child(child: &mut Child) -> Result<()> {
 
 fn send_sigterm(child: &Child) {
     let pid = child.id();
+    // SAFETY: kill takes only a scalar process ID and signal, with no Rust
+    // memory or fd ownership involved. Child lifecycle checks are separate.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
@@ -3099,6 +3164,8 @@ fn is_owned_real_directory(info: &fs::Metadata) -> bool {
 
 fn open_lock_file(directory: &File) -> Result<File> {
     let lock_name = CString::new("tui.lock").expect("static lock name");
+    // SAFETY: directory stays open and lock_name stays NUL-terminated for the
+    // call. O_CREAT is paired with a mode_t argument for this variadic syscall.
     let lock_fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -3113,10 +3180,14 @@ fn open_lock_file(directory: &File) -> Result<File> {
             std::io::Error::last_os_error()
         )));
     }
+    // SAFETY: successful openat returned a new owned fd, with no existing File
+    // owner. Transfer it exactly once; File closes it on every later path.
     Ok(unsafe { File::from_raw_fd(lock_fd) })
 }
 
 fn lock_exclusive(lock_file: &File) -> Result<()> {
+    // SAFETY: lock_file remains borrowed/open; flock takes scalar flags and
+    // does not consume the descriptor.
     let result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
         return Ok(());

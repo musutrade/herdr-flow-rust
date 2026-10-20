@@ -9,19 +9,26 @@ use std::time::{Duration, Instant};
 use super::{CommandOptions, CommandOutput};
 use crate::{ErrorKind, FlowError, Result};
 
+// Constructed with Some(child); only Drop takes the child. Keeping Option lets
+// Drop transfer it to a reaper thread after process-group cleanup.
 struct OwnedCommand(Option<Child>);
 
 impl OwnedCommand {
     fn child(&mut self) -> &mut Child {
+        // A live OwnedCommand cannot have run Drop's sole take yet.
         self.0.as_mut().expect("owned command child")
     }
 }
 
 impl Drop for OwnedCommand {
     fn drop(&mut self) {
+        // This is the sole take, and Drop runs once for the initialized owner.
         let mut child = self.0.take().expect("owned command child");
         // process_group(0) reserved this group for this command. waitid below
         // does not reap the leader, even when it exits before its descendants.
+        // SAFETY: kill takes only scalar arguments. This exclusively owned
+        // child remains unreaped (WNOWAIT), reserving its PID/group ID until
+        // group cleanup completes; only then may try_wait/wait reap the leader.
         unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
         let _ = child.kill();
         if !matches!(child.try_wait(), Ok(Some(_))) {
@@ -91,10 +98,16 @@ fn exit_status(child: &Child) -> io::Result<Option<i32>> {
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: storage was zeroed before waitid and the successful syscall wrote
+    // the wait result. The no-event case retains a valid zero si_pid.
     let info = unsafe { info.assume_init() };
+    // SAFETY: waitid's child-event layout exposes si_pid; the zeroed no-event
+    // representation is checked before reading any child exit status.
     if unsafe { info.si_pid() } == 0 {
         return Ok(None);
     }
+    // SAFETY: nonzero si_pid above identifies a waitid child event, for which
+    // si_status is the active status field of siginfo_t.
     let status = unsafe { info.si_status() };
     Ok(Some(if info.si_code == libc::CLD_EXITED {
         status
@@ -105,10 +118,13 @@ fn exit_status(child: &Child) -> io::Result<Option<i32>> {
 
 fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     let fd = pipe.as_raw_fd();
+    // SAFETY: pipe is borrowed and stays live; F_GETFL has no pointer argument.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: the same borrowed descriptor remains open; F_SETFL receives only
+    // the flags returned above plus O_NONBLOCK and does not transfer ownership.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -222,6 +238,8 @@ impl<'a> Pipes<'a> {
         // Wake immediately on I/O, and periodically to observe child exit even
         // after all pipes close. Never pace large output by a fixed sleep.
         let millis = remaining.as_millis().min(5) as i32;
+        // SAFETY: fds is a live writable array of exactly the supplied length;
+        // each pipe owner stays borrowed, and poll ignores absent fd=-1 entries.
         let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
         if result < 0 {
             let error = io::Error::last_os_error();

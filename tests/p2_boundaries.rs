@@ -142,6 +142,7 @@ fn queue_init_refuses_existing_writable_or_non_directory_roots() {
     fs::write(&file, "unchanged").unwrap();
     assert!(util::ensure_private_dir(&file, false).is_err());
     // / is root-owned; checking it must never chmod it or require sudo.
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     if unsafe { libc::geteuid() } != 0 {
         assert!(util::ensure_private_dir(Path::new("/"), false).is_err());
     }

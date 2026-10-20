@@ -650,7 +650,7 @@ fn action_init(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Result<O
 }
 
 fn action_readiness(root: &Path, _args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
-    let session = std::env::var("CODEX_THREAD_ID").ok();
+    let session = crate::opencode::session::receiver_session(root)?;
     let result = runtime::readiness(root, session.as_deref(), factory)?;
     action_readiness_report(root, result)
 }
@@ -774,12 +774,11 @@ fn action_resolve(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Resul
 }
 
 fn action_ack(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Result<Outcome> {
-    let Some(session) = std::env::var("CODEX_THREAD_ID")
-        .ok()
-        .filter(|value| !value.is_empty())
+    let Some(session) =
+        crate::opencode::session::receiver_session(root)?.filter(|value| !value.is_empty())
     else {
         return Err(queue_error(
-            "ACK requires the receiving Codex session and --delivery",
+            "ACK requires the registered receiving session and --delivery",
         ));
     };
     let state = super::acknowledge(root, args.delivery.as_deref().unwrap_or_default(), &session)?;
@@ -824,7 +823,7 @@ fn task_action_state(
     spec: &J,
     factory: &ReceiverFactory,
 ) -> Result<Outcome> {
-    let session = std::env::var("CODEX_THREAD_ID").ok();
+    let session = crate::opencode::session::receiver_session(root)?;
     let state = task_action(root, &args.action, spec, session.as_deref(), factory)?;
     Ok(Outcome::state(state))
 }
