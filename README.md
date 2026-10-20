@@ -155,6 +155,10 @@ Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexi
 
 测试覆盖队列/投递/ACK、任务状态机、guard transcript 游标、换班、review 配置、CI 分页与 required-jobs 判定、外部 Checks 身份、PR 来源/合并、合批冻结/隔离整合/快照、门禁客户端与工具函数。第一版迁移保留了原有安全边界与故障语义。
 
+## 需求修订与成果换版
+
+`queue task-lineage` 支持需求依据修订、经适配器核验的 Git／文件成果、显式候选换版，以及同一需求下隔离的开发／验收活动。开发新产出不会替换正在验收的版本；旧需求、候选或轮次的结果不能推进当前目标。命令及迁移契约见 [任务版本与活动关联](references/task-lineage.md)。
+
 ## CRAP 门禁
 
 Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `cargo llvm-cov`（或 `--coverage` 指定的 llvm-cov JSON）计算行覆盖。**默认阈值 10，全库绝对检查，不使用基线豁免**：

@@ -417,15 +417,21 @@ fn validate_wait_binding(w: &J) -> Result<()> {
 
 pub fn add(root: &Path, spec: &J) -> Result<J> {
     let mut s = load_queue(root)?;
+    let w = register_wait(&mut s, spec, util::now())?;
+    save(root, &mut s)?;
+    Ok(w)
+}
+
+pub(crate) fn register_wait(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let mut w = spec.clone();
     validate_wait(&w)?;
     let id = model::string(&w, "id").unwrap_or_default();
-    if model::bool_or(&s, "stopped", false) || model::dig(&s, &["waits", &id]).is_some() {
+    if model::bool_or(s, "stopped", false) || model::dig(s, &["waits", &id]).is_some() {
         return Err(queue_error(
             "queue stopped or wait ID already registered; use a new ID for a new attempt",
         ));
     }
-    let wait_count = model::get(&s, "waits")
+    let wait_count = model::get(s, "waits")
         .and_then(Value::as_object)
         .map(Map::len)
         .unwrap_or(0);
@@ -434,18 +440,16 @@ pub fn add(root: &Path, spec: &J) -> Result<J> {
             "queue reached 1000 waits; finish this batch and start a new queue",
         ));
     }
-    let now = util::now();
     w["registered_at"] = json!(now);
     w["deadline"] = json!(now + model::number(&w, "timeout_seconds").unwrap_or(0.0));
     w["outcome"] = json!("pending");
     w["result"] = Value::Null;
     w["seen"] = json!([]);
     w["closed"] = json!(false);
-    let waits = model::get_mut(&mut s, "waits")
+    let waits = model::get_mut(s, "waits")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| queue_error("queue waits must be a JSON object"))?;
     waits.insert(id, w.clone());
-    save(root, &mut s)?;
     Ok(w)
 }
 
@@ -2446,6 +2450,7 @@ type ProgressHandler = fn(&Path, &mut J, &J, Option<&str>, &ReceiverFactory, f64
 
 const PROGRESS_HANDLERS: &[(&str, ProgressHandler)] = &[
     ("task-add", progress_register),
+    ("task-lineage", progress_lineage),
     ("task-apply", progress_apply),
     ("task-begin", progress_begin),
     ("task-sent", progress_sent),
@@ -2474,6 +2479,17 @@ fn progress_action(
         Some(handler) => handler(root, s, spec, session, factory, now),
         _ => Err(queue_error("unknown task action")),
     }
+}
+
+fn progress_lineage(
+    _root: &Path,
+    s: &mut J,
+    spec: &J,
+    _session: Option<&str>,
+    _factory: &ReceiverFactory,
+    now: f64,
+) -> Result<()> {
+    progress::lineage::action(s, spec, now).map(|_| ())
 }
 
 fn progress_register(

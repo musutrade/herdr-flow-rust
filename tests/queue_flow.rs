@@ -678,3 +678,49 @@ fn add_rejects_non_object_waits_instead_of_panicking() {
     );
     assert!(result.is_err(), "{result:?}");
 }
+
+#[test]
+fn lineage_actions_and_result_ack_persist_in_the_existing_queue() {
+    let h = Harness::new();
+    h.enable();
+    let factory = factory(h.agent.clone());
+    let run =
+        |spec: &J| queue::task_action(&h.queue, "task-lineage", spec, Some(SESSION), &factory);
+    let plan = json!({"kind":"plan","task":"document", "goal":"deliver document",
+        "basis":{"original":["user request"],"changes":[],"specifications":[],"endpoint":"customer location","confirmation":"user request"},
+        "authorization":[{"id":"develop","action":"development","source":"user request"}]});
+    let s = run(&plan).unwrap();
+    let path = h.base.join("document");
+    std::fs::write(&path, "document").unwrap();
+    let id = util::pyjson::sha256_hex(b"document");
+    let s=run(&json!({"kind":"artifact","task":"document","state_version":s["tasks"]["document"]["state_version"],
+        "artifact":{"id":id,"adapter":"file-sha256","location":path}})).unwrap();
+    let s=run(&json!({"kind":"candidate","task":"document","state_version":s["tasks"]["document"]["state_version"],"candidate":id,"reason":"ready"})).unwrap();
+    run(&json!({"kind":"activity","task":"document","state_version":s["tasks"]["document"]["state_version"],
+        "activity":"review-document","role":"acceptance","input":id,"session_epoch":1,
+        "result_wait":{"id":"review-document","epoch":1,"assignment":"review-a1","owner":"review","kind":"signal","reason":"review","condition":"result","timeout_seconds":600}})).unwrap();
+    queue::signal(
+        &h.queue,
+        "review-document",
+        "complete",
+        "verified",
+        Some("evidence"),
+    )
+    .unwrap();
+    let s = h.tick(None);
+    let e = event_for(&s, "review-document");
+    let active = s["active"].as_str().unwrap();
+    assert!(!s["events"][&e]["acknowledged"].as_bool().unwrap());
+    let s = queue::acknowledge(&h.queue, active, SESSION).unwrap();
+    assert!(
+        s["tasks"]["document"]["approved"].is_null(),
+        "ACK is receipt, not approval"
+    );
+    let apply = json!({"task":"review-document","state_version":s["tasks"]["review-document"]["state_version"],"event":e,
+        "acceptance":{"goal":"independently checked evidence"},"next_action":{"kind":"complete"}});
+    let s = queue::task_action(&h.queue, "task-apply", &apply, Some(SESSION), &factory).unwrap();
+    assert_eq!(s["tasks"]["document"]["approved"]["candidate"], id);
+    assert_eq!(queue::load_queue(&h.queue).unwrap(), s);
+    assert!(queue::task_action(&h.queue, "task-apply", &apply, Some(SESSION), &factory).is_err());
+    assert_eq!(queue::load_queue(&h.queue).unwrap(), s);
+}

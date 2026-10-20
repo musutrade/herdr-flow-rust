@@ -4,6 +4,9 @@
 //! actions. Callers persist the returned mutation before doing anything
 //! outside the queue.
 
+pub mod artifact;
+pub mod lineage;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -199,7 +202,9 @@ pub fn reserve_writer(
 pub fn binding(w: &J) -> Result<J> {
     let assignment = text(model::get(w, "assignment"), "assignment", 128)?;
     let candidate = model::string(w, "candidate").unwrap_or_default();
-    if !model::is_full_sha(&candidate) {
+    if model::get(w, "lineage").is_some() {
+        lineage::validate_binding(w)?;
+    } else if !model::is_full_sha(&candidate) {
         return Err(progress_error("progress requires a full candidate SHA"));
     }
     let task = model::get(w, "task")
@@ -208,18 +213,23 @@ pub fn binding(w: &J) -> Result<J> {
     let epoch = model::get(w, "epoch")
         .cloned()
         .ok_or_else(|| progress_error("progress requires an epoch"))?;
-    Ok(json!({
-        "task": task,
-        "epoch": epoch,
-        "assignment": assignment,
-        "candidate": candidate
-    }))
+    let mut result =
+        json!({"task":task, "epoch":epoch, "assignment":assignment, "candidate":candidate});
+    lineage::copy_binding(w, &mut result);
+    Ok(result)
 }
 
 pub fn same(t: &J, b: &J) -> bool {
-    ["task", "epoch", "assignment", "candidate"]
-        .iter()
-        .all(|key| model::get(t, key) == model::get(b, key))
+    [
+        "task",
+        "epoch",
+        "assignment",
+        "candidate",
+        "lineage",
+        "artifact_adapter",
+    ]
+    .iter()
+    .all(|key| model::get(t, key) == model::get(b, key))
 }
 
 pub fn wait_for(s: &J, wait_id: Option<&J>, b: &J) -> Result<J> {
@@ -636,6 +646,16 @@ fn set_task_writer(task_json: &mut J, writer: J) -> Result<()> {
 }
 
 fn finish_registration(s: &mut J, mut registration: Registration, now: f64) -> Result<J> {
+    lineage::copy_binding(&registration.binding, &mut registration.task_json);
+    lineage::validate_registration(s, &registration.task_json)?;
+    registration.task_json["schema_version"] =
+        json!(
+            if model::get(&registration.task_json, "lineage").is_some() {
+                2
+            } else {
+                1
+            }
+        );
     audit(&mut registration.task_json, now, "registered");
     s["tasks"][&registration.task] = registration.task_json.clone();
     Ok(registration.task_json)
@@ -652,11 +672,7 @@ pub fn attach(s: &mut J, event: &mut J, w: &J, now: f64) -> Result<()> {
     event["binding"] = binding(w)?;
     event["applied"] = json!(false);
     let binding = event["binding"].clone();
-    if !same(&t, &binding)
-        || model::string(&t, "wait") != model::string(w, "id")
-        || model::string(&t, "phase").as_deref() == Some("completed")
-        || model::string(&t, "control").as_deref() == Some("cancelled")
-    {
+    if !lineage::current(s, &t) || !attachment_current(&t, &binding, w) {
         event["archived"] = json!("stale assignment/candidate or terminal task");
         event["acknowledged"] = json!(true);
         event["withdrawn"] = json!(true);
@@ -682,6 +698,13 @@ pub fn attach(s: &mut J, event: &mut J, w: &J, now: f64) -> Result<()> {
     Ok(())
 }
 
+fn attachment_current(t: &J, binding: &J, wait: &J) -> bool {
+    same(t, binding)
+        && model::string(t, "wait") == model::string(wait, "id")
+        && task_not_completed(t)
+        && model::string(t, "control").as_deref() != Some("cancelled")
+}
+
 pub fn task(s: &J, name: Option<&J>, version: Option<&J>) -> Result<J> {
     let Some(name) = name.and_then(Value::as_str) else {
         return Err(progress_error(
@@ -703,6 +726,10 @@ pub fn task(s: &J, name: Option<&J>, version: Option<&J>) -> Result<J> {
             "task state version changed; inspect current state before acting",
         ));
     }
+    ensure(
+        lineage::supported_schema(t),
+        "unsupported task schema version",
+    )?;
     Ok(t.clone())
 }
 
@@ -961,6 +988,7 @@ fn dispatch_wait(s: &J, t: &J, a: &J, context: &mut DispatchContext) -> Result<(
 fn dispatch_probe_wait(s: &J, t: &J, a: &J, assignment: &str) -> Result<J> {
     let mut probe = t.clone();
     probe["assignment"] = json!(assignment);
+    lineage::advance_session(&mut probe);
     wait_for(s, model::get(a, "wait"), &probe)
 }
 
@@ -1037,6 +1065,7 @@ fn reserve_dispatch_writer_now(s: &J, t: &mut J, a: &J, context: &DispatchContex
 }
 
 fn record_dispatch_operation(t: &mut J, a: &J, now: f64, context: &DispatchContext) {
+    lineage::advance_session(t);
     t["operations"][&context.opid] = json!({
         "id": context.opid,
         "assignment": context.assignment,
@@ -1222,6 +1251,23 @@ struct ApplyState {
 
 /// Atomically apply a received result and record a concrete successor.
 pub fn apply(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    apply_with_adapter(s, spec, now, &artifact::LocalArtifacts)
+}
+
+pub fn apply_with_adapter(
+    s: &mut J,
+    spec: &J,
+    now: f64,
+    adapter: &dyn artifact::ArtifactAdapter,
+) -> Result<J> {
+    let mut staged = s.clone();
+    let child = apply_inner(&mut staged, spec, now)?;
+    lineage::applied(&mut staged, spec, &child, now, adapter)?;
+    *s = staged;
+    Ok(child)
+}
+
+fn apply_inner(s: &mut J, spec: &J, now: f64) -> Result<J> {
     object(spec, "application spec")
         .and_then(|_| load_apply_state(s, spec, now))
         .and_then(|state| collect_apply_state(spec, state))
@@ -1235,6 +1281,7 @@ fn load_apply_state(s: &J, spec: &J, now: f64) -> Result<ApplyState> {
         model::get(spec, "task"),
         model::get(spec, "state_version"),
     )
+    .and_then(|task| lineage::ensure_current(s, &task).map(|()| task))
     .and_then(|task| ensure_applyable(s, &task).map(|()| task))
     .and_then(|task| load_apply_event(s, spec, task, now))
 }
@@ -1522,6 +1569,7 @@ fn load_begin_operation(task: J, operation: Option<&J>) -> Result<BeginState> {
 }
 
 fn validate_begin(s: &J, state: &BeginState, now: f64) -> Result<()> {
+    lineage::ensure_current(s, &state.task)?;
     ensure(
         begin_state_ok(s, &state.task, &state.operation),
         "operation may already have executed; reconcile instead of resending",
@@ -1648,6 +1696,7 @@ fn accept_load(s: &mut J, spec: &J, session: &str, now: f64) -> Result<(J, Strin
         model::get(spec, "task"),
         model::get(spec, "state_version"),
     )
+    .and_then(|task| lineage::ensure_current(s, &task).map(|()| task))
     .and_then(|task| require_unowned(&task, true).map(|()| task))
     .and_then(|task| ensure_takeover(s, &task, spec, session).map(|()| task))
     .and_then(|task| takeover_evidence(spec).map(|evidence| (task, evidence)))
@@ -1828,6 +1877,7 @@ fn resume_load(s: &mut J, spec: &J) -> Result<(J, J)> {
         model::get(spec, "task"),
         model::get(spec, "state_version"),
     )
+    .and_then(|task| lineage::ensure_current(s, &task).map(|()| task))
     .and_then(|task| require_unowned(&task, true).map(|()| task))
     .and_then(|task| ensure_recovery_state(s, &task).map(|()| task))
     .and_then(|task| resume_wait(s, spec, &task).map(|wait| (task, wait)))
@@ -1972,7 +2022,7 @@ fn stall_task(s: &mut J, queue_id: &str, name: &str, now: f64) -> Result<()> {
     let Some(task) = model::dig(s, &["tasks", name]).cloned() else {
         return Ok(());
     };
-    if !task_running(&task) {
+    if !task_running(&task) || !lineage::actionable(s, &task) {
         return Ok(());
     }
     stall_reason(s, &task, now).map_or(Ok(()), |reason| {
@@ -2064,12 +2114,13 @@ fn ensure_stall_capacity(s: &J) -> Result<()> {
 }
 
 fn insert_stall_event(s: &mut J, event_id: &str, task: &J, now: f64, reason: &str) {
-    let binding = json!({
+    let mut binding = json!({
         "task": task.get("task").cloned().unwrap_or(Value::Null),
         "epoch": task.get("epoch").cloned().unwrap_or(Value::Null),
         "assignment": task.get("assignment").cloned().unwrap_or(Value::Null),
         "candidate": task.get("candidate").cloned().unwrap_or(Value::Null)
     });
+    lineage::copy_binding(task, &mut binding);
     let event = json!({
         "id": event_id,
         "wait": task.get("wait").cloned().unwrap_or(Value::Null),
@@ -2091,7 +2142,7 @@ fn insert_stall_event(s: &mut J, event_id: &str, task: &J, now: f64, reason: &st
 
 pub fn current_event(s: &J, e: &J) -> bool {
     event_task(s, e)
-        .map(|task| event_is_current(task, e))
+        .map(|task| lineage::actionable(s, task) && event_is_current(task, e))
         .unwrap_or(false)
 }
 
@@ -2306,7 +2357,7 @@ struct Diagnosis {
 pub fn diagnose(s: &J, t: &J, now: Option<f64>) -> Result<J> {
     let now = now.unwrap_or_else(crate::util::now);
     let mut diagnosis = build_diagnosis(s, t);
-    let detail = diagnosis_detail(t, now, &diagnosis);
+    let detail = lineage::diagnosis(s, t).unwrap_or_else(|| diagnosis_detail(t, now, &diagnosis));
     diagnosis.result["classification"] = json!(detail.0);
     diagnosis.result["reason"] = json!(detail.1);
     diagnosis.result["next_step"] = json!(detail.2);
