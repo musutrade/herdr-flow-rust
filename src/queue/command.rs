@@ -83,7 +83,7 @@ fn validate_managed_producer(t: &J, w: &J, cwd: &str, session: &str) -> Result<S
 }
 
 fn ensure_producer_matches(w: &J, session: &str) -> Result<()> {
-    if model::string(w, "producer_session").as_deref() != Some(session) {
+    if crate::identity::required_producer(w)?["session"] != session {
         return Err(queue_error(
             "managed command requires its pinned producing session",
         ));
@@ -124,7 +124,9 @@ fn command_state_loaded(
     cwd: &str,
 ) -> Result<(J, Option<J>, Option<String>)> {
     let w = command_wait(&s, wait_id)?;
-    let env_session = std::env::var("CODEX_THREAD_ID").ok();
+    let env_session = crate::identity::producer(&w)?
+        .map(|id| crate::identity::environment(&id))
+        .transpose()?;
     command_producer_checked(root, s, w, wait_id, cwd, env_session)
 }
 
@@ -164,17 +166,7 @@ fn command_producer_checked(
 }
 
 fn ensure_command_producer(w: &J) -> Result<()> {
-    match model::string(w, "producer_session") {
-        Some(producer_session) => ensure_env_producer(&producer_session),
-        _ => Ok(()),
-    }
-}
-
-fn ensure_env_producer(producer_session: &str) -> Result<()> {
-    if std::env::var("CODEX_THREAD_ID").ok().as_deref() != Some(producer_session) {
-        return Err(queue_error("producer session mismatch"));
-    }
-    Ok(())
+    crate::identity::check_environment(w)
 }
 
 fn ensure_no_result(root: &Path, wait_id: &str) -> Result<()> {
@@ -255,7 +247,12 @@ fn claim_spec(t: &J, invocation: &str) -> J {
 }
 
 fn claim_accept_next(s: &mut J, t: &J, session: &str, invocation: &str) -> Result<()> {
-    progress::accept(s, &claim_spec(t, invocation), session, util::now()).map(|_| ())
+    let wait = &s["waits"][t["wait"].as_str().unwrap_or_default()];
+    let identity = crate::identity::required_producer(wait)?;
+    if identity["session"] != session {
+        return Err(queue_error("takeover producer changed"));
+    }
+    progress::accept_identity(s, &claim_spec(t, invocation), &identity, util::now()).map(|_| ())
 }
 
 fn reload_claimed_task(s: &J, t: &J) -> Result<J> {
@@ -286,6 +283,8 @@ fn claim_reserve_writer(s: &mut J, t: &mut J, cwd: &str, session: &str) -> Resul
     let assignment = model::string(t, "assignment").unwrap_or_default();
     let task_name = model::string(t, "task").unwrap_or_default();
     t["writer"] = progress::reserve_writer(s, cwd, &assignment, session, &task_name)?;
+    t["writer"]["producer"] =
+        crate::identity::required_producer(&s["waits"][t["wait"].as_str().unwrap_or_default()])?;
     Ok(())
 }
 
@@ -518,4 +517,25 @@ pub fn run_command(root: &Path, wait_id: &str, argv_spec: &J, cwd: &str) -> Resu
 pub fn run_from_file(root: &Path, wait_id: &str, command_file: &Path, cwd: &str) -> Result<i32> {
     let argv_spec = util::read_json(command_file)?;
     run_command(root, wait_id, &argv_spec, cwd)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn command_claim_checks_takeover_identity_and_records_writer_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = json!({"tasks":{},"waits":{"w":{"producer":{"adapter":"opencode","session":"sesworker"}}}});
+        let mut t = json!({"task":"d","wait":"w","assignment":"a"});
+        assert!(claim_accept_next(&mut s, &t, "other", "evidence").is_err());
+        claim_reserve_writer(&mut s, &mut t, dir.path().to_str().unwrap(), "sesworker").unwrap();
+        assert_eq!(t["writer"]["producer"]["adapter"], "opencode");
+    }
+    #[test]
+    fn managed_commands_require_the_adapter_qualified_session() {
+        let wait = json!({"producer":{"adapter":"opencode","session":"sesworker"}});
+        assert!(ensure_producer_matches(&wait, "sesworker").is_ok());
+        assert!(ensure_producer_matches(&wait, "other").is_err());
+        assert!(ensure_producer_matches(&json!({}), "sesworker").is_err());
+    }
 }

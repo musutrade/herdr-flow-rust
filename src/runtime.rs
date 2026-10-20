@@ -50,7 +50,8 @@ fn readiness_report(
                 "wait": wait_id,
                 "kind": kind,
                 "owner": w.get("owner").cloned().unwrap_or(Value::Null),
-                "session": w.get("producer_session").cloned().unwrap_or(Value::Null),
+                "session": crate::identity::producer(w)?.map(|id|id["session"].clone()),
+                "producer": crate::identity::producer(w)?,
                 "result_path": result_path,
                 "binding": binding_value
             }));

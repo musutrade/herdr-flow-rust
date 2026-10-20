@@ -2,7 +2,7 @@
 use super::*;
 use crate::{progress, queue};
 
-fn current_wait(queue: &J, wait_id: &str) -> Result<J> {
+fn current_wait(queue: &J, wait_id: &str, state: &J) -> Result<J> {
     ensure(
         !model::bool_or(queue, "stopped", false),
         "OpenCode result queue is stopped",
@@ -14,12 +14,24 @@ fn current_wait(queue: &J, wait_id: &str) -> Result<J> {
         wait["kind"] == "signal" && !model::bool_or(&wait, "closed", false),
         "OpenCode result requires an open signal wait",
     )?;
-    ensure(
-        wait["producer_session"].is_null(),
-        "OpenCode result wait cannot use Codex producer_session",
-    )?;
+    verify_producer(&wait, state)?;
     current_task(queue, &wait)?;
     Ok(wait)
+}
+
+fn verify_producer(wait: &J, state: &J) -> Result<()> {
+    if let Some(producer) = crate::identity::producer(wait)? {
+        ensure(
+            producer == json!({"adapter":"opencode","session":state["session"]}),
+            "OpenCode producer identity mismatch",
+        )?;
+    } else {
+        ensure(
+            wait["lineage"].is_null(),
+            "linked activity requires a producer identity",
+        )?;
+    }
+    Ok(())
 }
 
 fn current_task(queue: &J, wait: &J) -> Result<()> {
@@ -27,6 +39,7 @@ fn current_task(queue: &J, wait: &J) -> Result<()> {
     let name = required(wait, "task")?;
     let task = model::dig(queue, &["tasks", &name])
         .ok_or_else(|| FlowError::guard("OpenCode managed task is missing"))?;
+    progress::lineage::ensure_current(queue, task)?;
     ensure(
         progress::same(task, &binding),
         "OpenCode task binding is no longer current",
@@ -57,7 +70,7 @@ pub fn dispatch(root: &Path, spec: &J) -> Result<J> {
 
 fn prepare_dispatch(state: &J, queue_root: &Path, queue: &J, spec: &J) -> Result<(String, J)> {
     let wait_id = required(spec, "wait")?;
-    let wait = current_wait(queue, &wait_id)?;
+    let wait = current_wait(queue, &wait_id, state)?;
     let binding = progress::binding(&wait)?;
     verify_candidate(state, &binding)?;
     let prompt = util::read_text(Path::new(&required(spec, "prompt_file")?))?;
@@ -109,12 +122,22 @@ fn verify_collection(adapter: &SessionAdapter, queue: &J, context: &J) -> Result
         "OpenCode result queue identity changed",
     )?;
     let wait_id = required(context, "wait")?;
-    let wait = current_wait(queue, &wait_id)?;
+    let wait = current_wait(queue, &wait_id, &adapter.state)?;
     ensure(
         progress::binding(&wait)? == context["binding"],
         "OpenCode result assignment/candidate changed",
     )?;
-    verify_candidate(&adapter.state, &context["binding"])?;
+    verify_collection_source(adapter, context)
+}
+fn verify_collection_source(adapter: &SessionAdapter, context: &J) -> Result<()> {
+    if context["binding"]["lineage"]["role"] != "development" {
+        verify_candidate(&adapter.state, &context["binding"])?;
+    }
+    ensure(
+        context["producer_identity"]
+            == json!({"adapter":"opencode","session":adapter.state["session"],"model":adapter.state["model"],"cwd":adapter.state["cwd"]}),
+        "OpenCode result producer binding changed",
+    )?;
     adapter.verify_binding()?;
     Ok(())
 }
@@ -125,10 +148,13 @@ fn publish_result(
     mut journal: J,
     queue_root: &Path,
 ) -> Result<J> {
-    journal["source_fingerprint_after"] = json!(util::fingerprint(Path::new(&required(
-        &adapter.state,
-        "cwd"
-    )?))?);
+    if journal["source_fingerprint_after"].is_null() {
+        journal["source_fingerprint_after"] = json!(util::fingerprint(Path::new(&required(
+            &adapter.state,
+            "cwd"
+        )?))?);
+        capture_output(&adapter.state, &mut journal)?;
+    }
     let wait_id = required(&journal["context"], "wait")?;
     let outcome = result_outcome(&journal)?.to_string();
     journal["outcome"] = json!(outcome);
@@ -141,16 +167,37 @@ fn publish_result(
         "OpenCode {} finished: {outcome}; inspect the bound report before accepting findings",
         adapter.session()
     );
-    queue::signal(
-        queue_root,
-        &wait_id,
-        &outcome,
-        &summary,
-        Some(&evidence.display().to_string()),
-    )?;
+    signal_report(queue_root, adapter, &wait_id, &outcome, &summary, &evidence)?;
     journal["phase"] = json!("signalled");
     save_submission(root, &journal)?;
     Ok(journal)
+}
+
+fn signal_report(
+    queue_root: &Path,
+    adapter: &SessionAdapter,
+    wait_id: &str,
+    outcome: &str,
+    summary: &str,
+    evidence: &Path,
+) -> Result<()> {
+    let wait = queue::load_queue(queue_root)?["waits"][wait_id].clone();
+    if crate::identity::producer(&wait)?.is_some() {
+        queue::signal_native(
+            queue_root,
+            &json!({"adapter":"opencode","session":adapter.state["session"]}),
+            &json!({"wait":wait_id,"outcome":outcome,"summary":summary,"evidence":evidence}),
+        )?;
+    } else {
+        queue::signal(
+            queue_root,
+            wait_id,
+            outcome,
+            summary,
+            Some(&evidence.display().to_string()),
+        )?;
+    }
+    Ok(())
 }
 
 fn result_outcome(journal: &J) -> Result<&str> {
@@ -172,6 +219,11 @@ fn verify_candidate(state: &J, binding: &J) -> Result<()> {
     ensure(
         head == required(binding, "candidate")?,
         "OpenCode workspace HEAD no longer matches the bound candidate",
+    )?;
+    let diff = crate::pr::git(&cwd, &["diff", "HEAD", "--"])?;
+    ensure(
+        diff.is_empty(),
+        "OpenCode bound candidate tracked contents changed",
     )
 }
 
@@ -185,4 +237,22 @@ fn ensure_receiver_ready(root: &Path, queue: &J) -> Result<()> {
         readiness["active_wakeup"] == true,
         "coordinator notification receiver is not ready before OpenCode dispatch",
     )
+}
+
+fn capture_output(state: &J, journal: &mut J) -> Result<()> {
+    let binding = &journal["context"]["binding"];
+    if binding["lineage"]["role"] != "development" {
+        return Ok(());
+    }
+    ensure(
+        binding["artifact_adapter"] == "git",
+        "OpenCode development currently requires git artifacts",
+    )?;
+    let cwd = required(state, "cwd")?;
+    let head = crate::pr::git(Path::new(&cwd), &["rev-parse", "HEAD"])?;
+    let output = json!({"adapter":"git","id":head,"location":cwd,"input":binding["candidate"]});
+    use crate::progress::artifact::ArtifactAdapter;
+    crate::progress::artifact::LocalArtifacts.verify(&output)?;
+    journal["output"] = output;
+    Ok(())
 }

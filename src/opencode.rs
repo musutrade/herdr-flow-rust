@@ -21,7 +21,7 @@ use crate::model::{self, J};
 use crate::util;
 use crate::util::process::command;
 
-mod http;
+pub(crate) mod http;
 pub mod session;
 
 /// Human-readable adapter identity from the original capability baseline.

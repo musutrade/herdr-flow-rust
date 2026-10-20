@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 fn usage() {
     println!(
-        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode native OpenCode sessions and monitoring diagnostics\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
+        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode native OpenCode sessions and monitoring diagnostics\n  task-runtime task-owned native sessions and collection\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -29,12 +29,14 @@ fn dispatch(command: &str, rest: &[String]) -> i32 {
         "opencode" => herdr_flow::opencode::cli(rest),
         "crap" | "check-crap" => herdr_flow::crap::cli(rest),
         "lint-policy" => herdr_flow::lint_policy::cli(rest),
-        other => fallback(other),
+        other => fallback(other, rest),
     }
 }
 
-fn fallback(command: &str) -> i32 {
+fn fallback(command: &str, rest: &[String]) -> i32 {
     match command {
+        "task-runtime-broker" => broker(rest),
+        "task-runtime" => herdr_flow::task_runtime::cli::cli(rest),
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -48,5 +50,33 @@ fn fallback(command: &str) -> i32 {
             usage();
             2
         }
+    }
+}
+
+fn broker(args: &[String]) -> i32 {
+    if args.len() != 2 || args[0] != "--state-dir" {
+        return 2;
+    }
+    match herdr_flow::task_runtime::broker::serve(std::path::Path::new(&args[1])) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error}");
+            2
+        }
+    }
+}
+
+#[cfg(test)]
+mod broker_tests {
+    use super::*;
+    #[test]
+    fn internal_broker_requires_its_owned_runtime() {
+        assert_eq!(broker(&[]), 2);
+        assert_eq!(broker(&["--wrong".into(), "x".into()]), 2);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            broker(&["--state-dir".into(), dir.path().display().to_string()]),
+            2
+        );
     }
 }

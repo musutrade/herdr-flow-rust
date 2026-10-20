@@ -10,6 +10,7 @@
 mod boundary;
 mod cleanup;
 mod env;
+pub(crate) use env::confine_renames_to;
 mod registry;
 
 pub use boundary::{

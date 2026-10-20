@@ -99,10 +99,10 @@ pub(super) fn required(state: &J, key: &str) -> Result<String> {
 
 impl Api for HttpApi {
     fn get(&self, path: &str) -> Result<J> {
-        let mut request = self
-            .agent
-            .get(format!("{}{path}", self.endpoint))
-            .query("directory", &self.cwd);
+        let mut request = self.agent.get(format!("{}{path}", self.endpoint));
+        if !path.starts_with("/global/") {
+            request = request.query("directory", &self.cwd);
+        }
         if let Some(auth) = &self.authorization {
             request = request.header("Authorization", auth);
         }

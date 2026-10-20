@@ -11,6 +11,7 @@ pub mod crap;
 pub mod error;
 pub mod guard;
 pub mod herdr;
+pub mod identity;
 pub mod lint_policy;
 pub mod logging;
 pub mod metrics;
@@ -21,6 +22,7 @@ pub mod progress;
 pub mod queue;
 pub mod runtime;
 pub mod task_env;
+pub mod task_runtime;
 pub mod util;
 pub mod watch_service;
 

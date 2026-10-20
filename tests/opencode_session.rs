@@ -549,3 +549,165 @@ fn cli_registration_status_watch_contention_and_errors() {
     }
     assert!(cli(&root, &["status", "--help"]).status.success());
 }
+
+#[test]
+fn pinned_opencode_producer_supports_initial_writer_and_collection() {
+    let f = Fixture::new();
+    let (q, _g, _q) = managed_queue(&f);
+    let mut state = queue::load_queue(&q).unwrap();
+    state["waits"]["review"]["producer"] = json!({"adapter":"opencode","session":"sesfixture"});
+    state["waits"]["review"]["task"] = json!("writer");
+    progress::register(
+        &mut state,
+        &json!({"task":"writer","wait":"review","goal":"implement",
+        "workspace":f.cwd,"writes":true,"execution_evidence":"initial isolated checkout",
+        "acceptance":[{"id":"done","description":"implemented"}],
+        "authorization":[{"id":"dev","action":"development","source":"user"}]}),
+        util::now(),
+    )
+    .unwrap();
+    queue::save(&q, &mut state).unwrap();
+    let prompt = f.root.join("prompt.txt");
+    fs::write(&prompt, "Implement the requirement").unwrap();
+    session::dispatch(
+        &f.root,
+        &json!({"queue_dir":q,"wait":"review","prompt_file":prompt}),
+    )
+    .unwrap();
+    f.finish(None, "stop");
+    assert_eq!(session::collect(&f.root).unwrap()["phase"], "signalled");
+    assert_eq!(
+        state["tasks"]["writer"]["writer"]["producer"]["adapter"],
+        "opencode"
+    );
+}
+
+fn linked_wait(f: &Fixture, q: &Path, role: &str) {
+    let mut state = queue::load_queue(q).unwrap();
+    progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"implement",
+        "basis":{"original":["requirement"],"changes":[],"specifications":[],"endpoint":"deliver","confirmation":"user"},
+        "authorization":[{"id":"dev","action":"development","source":"user"}]}),1.0).unwrap();
+    let head = git(&f.cwd, &["rev-parse", "HEAD"]);
+    for mut spec in [
+        json!({"kind":"artifact","artifact":{"adapter":"git","id":head,"location":f.cwd}}),
+        json!({"kind":"candidate","candidate":head,"reason":"review"}),
+        json!({"kind":"activity","activity":"work","role":role,"input":head,"session_epoch":1,
+        "result_wait":{"id":"work","kind":"signal","epoch":1,"assignment":"work-a1","owner":"worker","reason":"work","condition":"report","timeout_seconds":600,"producer":{"adapter":"opencode","session":"sesfixture"}}}),
+    ] {
+        spec["task"] = json!("project");
+        spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+        progress::lineage::action(&mut state, &spec, 2.0).unwrap();
+    }
+    queue::save(q, &mut state).unwrap();
+}
+
+#[test]
+fn development_commit_is_an_output_but_acceptance_head_drift_is_rejected() {
+    for role in ["development", "acceptance"] {
+        let f = Fixture::new();
+        let (q, _g, _q) = managed_queue(&f);
+        linked_wait(&f, &q, role);
+        let input = git(&f.cwd, &["rev-parse", "HEAD"]);
+        let prompt = f.root.join("prompt.txt");
+        fs::write(&prompt, "perform assigned activity").unwrap();
+        session::dispatch(
+            &f.root,
+            &json!({"queue_dir":q,"wait":"work","prompt_file":prompt}),
+        )
+        .unwrap();
+        fs::write(f.cwd.join("source"), "new output").unwrap();
+        git(&f.cwd, &["add", "source"]);
+        git(&f.cwd, &["commit", "-qm", "output"]);
+        let output = git(&f.cwd, &["rev-parse", "HEAD"]);
+        f.finish(None, "stop");
+        if role == "development" {
+            let result = session::collect(&f.root).unwrap();
+            assert_eq!(result["output"]["id"], output);
+            assert_eq!(result["output"]["input"], input);
+            git(&f.cwd, &["commit", "--allow-empty", "-qm", "later commit"]);
+            assert_eq!(
+                session::collect(&f.root).unwrap()["output"],
+                result["output"]
+            );
+        } else {
+            assert!(session::collect(&f.root).is_err());
+            assert!(!q.join("results/work.json").exists());
+        }
+    }
+}
+
+#[test]
+fn wrong_adapter_or_session_cannot_dispatch_the_pinned_activity() {
+    for producer in [
+        json!({"adapter":"codex","session":"sesfixture"}),
+        json!({"adapter":"opencode","session":"sesother"}),
+    ] {
+        let f = Fixture::new();
+        let (q, _g, _q) = managed_queue(&f);
+        let mut state = queue::load_queue(&q).unwrap();
+        state["waits"]["review"]["producer"] = producer;
+        queue::save(&q, &mut state).unwrap();
+        let prompt = f.root.join("prompt.txt");
+        fs::write(&prompt, "review").unwrap();
+        assert!(session::dispatch(
+            &f.root,
+            &json!({"queue_dir":q,"wait":"review","prompt_file":prompt})
+        )
+        .is_err());
+        assert_eq!(f.posts(), 0);
+    }
+}
+
+#[test]
+fn signal_cli_uses_the_pinned_adapter_environment() {
+    let f = Fixture::new();
+    let (q, _g, _q) = managed_queue(&f);
+    let mut state = queue::load_queue(&q).unwrap();
+    state["waits"]["review"]["producer"] = json!({"adapter":"opencode","session":"sesfixture"});
+    queue::save(&q, &mut state).unwrap();
+    let args = [
+        "queue",
+        "signal",
+        "--state-dir",
+        q.to_str().unwrap(),
+        "--wait",
+        "review",
+        "--outcome",
+        "complete",
+        "--summary",
+        "native producer report",
+    ];
+    let wrong = Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args(args)
+        .env("CODEX_THREAD_ID", "sesfixture")
+        .env_remove("OPENCODE_SESSION_ID")
+        .output()
+        .unwrap();
+    assert!(!wrong.status.success());
+    let right = Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args(args)
+        .env("OPENCODE_SESSION_ID", "sesfixture")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .unwrap();
+    assert!(
+        right.status.success(),
+        "{}",
+        String::from_utf8_lossy(&right.stderr)
+    );
+}
+
+#[test]
+fn a_terminal_journal_cannot_be_reused_after_changing_native_model() {
+    let f = Fixture::new();
+    f.adapter().submit("one task", None, 30.0).unwrap();
+    f.finish(None, "stop");
+    assert_eq!(
+        f.adapter().reconcile().unwrap().unwrap()["phase"],
+        "complete"
+    );
+    let mut state = f.state.clone();
+    state["model"]["id"] = json!("other-model");
+    f.remote.lock().unwrap().session["model"]["id"] = json!("other-model");
+    assert!(SessionAdapter::new(&state).unwrap().reconcile().is_err());
+}

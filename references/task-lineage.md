@@ -193,3 +193,7 @@ are removed by the final lifecycle in #37. This change does not claim real nativ
 Agent handoff or customer delivery/cleanup acceptance; its tests cover queue
 persistence, association, ACK, stale-result rejection, resource exclusion and
 non-replayed operation recovery.
+
+Native producer identities, fresh task-owned sessions, development output collection
+and disposal are specified in [task-runtime.md](task-runtime.md). Linked native
+waits use `producer: {adapter, session}`; legacy `producer_session` is Codex-only.

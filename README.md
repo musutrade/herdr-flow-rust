@@ -205,3 +205,6 @@ src/
 tests/                     集成测试
 references/                行为契约与操作文档
 ```
+
+Task-owned native Codex / OpenCode sessions, adapter-qualified producer identities
+and development output collection: [runtime contract](references/task-runtime.md).
