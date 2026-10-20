@@ -386,11 +386,13 @@ fn gate_query_and_quiescent_accept_valid_receipts() {
     let verifier = tmp.path().join("verifier");
     common::create_dir_all(&verifier).unwrap();
     let receipt_verifier = verifier.join("verify-receipt");
+    // Execute the stable interpreter; it reads the generated fixture without
+    // requiring exclusive executable access to the script's inode.
     let lane = json!({
         "repo": "o/r",
         "host": "github.com",
         "base_ref": "main",
-        "gate": {"verifier": [receipt_verifier.display().to_string()], "policy": "policy-1", "check_name": "trusted-gate", "app_id": 123}
+        "gate": {"verifier": ["/bin/sh", receipt_verifier.display().to_string()], "policy": "policy-1", "check_name": "trusted-gate", "app_id": 123}
     });
     let batch = json!({
         "base": "base-1",
@@ -413,15 +415,31 @@ fn gate_query_and_quiescent_accept_valid_receipts() {
         "evidence": "evidence-1"
     });
     verifier_script(&verifier, "verify-receipt", &receipt);
+    // An open writer makes Linux reject direct exec deterministically, as can
+    // happen transiently for freshly generated scripts under parallel spawning.
+    let receipt_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&receipt_verifier)
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        Command::new(&receipt_verifier)
+            .output()
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ETXTBSY)
+    );
     let verified = batch::gate::query(&lane, &batch, Some(&json!("reference-1")), 100.0).unwrap();
     assert_eq!(
         model::string(&verified, "decision").as_deref(),
         Some("allow")
     );
+    drop(receipt_writer);
 
     let inspection_verifier = verifier.join("verify-inspection");
     let mut inspection_lane = lane.clone();
-    inspection_lane["gate"]["verifier"] = json!([inspection_verifier.display().to_string()]);
+    inspection_lane["gate"]["verifier"] =
+        json!(["/bin/sh", inspection_verifier.display().to_string()]);
     let inspection_binding = batch::gate::binding(&inspection_lane, &batch).unwrap();
     let inspection = json!({
         "version": 1,
@@ -432,11 +450,16 @@ fn gate_query_and_quiescent_accept_valid_receipts() {
         "evidence": "inspection-1"
     });
     verifier_script(&verifier, "verify-inspection", &inspection);
+    let inspection_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&inspection_verifier)
+        .unwrap();
     let inspected = batch::gate::quiescent(&inspection_lane, &batch).unwrap();
     assert_eq!(
         model::string(&inspected, "status").as_deref(),
         Some("completed")
     );
+    drop(inspection_writer);
 }
 
 fn guard_case(active: J) -> (J, J) {
