@@ -197,6 +197,8 @@ impl TaskEnvironment {
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
         command.env(MARKER_ENV, &self.instance_id);
+        // Keep temporary files inside the disposable boundary as well.
+        command.env("TMPDIR", &self.temp_root);
         let roots = vec![self.workspace_root.clone(), self.temp_root.clone()];
         // SAFETY: pre_exec runs in the child after fork and before exec; it
         // only performs syscalls and owns no Rust allocations that outlive it.
@@ -489,9 +491,18 @@ pub fn direct_children_of(pid: i32) -> Vec<ProcessRecord> {
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
-const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
 const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
 const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 
 #[repr(C)]
 struct LandlockRulesetAttr {
@@ -504,13 +515,14 @@ struct LandlockPathBeneathAttr {
     parent_fd: i32,
 }
 
-/// Kernel-enforced protection of the environment's directory entries.
+/// Kernel-enforced protection of the environment's state and directory entries.
 ///
-/// The child may create, rename and remove files *inside* its disposable roots,
-/// but it cannot remove or rename the roots themselves (that would require
-/// `REMOVE_DIR`/`REFER` on the parent, which is not granted). This makes the
-/// parent directory entry something the task cannot rewrite, so the final
-/// cleanup unlink operates on an entry the task cannot substitute.
+/// The child may write, create, rename and remove files *inside* its disposable
+/// roots, but every other location is read-only for it: it cannot rewrite the
+/// environment document (which would let it retarget cleanup at external
+/// assets), cannot truncate state files, and cannot rename or remove the roots
+/// themselves. This makes both the cleanup metadata and the parent directory
+/// entry something the task cannot rewrite.
 fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
     // SAFETY: prctl takes scalar arguments only.
     unsafe {
@@ -531,9 +543,21 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
     if abi < 1 {
         return Err(std::io::Error::last_os_error());
     }
-    let mut handled = LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
+    let mut handled = LANDLOCK_ACCESS_FS_WRITE_FILE
+        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+        | LANDLOCK_ACCESS_FS_MAKE_CHAR
+        | LANDLOCK_ACCESS_FS_MAKE_DIR
+        | LANDLOCK_ACCESS_FS_MAKE_REG
+        | LANDLOCK_ACCESS_FS_MAKE_SOCK
+        | LANDLOCK_ACCESS_FS_MAKE_FIFO
+        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+        | LANDLOCK_ACCESS_FS_MAKE_SYM;
     if abi >= 2 {
         handled |= LANDLOCK_ACCESS_FS_REFER;
+    }
+    if abi >= 3 {
+        handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
     }
 
     let attr = LandlockRulesetAttr {

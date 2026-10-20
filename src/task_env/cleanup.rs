@@ -686,6 +686,38 @@ fn cleanup_one_root(state: &mut CleanupState, root: &PendingDirectory) -> Result
         return Ok(());
     }
 
+    // The entry may have been swapped while the tree was being emptied. Never
+    // rename anything that is not our inode: a replacement stays exactly where
+    // the owner put it.
+    match kind_at(&parent, root_name)? {
+        None => {
+            return Err(FlowError::progress(format!(
+                "{} vanished before quarantine; slot retained",
+                root.path.display()
+            )))
+        }
+        Some(EntryKind::Directory) => {
+            let Some(check) = open_child_dir(&parent, root_name)? else {
+                return Err(FlowError::progress(format!(
+                    "{} changed before quarantine",
+                    root.path.display()
+                )));
+            };
+            if RootIdentity::of(&check.metadata()?) != expected {
+                return Err(FlowError::progress(format!(
+                    "{} was replaced before quarantine; replacement left untouched and slot retained",
+                    root.path.display()
+                )));
+            }
+        }
+        Some(_) => {
+            return Err(FlowError::progress(format!(
+                "{} was replaced by a non-directory before quarantine; slot retained",
+                root.path.display()
+            )))
+        }
+    }
+
     // Persist the quarantine name before renaming.
     let quarantine = Quarantine {
         root: root.path.clone(),

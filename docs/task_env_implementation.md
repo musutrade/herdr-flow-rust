@@ -26,11 +26,13 @@ Three facts make deletion safe:
    re-checks it with `fstatat(AT_SYMLINK_NOFOLLOW)`; a root swapped for a
    symlink or a different directory is refused, and the slot stays occupied.
 3. **Kernel-enforced task boundary.** `TaskEnvironment::command` applies a
-   Landlock ruleset in the child: the task may remove, rename and link files
-   *inside* its disposable roots, but `REMOVE_DIR`, `REMOVE_FILE` and `REFER`
-   on the roots' parent are denied. The task therefore cannot rewrite the
-   directory entries that cleanup operates on. If Landlock is unavailable the
-   spawn fails closed.
+   Landlock ruleset in the child and sets `TMPDIR` to the disposable temp root.
+   The task may write, create, rename, link and remove files *inside* its
+   disposable roots, but every write-ish operation elsewhere is denied
+   (`WRITE_FILE`, `TRUNCATE`, `MAKE_*`, `REMOVE_*`, `REFER`). The task therefore
+   cannot rewrite its environment document to retarget cleanup at external
+   assets, cannot truncate state files, and cannot rename or remove the roots
+   themselves. If Landlock is unavailable the spawn fails closed.
 4. **Process marker.** Every process the environment starts carries
    `HERDR_TASK_ENV_INSTANCE=<instance_id>` in its environment. The marker is
    inherited across `fork`/`exec`, survives `setsid()`, and stays readable at
@@ -154,7 +156,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (41 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (42 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -167,8 +169,9 @@ from a `destroying` state, retry after the root is already gone, and idempotent
 destroy, descendants spawned after registration, unrelated supervisor children,
 cross-environment orphan isolation, mismatched process identity, multi-root
 claim merging, renamed-root slot retention, plan-only recovery, every
-quarantine crash phase, quarantine replacement preservation, and a task
-process being denied rename/remove access outside its roots.
+quarantine crash phase, quarantine replacement preservation, a task process
+being denied rename/remove/write access outside its roots, and a task being
+denied rewriting its own environment document.
 
 ## Boundaries
 
@@ -177,7 +180,12 @@ that deliberately clears its environment and detaches; the documented contract
 is that task processes inherit it. Cleanup rescans until no marked process
 remains, so children forked between a scan and the freeze are caught in the
 next pass. Landlock provides the kernel-enforced guarantee for the filesystem
-entries that cleanup itself touches.
+entries that cleanup itself touches and for the state documents that decide
+what cleanup targets. A same-UID process outside the task boundary (for example
+the environment owner or a test harness) can still race the final `unlinkat`;
+POSIX offers no unlink-by-descriptor for directories (`AT_EMPTY_PATH` returns
+`EINVAL`), so the protocol narrows that window to one syscall and retains the
+slot on any mismatch instead of reporting a false success.
 
 ```bash
 cargo test --test task_env_tests

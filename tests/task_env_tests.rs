@@ -413,7 +413,7 @@ fn destroying_a_stale_handle_cannot_touch_a_new_instance() {
 fn destroy_terminates_the_whole_registered_process_group() {
     let harness = Harness::new();
     let mut env = harness.create("descendants");
-    let pidfile = harness.path().join("child.pid");
+    let pidfile = env.temp_root.join("child.pid");
 
     // The parent stays alive just long enough to be registered, then exits and
     // leaves a background child behind in the same process group.
@@ -440,7 +440,7 @@ fn destroy_terminates_the_whole_registered_process_group() {
 fn sigterm_handler_cannot_spawn_a_survivor() {
     let harness = Harness::new();
     let mut env = harness.create("sigterm-child");
-    let pidfile = harness.path().join("trap-child.pid");
+    let pidfile = env.temp_root.join("trap-child.pid");
 
     let mut parent = spawn_detached(
         &env,
@@ -473,7 +473,7 @@ fn sigterm_handler_cannot_spawn_a_survivor() {
 fn descendant_that_left_the_group_is_killed_by_the_marker() {
     let harness = Harness::new();
     let mut env = harness.create("setsid-orphan");
-    let pidfile = harness.path().join("setsid.pid");
+    let pidfile = env.temp_root.join("setsid.pid");
 
     // The parent starts a child in a new session, then exits. The marker is
     // inherited by the child and survives the orphaned state.
@@ -499,8 +499,8 @@ fn descendant_that_left_the_group_is_killed_by_the_marker() {
 fn descendant_spawned_after_registration_is_still_marked() {
     let harness = Harness::new();
     let mut env = harness.create("late-orphan");
-    let pidfile = harness.path().join("late.pid");
-    let go = harness.path().join("late.pid.go");
+    let pidfile = env.temp_root.join("late.pid");
+    let go = env.temp_root.join("late.pid.go");
 
     // Register first, then let the parent spawn a detached child and exit.
     let mut parent = spawn_detached(
@@ -568,7 +568,7 @@ fn destroying_one_environment_leaves_anothers_orphan_alone() {
     let harness = Harness::new();
     let first = harness.create("first-env");
     let mut second = harness.create("second-env");
-    let pidfile = harness.path().join("second-orphan.pid");
+    let pidfile = second.temp_root.join("second-orphan.pid");
 
     let mut parent = spawn_detached(
         &second,
@@ -590,7 +590,7 @@ fn destroying_one_environment_leaves_anothers_orphan_alone() {
 fn another_environments_registration_cannot_hide_an_orphan() {
     let harness = Harness::new();
     let mut first = harness.create("hidden-orphan");
-    let pidfile = harness.path().join("hidden.pid");
+    let pidfile = first.temp_root.join("hidden.pid");
     let mut parent = spawn_detached(
         &first,
         "setsid sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
@@ -994,6 +994,29 @@ fn replacement_at_quarantine_is_preserved_and_keeps_the_slot() {
 }
 
 #[test]
+fn replacement_before_quarantine_is_left_exactly_where_it_was() {
+    let harness = Harness::new();
+    let env = harness.create("pre-quarantine-swap");
+    let victim = harness.path().join("victim");
+    fs::create_dir(&victim).unwrap();
+    fs::write(victim.join("asset"), "user asset").unwrap();
+    let original = harness.path().join("original-root");
+    fs::rename(&env.workspace_root, &original).unwrap();
+    fs::rename(&victim, &env.workspace_root).unwrap();
+    let workspace = env.workspace_root.clone();
+    drop(env);
+
+    let restored = restore_environment("pre-quarantine-swap").unwrap();
+    assert!(destroy_environment(&restored).is_err());
+    assert!(
+        workspace.join("asset").exists(),
+        "replacement was moved or deleted"
+    );
+    assert!(original.exists());
+    assert!(is_registered("pre-quarantine-swap").unwrap());
+}
+
+#[test]
 fn task_process_cannot_rewrite_entries_outside_its_roots() {
     let harness = Harness::new();
     let env = harness.create("landlock");
@@ -1023,6 +1046,21 @@ fn task_process_cannot_rewrite_entries_outside_its_roots() {
     assert!(!rename.success(), "task renamed its own root");
     assert!(outside.exists());
     assert!(!moved.exists());
+
+    // Retargeting cleanup through the environment document must fail too.
+    let document = env.state_file().to_path_buf();
+    let rewrite = env
+        .command("sh")
+        .arg("-c")
+        .arg("printf '{}' > \"$1\"")
+        .arg("herdr-test")
+        .arg(&document)
+        .status()
+        .unwrap();
+    assert!(!rewrite.success(), "task rewrote its environment document");
+    let recorded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&document).unwrap()).unwrap();
+    assert_eq!(recorded["instance_id"], serde_json::json!(env.instance_id));
 
     destroy_environment(&env).unwrap();
 }
