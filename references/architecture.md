@@ -52,6 +52,13 @@ decides application and the next owner. See [waiting](waiting.md),
 [task progress](task-progress.md), [CI monitoring](ci-monitor.md), and the
 [gate client](gate-client.md).
 
+`guard.rs` preserves the public entry points and shared state/lock helpers.
+Private modules under `guard/` separate transcript cursors, review journals,
+handoff validation, advisor evidence, checkpointing, context observation,
+rotation/reconciliation, watcher failures, registration, diagnosis and CLI.
+Cross-module helpers have parent-only visibility; persisted fields, lock order
+and ambiguous-operation recovery retain their existing contracts.
+
 ## 2. Context rotation and recovery
 
 ```mermaid

@@ -188,7 +188,8 @@ src/
   queue/                   等待、任务、投递、命令包装与 CLI
   progress.rs              任务状态机与诊断
   runtime.rs               接收者能力检查
-  guard.rs                 上下文守护与换班状态机
+  guard.rs                 守护公共入口、共享状态与锁
+  guard/                   transcript、review、checkpoint、换班、观察与 CLI
   herdr.rs                 Herdr / app-server / TUI 运行时绑定
   codex/                   JSON-RPC、TUI 代理、交接顾问
   ci/                      只读 Actions/Checks 观察与策略
