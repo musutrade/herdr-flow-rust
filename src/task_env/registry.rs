@@ -332,17 +332,76 @@ pub fn unregister_environment(task_id: &str, instance_id: &str) -> Result<()> {
     }
 }
 
-/// Whether another live environment (different instance) claims `path`.
-pub fn root_claimed_by_other(path: &Path, instance_id: &str) -> Result<bool> {
-    let registry = load_registry()?;
-    let mut claimed = false;
-    for entry in registry.entries() {
-        if entry.instance_id == instance_id {
+/// Atomically claim an empty, unclaimed root while recovering an intent that
+/// never reached the registry.
+///
+/// The check and the insert happen under the registry lock, so a concurrent
+/// task cannot claim the same root between them.
+pub fn claim_root_exclusively(task_id: &str, instance_id: &str, root: &Path) -> Result<bool> {
+    validate_task_id(task_id)?;
+    let _lock = lock_registry()?;
+    let mut registry = load_registry()?;
+    for other in registry.entries() {
+        if other.instance_id == instance_id {
             continue;
         }
-        if util::overlap(path, &entry.workspace_root) || util::overlap(path, &entry.temp_root) {
-            claimed = true;
-            break;
+        if util::overlap(root, &other.workspace_root) || util::overlap(root, &other.temp_root) {
+            return Ok(false);
+        }
+    }
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    if std::fs::read_dir(root)?.next().is_some() {
+        return Ok(false);
+    }
+
+    let state_file = environment_state_path(task_id)?;
+    registry.insert(RegistryEntry {
+        task_id: task_id.to_string(),
+        instance_id: instance_id.to_string(),
+        workspace_root: root.to_path_buf(),
+        temp_root: root.to_path_buf(),
+        state_file,
+        registered_at: util::now(),
+    });
+    save_registry(&registry)?;
+    Ok(true)
+}
+
+/// Process identities claimed by environments other than `instance_id`.
+pub fn claimed_processes(exclude_instance: &str) -> Result<Vec<super::env::ProcessRecord>> {
+    let mut claimed = Vec::new();
+    let envs = env_dir()?;
+    let Ok(entries) = std::fs::read_dir(envs) else {
+        return Ok(claimed);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<super::env::TaskEnvironment>(&text) else {
+            continue;
+        };
+        if doc.instance_id == exclude_instance {
+            continue;
+        }
+        for process in &doc.child_processes {
+            claimed.push(super::env::ProcessRecord {
+                pid: process.pid,
+                start_time: process.start_time,
+            });
+            claimed.extend(process.descendants.iter().cloned());
+            claimed.extend(process.direct_children.iter().cloned());
         }
     }
     Ok(claimed)
@@ -363,6 +422,15 @@ pub fn list_registered() -> Result<Vec<String>> {
 /// Tasks whose document shows an interrupted create or destroy.
 pub fn interrupted_tasks() -> Result<Vec<String>> {
     let mut tasks = Vec::new();
+    let mut plans = Vec::new();
+    for entry in std::fs::read_dir(plan_dir()?)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                plans.push(task_id.to_string());
+            }
+        }
+    }
     let envs = env_dir()?;
     for entry in std::fs::read_dir(envs)?.flatten() {
         let path = entry.path();
@@ -383,6 +451,11 @@ pub fn interrupted_tasks() -> Result<Vec<String>> {
             if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
                 tasks.push(task_id.to_string());
             }
+        }
+    }
+    for task_id in plans {
+        if !tasks.contains(&task_id) {
+            tasks.push(task_id);
         }
     }
     tasks.sort();

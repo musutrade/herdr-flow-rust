@@ -85,7 +85,13 @@ pub struct RegisteredProcess {
     /// Descendants visible at registration. Captured while the process is
     /// alive so a later orphan that leaves the process group or session can
     /// still be attributed to this environment.
+    #[serde(default)]
     pub descendants: Vec<ProcessRecord>,
+    /// Direct children of the supervisor at registration. Any *new* direct
+    /// child later is an orphan reparented to the supervisor (which registers
+    /// itself as a child subreaper) and belongs to this environment.
+    #[serde(default)]
+    pub direct_children: Vec<ProcessRecord>,
 }
 
 /// A process identity that survives pid reuse only while the start time
@@ -228,6 +234,7 @@ impl TaskEnvironment {
             pgid,
             start_time: process_start_time(pid),
             descendants: descendants_snapshot(pid),
+            direct_children: direct_children_of(std::process::id() as i32),
         };
         if !self.child_processes.contains(&entry) {
             self.child_processes.push(entry);
@@ -400,6 +407,46 @@ pub fn process_record_is_alive(record: &ProcessRecord) -> bool {
     }
 }
 
+/// Current direct children of `pid`.
+pub fn direct_children_of(pid: i32) -> Vec<ProcessRecord> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(child) = name.parse::<i32>() else {
+            continue;
+        };
+        if parent_of(child) == Some(pid) {
+            children.push(ProcessRecord {
+                pid: child,
+                start_time: process_start_time(child),
+            });
+        }
+    }
+    children.sort_by_key(|record| record.pid);
+    children
+}
+
+/// Make this process the reaper for orphaned task descendants.
+///
+/// A process that calls `setsid()` and is later orphaned would otherwise be
+/// reparented to init and become untraceable. As a child subreaper, the
+/// supervisor receives it instead, where cleanup can find and kill it.
+pub fn ensure_subreaper() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: prctl takes scalar arguments only.
+        unsafe {
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+        }
+    });
+}
+
 /// All transitive children of `pid` that are currently visible.
 pub fn descendants_snapshot(pid: i32) -> Vec<ProcessRecord> {
     let mut parents = std::collections::BTreeMap::new();
@@ -481,6 +528,7 @@ pub fn create(
     temp_root: &Path,
 ) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
+    ensure_subreaper();
 
     let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
         FlowError::progress(format!(
@@ -630,6 +678,14 @@ pub fn recover_interrupted(task_id: &str) -> Result<bool> {
     registry::validate_task_id(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
     if !state_file.exists() {
+        // A plan can outlive its document when unlink of the document failed.
+        if registry::cleanup_state_path(task_id)
+            .map(|path| path.exists())
+            .unwrap_or(false)
+        {
+            super::cleanup::cleanup_failed_environment(task_id)?;
+            return Ok(true);
+        }
         return Ok(false);
     }
     let env = restore(task_id)?;

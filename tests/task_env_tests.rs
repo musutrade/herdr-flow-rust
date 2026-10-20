@@ -118,8 +118,15 @@ fn wait_for_pid_file(path: &Path) -> i32 {
 }
 
 fn alive(pid: i32) -> bool {
-    // SAFETY: kill(pid, 0) only probes a positive pid.
-    unsafe { libc::kill(pid, 0) == 0 }
+    // A zombie has already released its resources; it only waits to be reaped.
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|state| state.chars().next());
+    !matches!(state, None | Some('Z'))
 }
 
 #[test]
@@ -486,6 +493,58 @@ fn descendant_that_left_the_group_is_killed_from_the_registration_snapshot() {
         unsafe { libc::kill(descendant, libc::SIGKILL) };
     }
     assert!(!still_alive, "setsid descendant survived destroy");
+}
+
+#[test]
+fn descendant_spawned_after_registration_is_reaped_as_an_adopted_orphan() {
+    let harness = Harness::new();
+    let mut env = harness.create("late-orphan");
+    let pidfile = harness.path().join("late.pid");
+    let go = harness.path().join("late.pid.go");
+
+    // Register first, then let the parent spawn a detached child and exit.
+    let mut parent = spawn_detached(
+        "while [ ! -f \"$1.go\" ]; do sleep 0.01; done; setsid sleep 60 & echo $! > \"$1\"; exit 0",
+        &pidfile,
+    );
+    env.register_process(parent.id() as i32).unwrap();
+    fs::write(&go, "go").unwrap();
+    let descendant = wait_for_pid_file(&pidfile);
+    let _ = parent.wait();
+
+    destroy_environment(&env).unwrap();
+    let still_alive = alive(descendant);
+    if still_alive {
+        // SAFETY: best-effort cleanup of the isolated descendant we spawned.
+        unsafe { libc::kill(descendant, libc::SIGKILL) };
+    }
+    assert!(
+        !still_alive,
+        "descendant spawned after registration survived destroy"
+    );
+}
+
+#[test]
+fn plan_only_recovery_is_discovered_and_completed() {
+    let harness = Harness::new();
+    let env = harness.create("plan-only");
+    fs::remove_dir_all(&env.workspace_root).unwrap();
+    fs::write(&env.workspace_root, "force failure").unwrap();
+    assert!(destroy_environment(&env).is_err());
+    assert!(cleanup_state_path("plan-only").unwrap().exists());
+
+    // Simulate a crash after the document was removed but before the plan was.
+    let workspace = env.workspace_root.clone();
+    fs::remove_file(env.state_file()).unwrap();
+    drop(env);
+    fs::remove_file(&workspace).unwrap();
+
+    assert!(interrupted_tasks()
+        .unwrap()
+        .contains(&"plan-only".to_string()));
+    assert!(recover_interrupted("plan-only").unwrap());
+    assert!(!cleanup_state_path("plan-only").unwrap().exists());
+    assert_eq!(occupied_slots().unwrap(), 0);
 }
 
 #[test]

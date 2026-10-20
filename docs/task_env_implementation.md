@@ -13,7 +13,7 @@ An environment is identified by `task_id` plus a random `instance_id`, and owns:
 | workspace root | `workspace_root` | yes, identity-checked |
 | temporary root | `temp_root` | yes, identity-checked |
 | worktrees | inside `workspace_root` | removed from the recorded repo |
-| child processes | registered groups + snapshotted descendants | frozen, then killed |
+| child processes | registered groups, snapshots and adopted orphans | frozen, then killed |
 | files kept open | `open_files` | handles closed, entries unlinked |
 | delivery targets | `delivery_targets` | **never** |
 
@@ -25,7 +25,13 @@ Three facts make deletion safe:
 2. **Root identity.** `(device, inode)` is recorded at creation. Cleanup
    re-checks it with `fstatat(AT_SYMLINK_NOFOLLOW)`; a root swapped for a
    symlink or a different directory is refused, and the slot stays occupied.
-3. **Per-task lock.** The live handle holds an exclusive `flock` on
+3. **Subreaper ownership.** The supervisor registers as a child subreaper
+   (`PR_SET_CHILD_SUBREAPER`), so a descendant that detaches with `setsid()`
+   and loses its parent is reparented to the supervisor instead of init. At
+   destroy, direct children that appeared after registration and are not
+   claimed by another live environment are treated as this environment's
+   orphans, frozen and killed.
+4. **Per-task lock.** The live handle holds an exclusive `flock` on
    `locks/<task>.lock`. `restore_environment` and `cleanup_failed_environment`
    refuse to run while another handle owns the task, so descriptors and slots
    are only ever released by their owner. The handle is deliberately not
@@ -81,16 +87,20 @@ recovery). It fails while a live handle owns the task.
 4. terminate registered processes: freeze with `SIGSTOP` first, include the
    descendant snapshot taken at registration plus a fresh `/proc` descendant
    walk, then `SIGKILL` every recorded pid. Freezing first means a `SIGTERM`
-   handler can never spawn a late child, and the snapshot catches a descendant
-   that called `setsid()` or was orphaned by an early-exiting parent;
+   handler can never spawn a late child. Adopted orphans (children that
+   appeared after registration and are not owned by another environment) are
+   killed in the same pass and reaped, so a `setsid()` child spawned even after
+   registration cannot survive;
 5. remove worktrees through the repository recorded at registration and verify
    with `git worktree list`; a leftover registration keeps the item pending;
 6. unlink registered files relative to an `O_NOFOLLOW` walk (a leaf swapped for
    a symlink loses only the link), then remove roots through a pinned
    `O_NOFOLLOW` directory descriptor whose `(dev, ino)` still matches. The tree
    is emptied with `unlinkat` relative to that descriptor, so renaming or
-   replacing the path after verification cannot redirect a deletion; directory
-   modes are widened with `fchmod` only;
+   replacing the path after verification cannot redirect a deletion. The final
+   name is re-checked against the recorded identity, and a rename or
+   replacement keeps the plan (and slot) alive instead of reporting a false
+   success; directory modes are widened with `fchmod` only;
 7. only when everything is gone: remove the plan, the document (if it is still
    this instance) and the index entry.
 
@@ -101,7 +111,8 @@ can finish. `interrupted_tasks()` / `recover_interrupted(task_id)` handle any
 non-active document (`creating`, `destroying`, `destroy_failed`) or a leftover
 plan. A root without a recorded identity is only reclaimed when it is empty and
 no other live task claims it, so recovering an interrupted intent can never
-delete another environment's data.
+delete another environment's data. The claim is taken under the registry lock,
+making "unclaimed" and "now owned by the recovery" one atomic step.
 
 ## Resource slots
 
@@ -134,7 +145,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (29 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (31 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -144,7 +155,7 @@ retry, retry exhaustion, interrupted create, interrupted-state recovery,
 concurrent registrations, task-id traversal, internal-name shadowing, boundary
 validation, intent recovery that must not touch another task's root, recovery
 from a `destroying` state, retry after the root is already gone, and idempotent
-destroy.
+destroy, descendants spawned after registration, and plan-only recovery.
 
 ```bash
 cargo test --test task_env_tests
