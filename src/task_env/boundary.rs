@@ -140,33 +140,6 @@ pub fn paths_overlap(left: &Path, right: &Path) -> bool {
     util::is_relative_to(&left, &right) || util::is_relative_to(&right, &left)
 }
 
-/// Reject workspace/temp/protected combinations that would overlap.
-pub fn validate_no_overlap(
-    workspace_root: &Path,
-    temp_root: &Path,
-    protected_paths: &[PathBuf],
-) -> Result<()> {
-    for protected in protected_paths {
-        for root in [workspace_root, temp_root] {
-            if paths_overlap(root, protected) {
-                return Err(FlowError::progress(format!(
-                    "{} overlaps with protected path {}",
-                    root.display(),
-                    protected.display()
-                )));
-            }
-        }
-    }
-    if paths_overlap(workspace_root, temp_root) {
-        return Err(FlowError::progress(format!(
-            "{} overlaps with {}",
-            workspace_root.display(),
-            temp_root.display()
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

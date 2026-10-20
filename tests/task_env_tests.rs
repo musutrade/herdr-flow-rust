@@ -394,6 +394,37 @@ fn registered_file_handle_is_closed_by_destroy() {
 }
 
 #[test]
+fn unregister_file_releases_its_handle() {
+    let harness = Harness::new();
+    let mut env = harness.create("unregister-file");
+    let path = env.workspace_root.join("owned.txt");
+    fs::write(&path, "task data").unwrap();
+    env.register_file(&path).unwrap();
+    assert_eq!(env.open_handle_count(), 1);
+
+    env.unregister_file(&path).unwrap();
+    assert_eq!(env.open_handle_count(), 0);
+    assert!(path.exists());
+
+    destroy_environment(&env).unwrap();
+}
+
+#[test]
+fn nested_registered_file_is_removed_through_the_parent_walk() {
+    let harness = Harness::new();
+    let mut env = harness.create("nested-file");
+    let nested = env.workspace_root.join("build").join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let path = nested.join("artifact.bin");
+    fs::write(&path, "task data").unwrap();
+    env.register_file(&path).unwrap();
+
+    destroy_environment(&env).unwrap();
+    assert!(!path.exists());
+    assert!(!env.workspace_root.exists());
+}
+
+#[test]
 fn destroying_a_stale_handle_cannot_touch_a_new_instance() {
     let harness = Harness::new();
     let stale = harness.create("reused");

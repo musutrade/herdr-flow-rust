@@ -13,8 +13,8 @@ mod env;
 mod registry;
 
 pub use boundary::{
-    is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets,
-    validate_no_overlap, validate_path, DeliveryTarget, ResourceBoundary,
+    is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets, validate_path,
+    DeliveryTarget, ResourceBoundary,
 };
 pub use cleanup::PendingDirectory;
 pub use cleanup::{cleanup_failed_environment, CleanupState, Quarantine, MAX_ATTEMPTS};

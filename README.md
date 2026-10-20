@@ -157,7 +157,7 @@ Clippy 默认规则统一设为 `deny`，`too_many_arguments` 和 `type_complexi
 
 ## CRAP 门禁
 
-Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `cargo llvm-cov`（或 `--coverage` 指定的 llvm-cov JSON）计算行覆盖。**默认阈值 10，全库绝对检查，不使用基线豁免**：
+Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `cargo llvm-cov`（或 `--coverage` 指定的 llvm-cov JSON）计算行覆盖。**本地门禁及 CI 强制阈值 10，全库绝对检查，不使用基线豁免**：
 
 - 每个函数的 `CRAP = CC² × (1 - coverage)³ + CC` 必须不超过 10。
 - CC 的统计口径：`if`（含 else-if）、非通配 match 分支、`for`、`while`、`loop`、`?`、`&&`、`||`、`try` 块。闭包（含嵌套闭包）中的分支计入所属函数；嵌套命名函数单独计量，避免重复统计。
@@ -167,9 +167,13 @@ Rust 实现使用 `syn` 计算每个函数的 McCabe 复杂度，并使用 `carg
 ```bash
 # 需要先安装 cargo-llvm-cov
 cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
 
-# 全库绝对检查（CI 使用同一命令）
-cargo run -- crap --all --threshold 10
+# 本地全库门禁：运行测试并生成覆盖率，任何失败都阻断
+./scripts/check-local-gate.sh
+
+# 每个新克隆启用一次；只影响当前仓库
+git config --local core.hooksPath .githooks
 
 # 检查当前改动
 cargo run -- crap
@@ -179,6 +183,8 @@ cargo run -- crap --all --skip-tests
 ```
 
 只检查 `src/**/*.rs`。CI 在 pull request 和 main 分支 push 时运行全库检查；任何函数超过阈值都会失败，不存在存量豁免。
+
+启用本地钩子后，`git push` 自动执行同一绝对阈值检查。为确保测试覆盖率对应推送的提交，推送前必须提交工作区改动或用 `git stash push -u` 收起改动（包括未跟踪文件），且只允许推送当前检出的提交；删除远程引用无需检查。日常开发可随时手动运行脚本检查未提交代码。脚本不接受覆盖阈值或跳过测试的参数，缺少工具、测试失败或 CRAP > 10 均返回非零状态。Git 钩子属于本地约束，可被 `--no-verify` 绕过；远端仍由 CI 检查。
 
 ## 目录结构
 

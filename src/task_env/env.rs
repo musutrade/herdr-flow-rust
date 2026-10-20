@@ -419,29 +419,40 @@ pub fn process_start_time(pid: i32) -> Option<u64> {
 /// Only used to find the repository for `git worktree` commands. The parsed
 /// path is verified to sit at `<repo>/.git/worktrees/<name>`.
 pub fn discover_repository(worktree: &Path) -> Option<PathBuf> {
-    let git = worktree.join(".git");
-    let metadata = std::fs::symlink_metadata(&git).ok()?;
+    let admin = worktree_admin(worktree)?;
+    let worktrees = admin.parent()?;
+    require_name(worktrees, "worktrees")?;
+    let dot_git = worktrees.parent()?;
+    require_name(dot_git, ".git")?;
+    dot_git.parent().map(Path::to_path_buf)
+}
+
+fn worktree_admin(worktree: &Path) -> Option<PathBuf> {
+    let gitfile = worktree.join(".git");
+    let gitdir = read_gitdir(worktree, &gitfile)?;
+    gitdir.canonicalize().ok()
+}
+
+fn read_gitdir(worktree: &Path, gitfile: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(gitfile).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return None;
     }
-    let text = std::fs::read_to_string(&git).ok()?;
-    let gitdir = text.strip_prefix("gitdir:")?.trim();
-    let gitdir = Path::new(gitdir);
-    let admin = if gitdir.is_absolute() {
+    let text = std::fs::read_to_string(gitfile).ok()?;
+    let gitdir = Path::new(text.strip_prefix("gitdir:")?.trim());
+    Some(if gitdir.is_absolute() {
         gitdir.to_path_buf()
     } else {
         worktree.join(gitdir)
-    };
-    let admin = admin.canonicalize().ok()?;
-    let worktrees = admin.parent()?;
-    if worktrees.file_name()? != "worktrees" {
-        return None;
+    })
+}
+
+fn require_name(path: &Path, expected: &str) -> Option<()> {
+    if path.file_name()? == expected {
+        Some(())
+    } else {
+        None
     }
-    let dot_git = worktrees.parent()?;
-    if dot_git.file_name()? != ".git" {
-        return None;
-    }
-    dot_git.parent().map(Path::to_path_buf)
 }
 
 fn process_state(pid: i32) -> Option<char> {
@@ -524,13 +535,31 @@ struct LandlockPathBeneathAttr {
 /// themselves. This makes both the cleanup metadata and the parent directory
 /// entry something the task cannot rewrite.
 fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
-    // SAFETY: prctl takes scalar arguments only.
-    unsafe {
-        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
+    set_no_new_privs().and_then(|()| {
+        required_landlock_abi().and_then(|abi| {
+            let handled = handled_access(abi);
+            create_landlock_ruleset(handled).and_then(|ruleset| {
+                add_root_rules(ruleset, handled, roots).and_then(|()| restrict_self(ruleset))
+            })
+        })
+    })
+}
 
+fn add_root_rules(ruleset: i32, handled: u64, roots: &[PathBuf]) -> std::io::Result<()> {
+    roots
+        .iter()
+        .try_for_each(|root| add_root_rule(ruleset, handled, root))
+}
+
+fn set_no_new_privs() -> std::io::Result<()> {
+    // SAFETY: prctl takes scalar arguments only.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn required_landlock_abi() -> std::io::Result<i64> {
     // SAFETY: a null ruleset with VERSION returns the supported ABI.
     let abi = unsafe {
         libc::syscall(
@@ -540,19 +569,19 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
             LANDLOCK_CREATE_RULESET_VERSION,
         )
     };
-    if abi < 1 {
-        return Err(std::io::Error::last_os_error());
-    }
     // TRUNCATE is a separate right introduced in ABI 3 and is required to keep
-    // the control documents unmodifiable; an older kernel must fail closed
-    // instead of silently running with a weaker ruleset.
+    // the control documents unmodifiable; an older kernel must fail closed.
     if abi < 3 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!("Landlock ABI 3 (TRUNCATE) required, kernel reports {abi}"),
         ));
     }
-    let handled = LANDLOCK_ACCESS_FS_WRITE_FILE
+    Ok(abi)
+}
+
+fn handled_access(_abi: i64) -> u64 {
+    LANDLOCK_ACCESS_FS_WRITE_FILE
         | LANDLOCK_ACCESS_FS_REMOVE_FILE
         | LANDLOCK_ACCESS_FS_REMOVE_DIR
         | LANDLOCK_ACCESS_FS_MAKE_CHAR
@@ -563,8 +592,10 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
         | LANDLOCK_ACCESS_FS_MAKE_BLOCK
         | LANDLOCK_ACCESS_FS_MAKE_SYM
         | LANDLOCK_ACCESS_FS_REFER
-        | LANDLOCK_ACCESS_FS_TRUNCATE;
+        | LANDLOCK_ACCESS_FS_TRUNCATE
+}
 
+fn create_landlock_ruleset(handled: u64) -> std::io::Result<i32> {
     let attr = LandlockRulesetAttr {
         handled_access_fs: handled,
     };
@@ -580,44 +611,54 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
     if ruleset < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let ruleset = ruleset as i32;
+    Ok(ruleset as i32)
+}
 
-    for root in roots {
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(root)?;
-        let rule = LandlockPathBeneathAttr {
-            allowed_access: handled,
-            parent_fd: directory.as_raw_fd(),
-        };
-        // SAFETY: ruleset and rule are valid for the duration of the call.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_add_rule,
-                ruleset,
-                LANDLOCK_RULE_PATH_BENEATH,
-                &rule as *const LandlockPathBeneathAttr,
-                0u32,
-            )
-        };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            // SAFETY: ruleset is a descriptor owned by this function.
-            unsafe { libc::close(ruleset) };
-            return Err(error);
-        }
+fn add_root_rule(ruleset: i32, handled: u64, root: &Path) -> std::io::Result<()> {
+    let directory = open_rule_root(root)?;
+    let rule = LandlockPathBeneathAttr {
+        allowed_access: handled,
+        parent_fd: directory.as_raw_fd(),
+    };
+    add_rule_syscall(ruleset, &rule)
+}
+
+fn open_rule_root(root: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)
+}
+
+fn add_rule_syscall(ruleset: i32, rule: &LandlockPathBeneathAttr) -> std::io::Result<()> {
+    // SAFETY: ruleset is live and rule outlives the call.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset,
+            LANDLOCK_RULE_PATH_BENEATH,
+            rule as *const LandlockPathBeneathAttr,
+            0u32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
+}
 
+fn restrict_self(ruleset: i32) -> std::io::Result<()> {
     // SAFETY: ruleset is live; restrict_self consumes no ownership.
     let result = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) };
     let error = std::io::Error::last_os_error();
     // SAFETY: ruleset is still owned here and is not used afterwards.
     unsafe { libc::close(ruleset) };
-    if result != 0 {
-        return Err(error);
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(error)
     }
-    Ok(())
 }
 
 /// Whether a process carries the marker for `instance_id`.
@@ -736,19 +777,69 @@ pub fn create(
     temp_root: &Path,
 ) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
+    let lock = acquire_task_lock(task_id)?;
+    let (workspace_root, temp_root, delivery_targets) =
+        prepare_roots(workspace_root, delivery_targets, temp_root)?;
+    let state_file = ensure_state_absent(task_id)?;
 
-    let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
+    let mut env = build_environment(
+        task_id,
+        workspace_root.clone(),
+        temp_root.clone(),
+        delivery_targets,
+        state_file.clone(),
+    );
+    env.attach_lock(lock);
+
+    if let Err(error) = env.persist() {
+        env.release_ownership();
+        return Err(error);
+    }
+    if let Err(error) = reserve_environment(&env, &state_file) {
+        let _ = std::fs::remove_file(&state_file);
+        env.release_ownership();
+        return Err(error);
+    }
+    if let Err(error) = materialize_and_fingerprint(&mut env) {
+        rollback_creation(&env);
+        return Err(error);
+    }
+    if let Err(error) = env.mark_active() {
+        env.release_ownership();
+        return Err(error);
+    }
+    Ok(env)
+}
+
+fn acquire_task_lock(task_id: &str) -> Result<std::fs::File> {
+    registry::try_lock_task(task_id)?.ok_or_else(|| {
         FlowError::progress(format!(
             "environment for task {task_id} is already owned by another live handle"
         ))
-    })?;
+    })
+}
 
+fn prepare_roots(
+    workspace_root: &Path,
+    delivery_targets: Vec<DeliveryTarget>,
+    temp_root: &Path,
+) -> Result<(PathBuf, PathBuf, Vec<DeliveryTarget>)> {
     let workspace_root = util::resolve_path(workspace_root);
     let temp_root = util::resolve_path(temp_root);
     let delivery_targets =
         super::boundary::validate_delivery_targets(delivery_targets, &workspace_root, &temp_root)?;
-    for target in &delivery_targets {
-        for root in [&workspace_root, &temp_root] {
+    ensure_targets_disjoint(&delivery_targets, &workspace_root, &temp_root)?;
+    validate_root_layout(&workspace_root, &temp_root)?;
+    Ok((workspace_root, temp_root, delivery_targets))
+}
+
+fn ensure_targets_disjoint(
+    targets: &[DeliveryTarget],
+    workspace_root: &Path,
+    temp_root: &Path,
+) -> Result<()> {
+    for target in targets {
+        for root in [workspace_root, temp_root] {
             if util::overlap(&target.path, root) {
                 return Err(FlowError::progress(format!(
                     "delivery target {} overlaps with disposable root {}",
@@ -758,34 +849,54 @@ pub fn create(
             }
         }
     }
-    if util::overlap(&workspace_root, &temp_root) {
+    Ok(())
+}
+
+fn validate_root_layout(workspace_root: &Path, temp_root: &Path) -> Result<()> {
+    ensure_distinct(workspace_root, temp_root)?;
+    registry::validate_outside_control(workspace_root)?;
+    registry::validate_outside_control(temp_root)?;
+    require_vacant(workspace_root)?;
+    require_vacant(temp_root)?;
+    validate_ancestors(workspace_root)?;
+    validate_ancestors(temp_root)?;
+    Ok(())
+}
+
+fn ensure_distinct(workspace_root: &Path, temp_root: &Path) -> Result<()> {
+    if util::overlap(workspace_root, temp_root) {
         return Err(FlowError::progress(format!(
             "workspace {} and temp root {} overlap",
             workspace_root.display(),
             temp_root.display()
         )));
     }
-    registry::validate_outside_control(&workspace_root)?;
-    registry::validate_outside_control(&temp_root)?;
+    Ok(())
+}
 
-    require_vacant(&workspace_root)?;
-    require_vacant(&temp_root)?;
-    validate_ancestors(&workspace_root)?;
-    validate_ancestors(&temp_root)?;
-
+fn ensure_state_absent(task_id: &str) -> Result<PathBuf> {
     let state_file = registry::environment_state_path(task_id)?;
     if state_file.exists() {
         return Err(FlowError::progress(format!(
             "environment for task {task_id} already exists; destroy or recover it first"
         )));
     }
+    Ok(state_file)
+}
 
+fn build_environment(
+    task_id: &str,
+    workspace_root: PathBuf,
+    temp_root: PathBuf,
+    delivery_targets: Vec<DeliveryTarget>,
+    state_file: PathBuf,
+) -> TaskEnvironment {
     let now = util::now();
-    let mut env = TaskEnvironment {
+    TaskEnvironment {
         task_id: task_id.to_string(),
         instance_id: util::uuid_hex(),
-        workspace_root: workspace_root.clone(),
-        temp_root: temp_root.clone(),
+        workspace_root,
+        temp_root,
         workspace_identity: None,
         temp_identity: None,
         delivery_targets,
@@ -795,64 +906,38 @@ pub fn create(
         worktree_registrations: Vec::new(),
         child_processes: Vec::new(),
         open_files: Vec::new(),
-        state_file: state_file.clone(),
+        state_file,
         file_handles: new_handle_slot(),
         ownership_lock: new_lock_slot(),
-    };
-    env.attach_lock(lock);
-
-    // Step 3: durable intent first.
-    if let Err(error) = env.persist() {
-        env.release_ownership();
-        return Err(error);
     }
+}
 
-    // Step 4: unique root claim and resource slot.
-    let entry = registry::RegistryEntry {
-        task_id: task_id.to_string(),
+fn reserve_environment(env: &TaskEnvironment, state_file: &Path) -> Result<()> {
+    registry::register_environment(registry::RegistryEntry {
+        task_id: env.task_id.clone(),
         instance_id: env.instance_id.clone(),
-        workspace_root: workspace_root.clone(),
-        temp_root: temp_root.clone(),
-        roots: vec![workspace_root.clone(), temp_root.clone()],
-        state_file: state_file.clone(),
-        registered_at: now,
-    };
-    if let Err(error) = registry::register_environment(entry) {
-        let _ = std::fs::remove_file(&state_file);
-        env.release_ownership();
-        return Err(error);
-    }
+        workspace_root: env.workspace_root.clone(),
+        temp_root: env.temp_root.clone(),
+        roots: vec![env.workspace_root.clone(), env.temp_root.clone()],
+        state_file: state_file.to_path_buf(),
+        registered_at: util::now(),
+    })
+}
 
-    // Step 5: create and fingerprint the roots.
-    if let Err(error) = materialize(&workspace_root, &temp_root) {
-        let _ = remove_created(&workspace_root);
-        let _ = remove_created(&temp_root);
-        let _ = std::fs::remove_file(&state_file);
-        let _ = registry::unregister_environment(task_id, &env.instance_id);
-        env.release_ownership();
-        return Err(error);
-    }
-    let identities = fingerprint(&workspace_root, &temp_root);
-    let (workspace_identity, temp_identity) = match identities {
-        Ok(pair) => pair,
-        Err(error) => {
-            let _ = remove_created(&workspace_root);
-            let _ = remove_created(&temp_root);
-            let _ = std::fs::remove_file(&state_file);
-            let _ = registry::unregister_environment(task_id, &env.instance_id);
-            env.release_ownership();
-            return Err(error);
-        }
-    };
+fn materialize_and_fingerprint(env: &mut TaskEnvironment) -> Result<()> {
+    materialize(&env.workspace_root, &env.temp_root)?;
+    let (workspace_identity, temp_identity) = fingerprint(&env.workspace_root, &env.temp_root)?;
     env.workspace_identity = Some(workspace_identity);
     env.temp_identity = Some(temp_identity);
+    Ok(())
+}
 
-    // Step 6: usable.
-    if let Err(error) = env.mark_active() {
-        env.release_ownership();
-        return Err(error);
-    }
-    Ok(env)
+fn rollback_creation(env: &TaskEnvironment) {
+    let _ = remove_created(&env.workspace_root);
+    let _ = remove_created(&env.temp_root);
+    let _ = std::fs::remove_file(&env.state_file);
+    let _ = registry::unregister_environment(&env.task_id, &env.instance_id);
+    env.release_ownership();
 }
 
 /// Load a live environment document and take ownership of it.
@@ -861,21 +946,10 @@ pub fn create(
 /// handle from releasing descriptors or slots it does not own.
 pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
-    let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
-        FlowError::progress(format!(
-            "environment for task {task_id} is owned by another live handle"
-        ))
-    })?;
+    let lock = acquire_task_lock(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
-    if !state_file.exists() {
-        return Err(FlowError::progress(format!(
-            "environment for task {task_id} does not exist"
-        )));
-    }
-    let text = std::fs::read_to_string(&state_file)?;
-    let mut env: TaskEnvironment = serde_json::from_str(&text).map_err(|error| {
-        FlowError::progress(format!("cannot parse {}: {error}", state_file.display()))
-    })?;
+    ensure_state_exists(task_id, &state_file)?;
+    let mut env = read_environment(&state_file)?;
     registry::validate_outside_control(&env.workspace_root)?;
     registry::validate_outside_control(&env.temp_root)?;
     env.state_file = state_file;
@@ -885,33 +959,53 @@ pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     Ok(env)
 }
 
+fn ensure_state_exists(task_id: &str, state_file: &Path) -> Result<()> {
+    if state_file.exists() {
+        return Ok(());
+    }
+    Err(FlowError::progress(format!(
+        "environment for task {task_id} does not exist"
+    )))
+}
+
+fn read_environment(state_file: &Path) -> Result<TaskEnvironment> {
+    let text = std::fs::read_to_string(state_file)?;
+    serde_json::from_str(&text).map_err(|error| {
+        FlowError::progress(format!("cannot parse {}: {error}", state_file.display()))
+    })
+}
+
 /// Recover an environment left behind by an interrupted create or destroy.
 pub fn recover_interrupted(task_id: &str) -> Result<bool> {
     registry::validate_task_id(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
     if !state_file.exists() {
-        // A plan can outlive its document when unlink of the document failed.
-        if registry::cleanup_state_path(task_id)
-            .map(|path| path.exists())
-            .unwrap_or(false)
-        {
-            super::cleanup::cleanup_failed_environment(task_id)?;
-            return Ok(true);
-        }
-        return Ok(false);
+        return recover_plan_only(task_id);
     }
     let env = restore(task_id)?;
-    // Any non-active document, or a leftover plan, describes an interrupted
-    // create or destroy that must be completed.
-    let interrupted = env.state != EnvironmentState::Active
-        || registry::cleanup_state_path(task_id)
-            .map(|path| path.exists())
-            .unwrap_or(false);
-    if !interrupted {
+    if !interrupted(&env.state) && !plan_exists(task_id) {
         return Ok(false);
     }
     super::cleanup::destroy(&env)?;
     Ok(true)
+}
+
+fn recover_plan_only(task_id: &str) -> Result<bool> {
+    if !plan_exists(task_id) {
+        return Ok(false);
+    }
+    super::cleanup::cleanup_failed_environment(task_id)?;
+    Ok(true)
+}
+
+fn interrupted(state: &EnvironmentState) -> bool {
+    *state != EnvironmentState::Active
+}
+
+fn plan_exists(task_id: &str) -> bool {
+    registry::cleanup_state_path(task_id)
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 /// Refuse to take over an existing directory that already holds data.
@@ -965,10 +1059,14 @@ fn materialize(workspace_root: &Path, temp_root: &Path) -> Result<()> {
 }
 
 fn remove_created(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    std::fs::remove_dir(path).or_else(ignore_not_found)
+}
+
+fn ignore_not_found(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error)
     }
 }
 
@@ -1036,38 +1134,60 @@ pub(crate) fn open_dir_nofollow(path: &Path) -> Result<File> {
 /// Open `relative` beneath an already-open directory, component by component,
 /// never following a symlink.
 pub(crate) fn open_beneath(root: &File, relative: &Path) -> Result<File> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt as _;
-
     let mut current = root.try_clone()?;
     for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return Err(FlowError::progress(format!(
-                "invalid relative path {}",
-                relative.display()
-            )));
-        };
-        let name = CString::new(name.as_bytes())
-            .map_err(|_| FlowError::progress("path component contains NUL"))?;
-        // SAFETY: current is a live directory fd and name is NUL-terminated.
-        let fd = unsafe {
-            libc::openat(
-                current.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(FlowError::progress(format!(
-                "cannot open {} beneath root: {}",
-                relative.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        // SAFETY: successful openat returns a fresh descriptor we now own.
-        current = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        let name = component_name(component, relative)?;
+        current = open_component(&current, name, relative)?;
     }
     Ok(current)
+}
+
+fn component_name<'a>(
+    component: std::path::Component<'a>,
+    relative: &Path,
+) -> Result<&'a std::ffi::OsStr> {
+    match component {
+        std::path::Component::Normal(name) => Ok(name),
+        _ => Err(FlowError::progress(format!(
+            "invalid relative path {}",
+            relative.display()
+        ))),
+    }
+}
+
+fn open_component(parent: &File, name: &std::ffi::OsStr, relative: &Path) -> Result<File> {
+    let name = c_name(name)?;
+    let fd = open_component_raw(parent, &name);
+    file_from_fd(fd, relative)
+}
+
+fn c_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))
+}
+
+fn open_component_raw(parent: &File, name: &std::ffi::CString) -> i32 {
+    // SAFETY: parent is a live directory fd and name is NUL-terminated.
+    unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    }
+}
+
+fn file_from_fd(fd: i32, relative: &Path) -> Result<File> {
+    if fd < 0 {
+        return Err(FlowError::progress(format!(
+            "cannot open {} beneath root: {}",
+            relative.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: successful openat returns a fresh descriptor we now own.
+    Ok(unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
 }
 
 /// Entry kind relative to an open directory, without following a symlink.
@@ -1211,19 +1331,25 @@ pub(crate) fn clear_directory(dir: &File, depth: usize) -> Result<()> {
     }
     make_dir_writable(dir)?;
     for name in directory_entries(dir)? {
-        match kind_at(dir, &name)? {
-            None => continue,
-            Some(EntryKind::Directory) => {
-                let Some(child) = open_child_dir(dir, &name)? else {
-                    continue;
-                };
-                clear_directory(&child, depth + 1)?;
-                unlink_at_dir(dir, &name)?;
-            }
-            Some(_) => unlink_at(dir, &name)?,
-        }
+        clear_entry(dir, &name, depth)?;
     }
     Ok(())
+}
+
+fn clear_entry(dir: &File, name: &std::ffi::OsStr, depth: usize) -> Result<()> {
+    match kind_at(dir, name)? {
+        None => Ok(()),
+        Some(EntryKind::Directory) => clear_subdirectory(dir, name, depth),
+        Some(_) => unlink_at(dir, name),
+    }
+}
+
+fn clear_subdirectory(dir: &File, name: &std::ffi::OsStr, depth: usize) -> Result<()> {
+    let Some(child) = open_child_dir(dir, name)? else {
+        return Ok(());
+    };
+    clear_directory(&child, depth + 1)?;
+    unlink_at_dir(dir, name)
 }
 
 /// `unlinkat(..., AT_REMOVEDIR)` relative to an open directory.

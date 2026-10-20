@@ -305,34 +305,52 @@ pub fn register_environment(entry: RegistryEntry) -> Result<()> {
     validate_task_id(&entry.task_id)?;
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
+    ensure_same_instance(&registry, &entry)?;
+    ensure_roots_unclaimed(&registry, &entry)?;
+    ensure_capacity()?;
+    registry.insert(entry);
+    save_registry(&registry)
+}
 
-    if let Some(existing) = registry.get(&entry.task_id) {
-        if existing.instance_id != entry.instance_id {
-            return Err(FlowError::progress(format!(
+fn ensure_same_instance(registry: &Registry, entry: &RegistryEntry) -> Result<()> {
+    match registry.get(&entry.task_id) {
+        Some(existing) if existing.instance_id != entry.instance_id => {
+            Err(FlowError::progress(format!(
                 "task {} is already claimed by environment instance {}",
                 entry.task_id, existing.instance_id
-            )));
+            )))
         }
+        _ => Ok(()),
     }
+}
 
+fn ensure_roots_unclaimed(registry: &Registry, entry: &RegistryEntry) -> Result<()> {
     for other in registry.entries() {
         if other.task_id == entry.task_id {
             continue;
         }
-        for mine in entry.claimed_roots() {
-            for theirs in other.claimed_roots() {
-                if util::overlap(&mine, &theirs) {
-                    return Err(FlowError::progress(format!(
-                        "root {} overlaps with root {} claimed by task {}",
-                        mine.display(),
-                        theirs.display(),
-                        other.task_id
-                    )));
-                }
+        find_root_conflict(entry, other)?;
+    }
+    Ok(())
+}
+
+fn find_root_conflict(entry: &RegistryEntry, other: &RegistryEntry) -> Result<()> {
+    for mine in entry.claimed_roots() {
+        for theirs in other.claimed_roots() {
+            if util::overlap(&mine, &theirs) {
+                return Err(FlowError::progress(format!(
+                    "root {} overlaps with root {} claimed by task {}",
+                    mine.display(),
+                    theirs.display(),
+                    other.task_id
+                )));
             }
         }
     }
+    Ok(())
+}
 
+fn ensure_capacity() -> Result<()> {
     let used = occupied_slots()?;
     let cap = limit();
     if used > cap {
@@ -340,9 +358,7 @@ pub fn register_environment(entry: RegistryEntry) -> Result<()> {
             "task environment limit reached ({used}/{cap}); clean up pending environments first"
         )));
     }
-
-    registry.insert(entry);
-    save_registry(&registry)
+    Ok(())
 }
 
 /// Release the index entry, but only when it belongs to `instance_id`.
@@ -377,60 +393,85 @@ pub fn claim_roots_exclusively(
     }
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
+    let claimed = collect_claims(&registry, instance_id, candidates)?;
+    commit_claims(&mut registry, task_id, instance_id, &claimed)
+}
 
+fn collect_claims(
+    registry: &Registry,
+    instance_id: &str,
+    candidates: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     let mut claimed = Vec::new();
     for candidate in candidates {
-        if claimed.iter().any(|root| root == candidate) {
-            continue;
-        }
-        let metadata = match std::fs::symlink_metadata(candidate) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            continue;
-        }
-        if std::fs::read_dir(candidate)?.next().is_some() {
-            continue;
-        }
-        let conflicts = registry.entries().any(|other| {
-            other.instance_id != instance_id
-                && other
-                    .claimed_roots()
-                    .iter()
-                    .any(|root| util::overlap(root, candidate))
-        });
-        if conflicts {
-            continue;
-        }
-        claimed.push(candidate.clone());
+        consider_candidate(registry, instance_id, candidate, &mut claimed)?;
     }
+    Ok(claimed)
+}
 
+fn commit_claims(
+    registry: &mut Registry,
+    task_id: &str,
+    instance_id: &str,
+    claimed: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     if claimed.is_empty() {
-        return Ok(claimed);
+        return Ok(Vec::new());
     }
+    merge_claim(registry, task_id, instance_id, claimed)?;
+    save_registry(registry)?;
+    Ok(claimed.to_vec())
+}
 
-    let state_file = environment_state_path(task_id)?;
-    let entry = registry.entries.get(task_id).cloned();
-    let mut entry = match entry {
-        Some(entry) if entry.instance_id == instance_id => entry,
-        Some(_) => {
-            return Err(FlowError::progress(format!(
-                "task {task_id} is claimed by another environment instance"
-            )))
-        }
-        None => RegistryEntry {
-            task_id: task_id.to_string(),
-            instance_id: instance_id.to_string(),
-            workspace_root: claimed[0].clone(),
-            temp_root: claimed.last().unwrap().clone(),
-            roots: Vec::new(),
-            state_file,
-            registered_at: util::now(),
-        },
+fn consider_candidate(
+    registry: &Registry,
+    instance_id: &str,
+    candidate: &PathBuf,
+    claimed: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if claimed.iter().any(|root| root == candidate) {
+        return Ok(());
+    }
+    if !claimable_root(registry, instance_id, candidate)? {
+        return Ok(());
+    }
+    claimed.push(candidate.clone());
+    Ok(())
+}
+
+fn claimable_root(registry: &Registry, instance_id: &str, candidate: &Path) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
     };
-    for root in &claimed {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    if std::fs::read_dir(candidate)?.next().is_some() {
+        return Ok(false);
+    }
+    Ok(!has_foreign_claim(registry, instance_id, candidate))
+}
+
+fn has_foreign_claim(registry: &Registry, instance_id: &str, candidate: &Path) -> bool {
+    registry.entries().any(|other| {
+        other.instance_id != instance_id
+            && other
+                .claimed_roots()
+                .iter()
+                .any(|root| util::overlap(root, candidate))
+    })
+}
+
+fn merge_claim(
+    registry: &mut Registry,
+    task_id: &str,
+    instance_id: &str,
+    claimed: &[PathBuf],
+) -> Result<()> {
+    let mut entry = resolve_claim_entry(registry, task_id, instance_id, claimed)?;
+    for root in claimed {
         if !entry.roots.contains(root) {
             entry.roots.push(root.clone());
         }
@@ -438,8 +479,32 @@ pub fn claim_roots_exclusively(
     entry.workspace_root = entry.roots[0].clone();
     entry.temp_root = entry.roots.last().unwrap().clone();
     registry.insert(entry);
-    save_registry(&registry)?;
-    Ok(claimed)
+    Ok(())
+}
+
+fn resolve_claim_entry(
+    registry: &Registry,
+    task_id: &str,
+    instance_id: &str,
+    claimed: &[PathBuf],
+) -> Result<RegistryEntry> {
+    if let Some(entry) = registry.entries.get(task_id) {
+        if entry.instance_id != instance_id {
+            return Err(FlowError::progress(format!(
+                "task {task_id} is claimed by another environment instance"
+            )));
+        }
+        return Ok(entry.clone());
+    }
+    Ok(RegistryEntry {
+        task_id: task_id.to_string(),
+        instance_id: instance_id.to_string(),
+        workspace_root: claimed[0].clone(),
+        temp_root: claimed.last().unwrap().clone(),
+        roots: Vec::new(),
+        state_file: environment_state_path(task_id)?,
+        registered_at: util::now(),
+    })
 }
 
 pub fn is_registered(task_id: &str) -> Result<bool> {
@@ -456,45 +521,56 @@ pub fn list_registered() -> Result<Vec<String>> {
 
 /// Tasks whose document shows an interrupted create or destroy.
 pub fn interrupted_tasks() -> Result<Vec<String>> {
-    let mut tasks = Vec::new();
-    let mut plans = Vec::new();
-    for entry in std::fs::read_dir(plan_dir()?)?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
-                plans.push(task_id.to_string());
-            }
-        }
-    }
-    let envs = env_dir()?;
-    for entry in std::fs::read_dir(envs)?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let state = value
-            .get("state")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        if matches!(state, "creating" | "destroying" | "destroy_failed") {
-            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
-                tasks.push(task_id.to_string());
-            }
-        }
-    }
-    for task_id in plans {
+    let mut tasks = json_task_ids(&plan_dir()?)?;
+    for task_id in interrupted_env_ids(&env_dir()?)? {
         if !tasks.contains(&task_id) {
             tasks.push(task_id);
         }
     }
     tasks.sort();
     Ok(tasks)
+}
+
+fn json_task_ids(dir: &Path) -> Result<Vec<String>> {
+    let mut tasks = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                tasks.push(task_id.to_string());
+            }
+        }
+    }
+    Ok(tasks)
+}
+
+fn interrupted_env_ids(dir: &Path) -> Result<Vec<String>> {
+    let mut tasks = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if document_is_interrupted(&path) {
+            if let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                tasks.push(task_id.to_string());
+            }
+        }
+    }
+    Ok(tasks)
+}
+
+fn document_is_interrupted(path: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    matches!(
+        value.get("state").and_then(|value| value.as_str()),
+        Some("creating" | "destroying" | "destroy_failed")
+    )
 }
 
 /// Read-only snapshot of the index.
