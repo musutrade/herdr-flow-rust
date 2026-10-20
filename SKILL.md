@@ -12,9 +12,10 @@ text recognition.
 
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
-`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor` and `herdr-flow crap`.
-Build it once with `cargo build --release`; use `herdr-flow <command> --help` for
-the exact options. Run `cargo test --all-targets` after changing the implementation.
+`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
+and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
+use `herdr-flow <command> --help` for the exact options. Run
+`cargo test --all-targets --locked` after changing the implementation.
 
 This automated path is for local Codex sessions. The OpenCode baseline is
 1.19.3; at the user's direction, 2.0 integration is deferred because of reported
