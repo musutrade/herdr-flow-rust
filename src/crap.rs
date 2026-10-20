@@ -876,7 +876,9 @@ impl<'ast> Visit<'ast> for Complexity {
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         for arm in &node.arms {
-            let default_arm = arm.guard.is_none() && matches!(&arm.pat, syn::Pat::Wild(_));
+            // syn 3 wraps guarded patterns in Pat::Guard, so only a bare
+            // wildcard is the unconditional default arm.
+            let default_arm = matches!(&arm.pat, syn::Pat::Wild(_));
             if !default_arm {
                 self.score += 1;
             }
@@ -2841,6 +2843,20 @@ fn f(x: i32) -> i32 {
     }
 }";
         assert_eq!(first_complexity(source), 3);
+    }
+
+    #[test]
+    fn complexity_counts_guarded_wildcards_and_guard_short_circuiting() {
+        let source = "\
+fn f(value: u8, first: bool, second: bool) -> u8 {
+    match value {
+        0 if first && second => 1,
+        _ if first || second => 2,
+        _ => 3,
+    }
+}";
+        // Base + two guarded arms + && + ||; only the bare wildcard is free.
+        assert_eq!(first_complexity(source), 5);
     }
 
     #[test]
