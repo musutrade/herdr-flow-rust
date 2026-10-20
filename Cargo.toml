@@ -17,7 +17,7 @@ sha2 = "0.10"
 tempfile = "3"
 syn = { version = "2", features = ["full", "visit"] }
 ureq = { version = "3.4.2", default-features = false, features = ["json"] }
-base64 = "0.22"
+base64 = "0.23"
 
 [profile.release]
 lto = true
