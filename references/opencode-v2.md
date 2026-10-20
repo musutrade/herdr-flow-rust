@@ -1,27 +1,49 @@
-# OpenCode integration
+# OpenCode 1.19.3 integration
 
-OpenCode has two distinct integration paths in this skill. Do not mix their
-capabilities or treat either one as a native Codex guard.
+## Current version policy
 
-## External review producer (OpenCode v2)
+As of 2026-10-20, the integration baseline is OpenCode **1.19.3**. At the
+user's direction, OpenCode **2.0 is deferred because of reported bugs**. Do not
+upgrade to 2.0 or use its API workflow for this integration. Reopening 2.0
+integration requires a new user decision and separate validation.
 
-Validated with OpenCode 2.0.32 and `opencode/deepseek-v4.1-flash-free` in an
-existing user-owned session. Use the installed CLI's operation schema; v1 HTTP
-routes and payloads are not interchangeable with v2. Do not replace the session
-or change its model without the task's authorization.
+This file retains its historical `opencode-v2.md` name to preserve existing
+links. The earlier 2.0.32 external-review observation is historical evidence,
+not the current integration procedure or acceptance of the Rust adapter.
 
-Inspect the exact session and current model:
+## OpenCode capabilities and repository coverage
+
+The locally installed 1.19.3 CLI help was checked on 2026-10-20. It exposes
+`run --session`, `run --attach`, `run --format json`, `serve`, `acp` and
+`session list`. Inspect these interfaces without submitting work:
 
 ```bash
-opencode api session.get --param sessionID=EXACT_SESSION_ID
+opencode --version
+opencode run --help
+opencode serve --help
+opencode session --help
 ```
 
-When authorized, the v2 model operation is `session.switchModel`, with the same
-session parameter and data `{"model":{"providerID":"opencode","id":"deepseek-v4.1-flash-free"}}`.
-Verify the returned session through a new GET before dispatch. A v2
-`session.prompt` uses that session parameter and a body with `text` and optional
-`metadata`. Its response admits an inbox message; it does not prove completion.
-An ambiguous response must be inspected, never blindly resubmitted.
+These are programmatic integration entry points; their presence does not mean
+this repository has implemented or validated dispatch through them. The Rust
+adapter currently implements only monitoring diagnostics. Its unsupported
+prompt/status/lifecycle operations are limitations of this adapter, not proof
+that OpenCode itself has no programmatic interface. Codex app-server methods
+are not an OpenCode protocol.
+
+For any future 1.19.3 dispatch implementation, verify the exact installed
+interface and live session binding before use. Do not copy 2.0 API commands or
+payloads. Safe automatic rotation, context occupancy measurement and exact
+runtime restoration still require separate implementation and validation.
+
+## External producer result return (manual coordination)
+
+An independently operated 1.19.3 session can use the generic signal mechanism
+to return a report. This is a result-return contract, not a built-in OpenCode
+dispatch client or a claim of a validated 1.19.3 end-to-end workflow. Verify the
+exact session, model and pane independently. Do not replace the session or
+change its model without the task's authorization. An accepted prompt does not
+prove completion; inspect an ambiguous submission instead of blindly retrying.
 
 Before sending the prompt, establish coordinator notification readiness and
 register a bounded `kind: "signal"` wait, the managed task, assignment, full
@@ -53,8 +75,9 @@ OpenCode 1.19.3 pane without claiming native Codex capabilities:
 - Verifies the Herdr pane terminal, shell PID and process identity, and can
   report shell readiness.
 - Reports its capability baseline through `check_capabilities`.
-- Uses an idle shell as its only idle signal; OpenCode does not expose session
-  or thread status to this adapter.
+- Uses an idle shell as its only idle signal; the adapter does not query
+  OpenCode session status and returns `unknown` for agent status. Shell readiness
+  does not establish whether a running OpenCode session is idle.
 
 It does not support:
 
@@ -74,6 +97,11 @@ claim automatic waking/rotation for it.
 Create it with `create_opencode_adapter(state)`, where `state` contains `pane`,
 `shell_pid`, `cwd` and `terminal`. Unsupported operations raise `GuardError`
 rather than silently degrading.
+
+The current static capability report overstates support: it lists checkpoint
+save/restore and successor startup, while runtime snapshot/restoration and
+successor launch return unsupported. Treat the implemented monitoring checks
+above as the supported scope; `available: true` is not a live capability probe.
 
 ## Shared boundary
 

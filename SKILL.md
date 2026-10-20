@@ -16,10 +16,15 @@ use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
 Build it once with `cargo build --release`; use `herdr-flow <command> --help` for
 the exact options. Run `cargo test --all-targets` after changing the implementation.
 
-This automated path is for local Codex sessions. OpenCode may act as an external
-review producer through a registered signal; the OpenCode 1.19.3 adapter is
-monitoring-only (pane/shell/process identity, no RPC, context telemetry or
-automatic rotation). Follow [OpenCode integration](references/opencode-v2.md).
+This automated path is for local Codex sessions. The OpenCode baseline is
+1.19.3; at the user's direction, 2.0 integration is deferred because of reported
+bugs. Do not upgrade to 2.0 or use its API workflow for this integration.
+An independently operated 1.19.3 producer may return results through a registered
+signal, with identity checked separately. The repository adapter is monitoring-only
+(pane/shell/process identity); it does not implement OpenCode dispatch, session
+status queries, context telemetry or automatic rotation. These are adapter
+limitations, not an absence of OpenCode programmatic interfaces. Follow
+[OpenCode integration](references/opencode-v2.md).
 
 Use one issue per worker session, and durable task state across sessions. Keep the user's existing authorization and repository gates intact. This skill does not itself authorize publication, merging, messages to people, or infrastructure changes.
 

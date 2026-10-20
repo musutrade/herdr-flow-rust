@@ -6,6 +6,11 @@
 > constitute Rust live acceptance. No Rust-specific live Herdr/Codex/GitHub run
 > exists; the Rust suite uses fakes. See `AUDIT_REPORT_2026-10-19.md`.
 
+> **OpenCode policy (2026-10-20):** the v2 review observation below is historical
+> only. At the user's direction, 2.0 integration is deferred because of reported
+> bugs. The current baseline is 1.19.3; this record does not validate its
+> end-to-end integration. Follow the [current policy](opencode-v2.md).
+
 V1 combines durable result application, explicit successor takeover, local PR
 provenance and required-job decisions. External publication still uses an
 authorized publisher; these tools do not push, create PRs or merge them.

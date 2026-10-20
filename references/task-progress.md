@@ -29,8 +29,10 @@ requires known telemetry and enabled `auto_rotate`. OpenCode automatic rotation
 is explicitly unsupported. Other producers can use a pinned signal or command
 wrapper, without claiming the Codex rotation capability.
 
-For OpenCode v2, register a generic signal wait and independently verify the
-session/model through its installed API and Herdr pane identity. `producer_session`
+For an independently operated OpenCode 1.19.3 producer, register a generic
+signal wait and independently verify its exact session/model and Herdr pane
+identity. This is manual coordination, not built-in OpenCode dispatch. OpenCode
+2.0 integration is deferred; do not use the historical v2 API workflow. `producer_session`
 currently checks `CODEX_THREAD_ID` only; do not fill it with an OpenCode ID or
 fabricate a Codex identity. `producer_identity` metadata is descriptive and is not
 enforced by the queue. Generic signals trust local filesystem access, not a
