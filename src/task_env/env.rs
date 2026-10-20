@@ -149,24 +149,38 @@ impl TaskEnvironment {
         Ok(())
     }
 
-    /// Register a file that the environment keeps open.
+    /// Take ownership of an already-open descriptor.
+    ///
+    /// The descriptor is closed when the environment is destroyed, so a file
+    /// the task opened cannot keep its storage alive past cleanup. Only the
+    /// owner of a descriptor can close it: a handle kept by another process or
+    /// by the caller itself is outside this contract.
+    pub fn register_handle(&mut self, path: &Path, handle: File) -> Result<()> {
+        let resolved = util::resolve_path(path);
+        if self.open_files.contains(&resolved) {
+            return Ok(());
+        }
+        self.file_handles
+            .lock()
+            .expect("file handle slot poisoned")
+            .push(handle);
+        self.open_files.push(resolved);
+        self.persist()
+    }
+
+    /// Open `path` and take ownership of the descriptor.
     pub fn register_file(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
-        if !self.open_files.contains(&resolved) {
-            let handle = File::open(&resolved).map_err(|error| {
-                FlowError::progress(format!(
-                    "cannot open {} for registration: {error}",
-                    resolved.display()
-                ))
-            })?;
-            self.file_handles
-                .lock()
-                .expect("file handle slot poisoned")
-                .push(handle);
-            self.open_files.push(resolved);
-            self.persist()?;
+        if self.open_files.contains(&resolved) {
+            return Ok(());
         }
-        Ok(())
+        let handle = File::open(&resolved).map_err(|error| {
+            FlowError::progress(format!(
+                "cannot open {} for registration: {error}",
+                resolved.display()
+            ))
+        })?;
+        self.register_handle(&resolved, handle)
     }
 
     pub fn unregister_worktree(&mut self, path: &Path) -> Result<()> {
@@ -282,6 +296,8 @@ pub fn create(
     // environment may only ever destroy what it created itself.
     require_vacant(&workspace_root)?;
     require_vacant(&temp_root)?;
+    validate_ancestors(&workspace_root)?;
+    validate_ancestors(&temp_root)?;
 
     let state_file = registry::environment_state_path(task_id)?;
     if state_file.exists() {
@@ -399,7 +415,10 @@ fn ancestor_is_trusted(metadata: &std::fs::Metadata) -> bool {
     // SAFETY: geteuid takes no pointers and has no caller preconditions.
     let uid = unsafe { libc::geteuid() };
     let owner_ok = metadata.uid() == uid || metadata.uid() == 0;
-    owner_ok && metadata.mode() & 0o022 == 0
+    // A root-owned sticky directory such as /tmp is writable but cannot have
+    // its entries replaced, which is the property that matters here.
+    let root_sticky = metadata.uid() == 0 && metadata.mode() & libc::S_ISVTX != 0;
+    owner_ok && (metadata.mode() & 0o022 == 0 || root_sticky)
 }
 
 /// Verify that every ancestor of `path` is trusted and not a symlink.

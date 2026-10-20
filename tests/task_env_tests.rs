@@ -244,6 +244,20 @@ fn registered_open_file_is_released_on_destroy() {
 }
 
 #[test]
+fn transferred_descriptor_is_closed_by_destroy() {
+    let harness = Harness::new();
+    let mut env = harness.create("transferred");
+    let path = env.workspace_root.join("owned.txt");
+    let handle = fs::File::create(&path).unwrap();
+    env.register_handle(&path, handle).unwrap();
+    assert_eq!(env.open_handle_count(), 1);
+
+    destroy_environment(&env).unwrap();
+    assert_eq!(env.open_handle_count(), 0);
+    assert!(!path.exists());
+}
+
+#[test]
 fn destroy_terminates_registered_process_and_its_descendants() {
     let harness = Harness::new();
     let mut env = harness.create("descendants");
