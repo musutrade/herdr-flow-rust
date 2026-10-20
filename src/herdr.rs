@@ -1726,5 +1726,11 @@ pub fn check_platform() -> J {
 
 /// Production receiver factory.
 pub fn receiver_factory(state: &J) -> Result<Box<dyn ReceiverAdapter>> {
-    Ok(Box::new(Herdr::new(state)?))
+    match model::string(state, "adapter").as_deref() {
+        Some("opencode") => Ok(Box::new(crate::opencode::session::SessionAdapter::new(
+            state,
+        )?)),
+        None | Some("codex") => Ok(Box::new(Herdr::new(state)?)),
+        _ => Err(FlowError::guard("unsupported receiver adapter")),
+    }
 }

@@ -87,12 +87,13 @@ fn guard_message(error: herdr_flow::FlowError) -> String {
 }
 
 #[test]
-fn capabilities_match_the_python_baseline() {
+fn monitoring_capabilities_require_native_registration() {
     let (adapter, calls) = adapter_with(&state(), Vec::new(), identity_ok);
     let caps = adapter.check_capabilities().unwrap();
     assert_eq!(caps, baseline_capabilities());
     assert_eq!(caps["adapter"], "OpenCode 1.19.3");
-    assert_eq!(caps["available"], true);
+    assert_eq!(caps["available"], false);
+    assert_eq!(caps["probe_required"], true);
     assert_eq!(
         caps["server_info"],
         json!({"name": "opencode", "version": "1.19.3"})
@@ -103,15 +104,12 @@ fn capabilities_match_the_python_baseline() {
     );
     assert_eq!(
         caps["hints"][0],
-        "OpenCode session continuity: shell PID + process identity only"
+        "Monitoring diagnostics verify the shell only, not OpenCode session continuity"
     );
-    assert_eq!(
-        caps["supported_operations"][3],
-        "successor session start (new opencode instance)"
-    );
+    assert_eq!(caps["supported_operations"][1], "shell readiness check");
     assert_eq!(caps["missing"].as_array().unwrap().len(), 5);
     assert_eq!(caps["hints"].as_array().unwrap().len(), 4);
-    assert_eq!(caps["supported_operations"].as_array().unwrap().len(), 4);
+    assert_eq!(caps["supported_operations"].as_array().unwrap().len(), 2);
     // Cached, and capability reporting never touches the Herdr CLI.
     assert_eq!(adapter.check_capabilities().unwrap(), caps);
     assert!(calls.borrow().is_empty());

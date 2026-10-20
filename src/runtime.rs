@@ -199,6 +199,9 @@ fn level_known(state: &J) -> bool {
 }
 
 fn context_telemetry(state: &J) -> bool {
+    if crate::opencode::session::is_registered(state) {
+        return false;
+    }
     model::get(state, "usage")
         .and_then(Value::as_object)
         .map(|usage| usage_windowed(usage) && level_known(state))
@@ -368,7 +371,7 @@ fn push_session_gap(session: Option<&str>, gaps: &mut Vec<String>, next_steps: &
     if session.is_none() {
         gaps.push("current receiver session is required".to_string());
         next_steps.push(
-            "run this command from the exact receiving Codex session; do not borrow another pane"
+            "run from the exact receiving session (CODEX_THREAD_ID for Codex; OPENCODE_SESSION_ID for OpenCode); do not borrow another pane"
                 .to_string(),
         );
     }

@@ -19,11 +19,12 @@ the exact options. Run `cargo test --all-targets` after changing the implementat
 This automated path is for local Codex sessions. The OpenCode baseline is
 1.19.3; at the user's direction, 2.0 integration is deferred because of reported
 bugs. Do not upgrade to 2.0 or use its API workflow for this integration.
-An independently operated 1.19.3 producer may return results through a registered
-signal, with identity checked separately. The repository adapter is monitoring-only
-(pane/shell/process identity); it does not implement OpenCode dispatch, session
-status queries, context telemetry or automatic rotation. These are adapter
-limitations, not an absence of OpenCode programmatic interfaces. Follow
+The native 1.19.3 adapter supports exact session/model/directory binding, HTTP
+submission/status, durable result collection and queue delivery/ACK/application.
+Use `opencode register` and its independent `opencode watch`; OpenCode receiver
+commands use `OPENCODE_SESSION_ID`, never a fabricated `CODEX_THREAD_ID`.
+Context telemetry, runtime restoration and automatic rotation remain unsupported.
+Keep the legacy pane/shell diagnostics distinct. Follow
 [OpenCode integration](references/opencode-v2.md).
 
 Use one issue per worker session, and durable task state across sessions. Keep the user's existing authorization and repository gates intact. This skill does not itself authorize publication, merging, messages to people, or infrastructure changes.
@@ -76,7 +77,7 @@ from a worker assignment or batch.
 
 ## Rotate sessions
 
-For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Do not register an OpenCode session with this guard; its adapter is monitoring-only and automatic rotation is unsupported. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
+For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Use `opencode register` / `opencode watch` for OpenCode; the Codex context guard and automatic rotation are unsupported for it. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
 
 After a worker publishes and signals its completed assignment, checkpoint a handoff with `assignment: {id, status: "completed", evidence}` (absolute existing report path). This parks the worker without a fresh-session wakeup, even at the context limit. Do not infer completion from Herdr idle/done. Before its next assignment, the coordinator supplies a new assignment ID; the parked worker checkpoints that new `pending` assignment and ends its turn so rotation can proceed. Never reuse a completed assignment ID. Coordinators waiting for events must remain monitoring, not parked.
 

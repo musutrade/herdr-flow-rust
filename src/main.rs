@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 fn usage() {
     println!(
-        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode OpenCode monitoring adapter diagnostics\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
+        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode native OpenCode sessions and monitoring diagnostics\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
         env!("CARGO_PKG_VERSION")
     );
 }

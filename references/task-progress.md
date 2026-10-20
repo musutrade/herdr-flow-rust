@@ -29,15 +29,16 @@ requires known telemetry and enabled `auto_rotate`. OpenCode automatic rotation
 is explicitly unsupported. Other producers can use a pinned signal or command
 wrapper, without claiming the Codex rotation capability.
 
-For an independently operated OpenCode 1.19.3 producer, register a generic
-signal wait and independently verify its exact session/model and Herdr pane
-identity. This is manual coordination, not built-in OpenCode dispatch. OpenCode
-2.0 integration is deferred; do not use the historical v2 API workflow. `producer_session`
-currently checks `CODEX_THREAD_ID` only; do not fill it with an OpenCode ID or
-fabricate a Codex identity. `producer_identity` metadata is descriptive and is not
-enforced by the queue. Generic signals trust local filesystem access, not a
-producer authentication boundary. The OpenCode 1.19.3 adapter adds only
-pane/shell/process checks; it does not add automatic rotation. See
+For OpenCode 1.19.3, bind the exact native session/model/directory with
+`opencode register`, then use `opencode dispatch` / `collect` against a current
+managed signal wait. Collection verifies live identity, message correlation,
+task/epoch/assignment/candidate and workspace HEAD before publishing a report
+and signal. The queue receiver can be Codex or OpenCode; OpenCode receivers use
+`OPENCODE_SESSION_ID` for ACK/readiness/task commands. `producer_session` remains
+Codex-specific and must be omitted for OpenCode. Generic `producer_identity`
+metadata alone is not enforced by the queue: filesystem trust and the native
+collector's live checks remain separate. Automatic rotation is unsupported;
+2.0 integration remains deferred. See
 [OpenCode integration](opencode-v2.md).
 
 An embedded `--no-daemon` Codex frontend has no native bridge marker. Do not copy

@@ -49,14 +49,18 @@ pub fn guard_error(message: impl Into<String>) -> FlowError {
 }
 
 pub fn scope(g: &J) -> J {
-    json!({
+    let mut scope = json!({
         "task": g.get("task").cloned().unwrap_or(Value::Null),
         "role": g.get("role").cloned().unwrap_or(Value::Null),
         "pane": g.get("pane").cloned().unwrap_or(Value::Null),
         "terminal": g.get("terminal").cloned().unwrap_or(Value::Null),
         "socket": g.get("socket").cloned().unwrap_or(Value::Null),
         "cwd": g.get("cwd").cloned().unwrap_or(Value::Null)
-    })
+    });
+    if crate::opencode::session::is_registered(g) {
+        scope["opencode"] = json!({"endpoint":g["endpoint"],"session":g["session"],"model":g["model"],"server_version":g["server_version"]});
+    }
+    scope
 }
 
 pub fn locked(root: &Path) -> Result<util::FileLock> {

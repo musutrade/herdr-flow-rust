@@ -280,12 +280,11 @@ was not delivered; an ACK does not prove it was applied.
 
 ## 7. Other producers and current boundaries
 
-- **OpenCode 1.19.3:** an independently operated producer can return results
-  through a registered `signal` wait; verify its exact session and model
-  independently. The adapter adds only pane/shell/process checks, with no
-  built-in dispatch or automatic handoff. OpenCode 2.0 integration is deferred
-  because of user-reported bugs. See [OpenCode integration](opencode-v2.md).
-  Do not apply Codex RPC or reset commands to it.
+- **OpenCode 1.19.3:** register an exact native session/model/directory, use
+  `opencode dispatch` / `collect` for managed result return, and run its dedicated
+  watcher. OpenCode receivers use `OPENCODE_SESSION_ID` for queue ACK and task
+  commands. Automatic rotation is unsupported; 2.0 integration remains deferred.
+  See [OpenCode integration](opencode-v2.md).
 - **CI:** use `herdr-flow ci` with a pinned config and a `ci` wait; the observer is
   read-only and never merges or reruns CI. See [CI monitoring](ci-monitor.md).
 - **Long command:** the existing `run` wrapper reserves the invocation before

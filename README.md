@@ -2,14 +2,14 @@
 
 通过 Herdr 编排 issue 开发，以任务交接和独立 CI 监控减少 agent 长会话。
 
-本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，仓库内仅实现监控阶段适配器。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
+本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
 
 ## 当前功能
 
 - 按 issue 和稳定阶段轮换会话，保留已有授权和有效验证证据。
 - 启动前探测 Linux `/proc`、Unix domain socket 和 app-server 方法；缺少所需能力时明确失败，不静默降级。
 - 本地安全边界：Herdr 参数拒绝 shell 元字符；batch Git 只允许白名单命令、拒绝全局配置覆盖并设置超时；状态与交接文件原子写入、权限 0600、拒绝符号链接父目录；app-server socket 校验同用户且非全局可写；JSON 消息限制大小与嵌套深度；子进程错误输出脱敏。
-- OpenCode 1.19.3 监控适配器：仅校验 pane/终端、shell PID 与进程身份；该适配器未接入 OpenCode 的程序化消息与会话接口，不提供上下文遥测、运行时快照、自动提示或自动换班，恢复需人工检查。这是仓库实现范围，不代表 OpenCode 1.19.3 没有程序化接入能力。
+- OpenCode 1.19.3 原生接入：显式绑定会话/模型/目录，检查忙碌和待审批状态，持久化派发与恢复记录，接续结果 signal、投递、ACK 和任务应用。保留 pane/shell 只读诊断；精确上下文遥测、运行时恢复和自动换班仍不支持。
 - 使用任务编号、epoch 和明确的写入归属协调开发、审计与发布。
 - 独立观察 GitHub Actions，绑定完整 SHA、workflow、事件和 run attempt；外部 Checks 需要固定 App、精确 run/head 与基线。
 - 可显式按必需 job 判定，保留 advisory 详情；取消、缺失等结果进入待决策而非代码修复失败。
