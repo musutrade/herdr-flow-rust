@@ -108,10 +108,12 @@ recovery). It fails while a live handle owns the task.
    is emptied with `unlinkat` relative to that descriptor. The final entry
    follows a durable, phased protocol: the quarantine name is persisted, the
    root is renamed to it, its identity is verified there, the unlink is
-   committed to the plan, and only then is it unlinked. A rename, replacement or
-   a missing quarantine at any phase keeps the plan and slot instead of
-   deleting unknown data or reporting a false success; directory modes are
-   widened with `fchmod` only;
+   committed to the plan, and only then is it unlinked. Identity is re-checked
+   immediately before the quarantine rename and again before the unlink; a
+   rename, replacement or missing quarantine at any phase keeps the plan and
+   slot instead of reporting a false success. Non-empty replacements are never
+   deleted. See the security contract for the one external-writer window;
+   directory modes are widened with `fchmod` only;
 7. only when everything is gone: remove the plan, the document (if it is still
    this instance) and the index entry.
 
@@ -173,19 +175,37 @@ quarantine crash phase, quarantine replacement preservation, a task process
 being denied rename/remove/write access outside its roots, and a task being
 denied rewriting its own environment document.
 
-## Boundaries
+## Security contract
 
-The process marker is an ownership record, not kernel isolation from a process
-that deliberately clears its environment and detaches; the documented contract
-is that task processes inherit it. Cleanup rescans until no marked process
-remains, so children forked between a scan and the freeze are caught in the
-next pass. Landlock provides the kernel-enforced guarantee for the filesystem
-entries that cleanup itself touches and for the state documents that decide
-what cleanup targets. A same-UID process outside the task boundary (for example
-the environment owner or a test harness) can still race the final `unlinkat`;
-POSIX offers no unlink-by-descriptor for directories (`AT_EMPTY_PATH` returns
-`EINVAL`), so the protocol narrows that window to one syscall and retains the
-slot on any mismatch instead of reporting a false success.
+Trusted actors are the supervisor and its callers; task processes are
+untrusted.
+
+Guaranteed:
+
+* a task process cannot write, truncate, create, rename, link or remove
+  anything outside its disposable roots (Landlock, fail closed if unavailable).
+  This includes `envs/`, `plans/`, `registry.json` and `locks/`, so a task
+  cannot retarget cleanup at external assets or erase its own authorization;
+* cleanup never touches a delivery target or any path outside the recorded
+  roots, and never follows a symlink;
+* every destructive filesystem step re-verifies the recorded `(device, inode)`;
+  a mismatch keeps the plan and slot;
+* a replaced non-empty directory is never deleted.
+
+Not guaranteed:
+
+* atomicity of the single final `unlinkat` against a same-UID process *outside*
+  the task boundary that races exactly that syscall. POSIX has no
+  unlink-by-descriptor for directories (`unlinkat(fd, "", AT_EMPTY_PATH)` fails
+  with `EINVAL`), and such an actor can already delete the data directly. The
+  protocol narrows the window to one syscall, verifies identity immediately
+  before it, and checks the pinned descriptor's link count afterwards; the
+  worst observable outcome is the removal of an empty directory owned by that
+  external actor, followed by a reported failure that retains the slot;
+* release of a descendant that deliberately clears its environment and
+  detaches: the marker is a cooperative ownership record. Kernel-enforced
+  release of every descendant requires a per-task PID namespace (or cgroup),
+  which belongs to the adapter integration step rather than these primitives.
 
 ```bash
 cargo test --test task_env_tests
