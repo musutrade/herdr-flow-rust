@@ -326,6 +326,48 @@ fn missing_command_binary_becomes_decision() {
     );
 }
 
+#[test]
+fn either_log_open_failure_retains_decision_without_executing_or_replaying() {
+    for name in ["stdout.log", "stderr.log"] {
+        let tmp = common::tempdir().unwrap();
+        let root = tmp.path().join("queue");
+        queue::init(&root, None, 30).unwrap();
+        queue::add(
+            &root,
+            &json!({"id":"build","task":"o/r#1","epoch":1,"owner":"dev",
+                "reason":"capture failure","condition":"command result recorded",
+                "kind":"signal","timeout_seconds":60}),
+        )
+        .unwrap();
+        let folder = root.join("commands/build");
+        common::create_dir_all(folder.join(name)).unwrap();
+        let marker = tmp.path().join("executed");
+        let script = format!("touch {}", util::shell_quote(marker.to_str().unwrap()));
+        let argv = json!(["/bin/sh", "-c", script]);
+        assert_eq!(
+            queue::run_command(&root, "build", &argv, tmp.path().to_str().unwrap()).unwrap(),
+            1
+        );
+        let record = util::read_json(&folder.join("result.json")).unwrap();
+        assert_eq!(record["error"], "LogError");
+        assert!(!record["error_detail"].as_str().unwrap().is_empty());
+        assert!(record["finished_at"].is_number());
+        assert!(folder.join("invocation.json").is_file());
+        assert!(!folder.join("process.json").exists());
+        assert!(!marker.exists());
+        let other = if name == "stdout.log" {
+            "stderr.log"
+        } else {
+            "stdout.log"
+        };
+        assert!(folder.join(other).is_file());
+        let state = queue::tick(&root, &factory(), None).unwrap();
+        assert_eq!(state["waits"]["build"]["outcome"], "decision");
+        assert!(queue::run_command(&root, "build", &argv, tmp.path().to_str().unwrap()).is_err());
+        assert!(!marker.exists());
+    }
+}
+
 fn healthy_watcher(dir: &Path) -> FileLock {
     common::create_dir_all(dir).unwrap();
     let pid = std::process::id();

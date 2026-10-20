@@ -909,6 +909,7 @@ fn observer_identity(root: &Path, config_hash: &str, config: &J) -> Result<J> {
 }
 
 fn existing_observer_identity(identity_path: &Path, config_hash: &str) -> Result<J> {
+    // observer_identity always constructs this path with root.join("identity.json").
     let root = identity_path.parent().expect("observer identity parent");
     let meta = util::read_state_json(root, "identity.json")?;
     require_observer_identity(&meta, config_hash).map(|()| meta)

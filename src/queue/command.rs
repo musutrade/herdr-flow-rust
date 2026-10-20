@@ -351,12 +351,10 @@ fn reserve(
 }
 
 fn execute(folder: &Path, argv: &[String], cwd: &str, record: J) -> Result<(String, String)> {
-    let (logs, error) = open_logs(folder);
-    if let Some(error) = error {
-        return record_start_failure(folder, record, error);
+    match open_logs(folder) {
+        Ok((stdout, stderr)) => execute_spawn(folder, argv, cwd, record, stdout, stderr),
+        Err(error) => record_start_failure(folder, record, error.to_string()),
     }
-    let (stdout, stderr) = logs.expect("log handles");
-    execute_spawn(folder, argv, cwd, record, stdout, stderr)
 }
 
 fn open_log(path: &Path) -> std::io::Result<File> {
@@ -368,16 +366,11 @@ fn open_log(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-fn open_logs(folder: &Path) -> (Option<(File, File)>, Option<String>) {
+fn open_logs(folder: &Path) -> std::io::Result<(File, File)> {
+    // Attempt both opens as before, retaining stdout's error precedence.
     let stdout = open_log(&folder.join("stdout.log"));
     let stderr = open_log(&folder.join("stderr.log"));
-    let error = stdout
-        .as_ref()
-        .err()
-        .or_else(|| stderr.as_ref().err())
-        .map(ToString::to_string);
-    let logs = stdout.ok().zip(stderr.ok());
-    (logs, error)
+    Ok((stdout?, stderr?))
 }
 
 fn record_start_failure(folder: &Path, mut record: J, error: String) -> Result<(String, String)> {
@@ -406,12 +399,10 @@ fn execute_spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    let spawned = command.spawn();
-    if let Err(error) = &spawned {
-        return record_spawn_failure(folder, record, format!("{:?}", error.kind()));
+    match command.spawn() {
+        Ok(mut child) => execute_child(folder, record, &mut child),
+        Err(error) => record_spawn_failure(folder, record, format!("{:?}", error.kind())),
     }
-    let mut child = spawned.expect("checked spawn");
-    execute_child(folder, record, &mut child)
 }
 
 fn record_spawn_failure(folder: &Path, mut record: J, kind: String) -> Result<(String, String)> {
@@ -432,12 +423,10 @@ fn execute_child(
     let mut record = record;
     record["child_pid"] = json!(child.id());
     let _ = util::atomic_write_json(&folder.join("process.json"), &record);
-    let waited = child.wait();
-    if let Err(error) = &waited {
-        return record_wait_failure(folder, record, error.to_string());
+    match child.wait() {
+        Ok(status) => record_wait_success(folder, record, status),
+        Err(error) => record_wait_failure(folder, record, error.to_string()),
     }
-    let status = waited.expect("checked wait");
-    record_wait_success(folder, record, status)
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {

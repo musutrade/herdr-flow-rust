@@ -9,16 +9,20 @@ use std::time::{Duration, Instant};
 use super::{CommandOptions, CommandOutput};
 use crate::{ErrorKind, FlowError, Result};
 
+// Constructed with Some(child); only Drop takes the child. Keeping Option lets
+// Drop transfer it to a reaper thread after process-group cleanup.
 struct OwnedCommand(Option<Child>);
 
 impl OwnedCommand {
     fn child(&mut self) -> &mut Child {
+        // A live OwnedCommand cannot have run Drop's sole take yet.
         self.0.as_mut().expect("owned command child")
     }
 }
 
 impl Drop for OwnedCommand {
     fn drop(&mut self) {
+        // This is the sole take, and Drop runs once for the initialized owner.
         let mut child = self.0.take().expect("owned command child");
         // process_group(0) reserved this group for this command. waitid below
         // does not reap the leader, even when it exits before its descendants.
