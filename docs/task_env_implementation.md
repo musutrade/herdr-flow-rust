@@ -1,180 +1,110 @@
-# Task Environment Lifecycle Management (Issue #33)
+# Task Environment Lifecycle (Issue #33)
 
-## 概览
+`src/task_env/` implements the first of the six #32 implementation steps: every
+task owns one disposable environment, formal deliveries live outside it, and
+destruction releases the environment as a whole.
 
-本模块实现了任务环境的创建、恢复、停止和销毁功能，建立明确的资源归属和生命周期管理。
+## Ownership model
 
-## 核心功能
+An environment is identified by `task_id` and owns:
 
-### 1. 任务环境创建
+| Resource | Location | Destroyed |
+| --- | --- | --- |
+| workspace root | `workspace_root` | yes |
+| temporary root | `temp_root` | yes |
+| worktrees | inside `workspace_root` | yes |
+| child processes | registered pids | terminated (with descendants) |
+| files kept open | `open_files` | handles closed, files removed |
+| delivery targets | `delivery_targets` | **never** |
 
-```rust
-use herdr_flow::task_env::{create_environment, DeliveryTarget};
-use std::path::PathBuf;
+Delivery targets are resolved with `util::resolve_path` and rejected when they
+resolve inside either disposable root, so a symlink alias cannot smuggle a
+delivery into the disposable region (or vice versa).
 
-// 定义正式交付目标（必须在disposable边界外）
-let delivery_targets = vec![
-    DeliveryTarget::new(
-        PathBuf::from("/repo/main"),
-        "branch".to_string()
-    ),
-];
+## Durable state
 
-// 创建任务环境
-let env = create_environment(
-    "task-123",                          // 任务ID
-    &PathBuf::from("/tmp/task-123-work"), // 工作区root（disposable）
-    delivery_targets,                     // 交付目标
-    &PathBuf::from("/tmp/task-123-temp"), // 临时文件root（disposable）
-)?;
+```
+$HERDR_TASK_ENV_ROOT (default ~/.herdr/flow/task_environments)
+├── registry.json          # live environments, guarded by registry.lock
+├── registry.lock
+├── <task-id>.json         # environment document
+└── cleanup/<task-id>.json # cleanup plan, only while destruction is pending
 ```
 
-### 2. 环境边界保护
+All documents are written with `util::atomic_write_json` (private mode, fsync,
+rename). `HERDR_TASK_ENV_ROOT` overrides the root; tests use it to stay out of
+the real home directory.
+
+## Lifecycle
+
+`create_environment(task_id, workspace_root, delivery_targets, temp_root)`
+
+1. validate `task_id` (`[A-Za-z0-9._-]`, no traversal) and resolve all paths;
+2. reject delivery targets inside a disposable root, and overlapping roots;
+3. reject an existing non-empty, non-directory or symlinked root — the
+   environment only ever destroys what it created;
+4. reserve a resource slot in `registry.json` and write the environment
+   document **before** touching the filesystem;
+5. materialise the roots; on failure remove what this attempt created and
+   release the slot.
+
+`restore_environment(task_id)` returns the stored document as-is. It never
+allocates a second environment, including after a crash mid-create or
+mid-destroy (`creating` / `destroying` are preserved).
+
+`destroy_environment(&env)`
+
+1. write the cleanup plan, mark the document `destroying`;
+2. release file handles, terminate processes (descendants collected first,
+   SIGTERM then SIGKILL, guarded by kernel start time against pid reuse);
+3. remove worktrees that live inside `workspace_root` (`.git` contents are
+   never trusted as a delete target);
+4. remove registered files and then the disposable roots, using
+   `symlink_metadata` walks that never chmod through a symlink;
+5. only when everything is gone: drop the plan, the document and the slot.
+
+A failure keeps the plan and the slot, marks the document `destroy_failed`, and
+`cleanup_failed_environment(task_id)` resumes it. Retries are bounded by
+`MAX_ATTEMPTS` (5), after which the environment is reported as stuck instead of
+silently allocating a new one.
+
+## Resource slots
+
+`registry::occupied_slots()` counts live environments plus pending cleanup
+plans. `registry::limit()` reads `HERDR_TASK_ENV_LIMIT` (default 32). A failed
+cleanup therefore keeps consuming capacity; callers cannot escape a broken
+environment by creating a fresh root. Registry mutation holds an exclusive
+`flock`, so concurrent registrations cannot lose updates.
+
+## Adapter use (implementation 3 continues this)
 
 ```rust
-use herdr_flow::task_env::{is_disposable, is_delivery_target, validate_path};
-
-// 检查路径是否在可销毁边界内
-if is_disposable(&env, &some_path) {
-    // 可以安全删除
-}
-
-// 检查是否是交付目标
-if is_delivery_target(&env, &some_path) {
-    // 这是正式交付位置，应保护
-}
-
-// 验证路径在允许的边界内
-validate_path(&env, &work_path)?;
+let env = create_environment("task-1", &ws, targets, &tmp)?;
+// before writing anything:
+validate_path(&env, &path)?;
+// register everything the adapters create:
+env.register_worktree(&worktree)?;
+env.register_process_with_start(child.id() as i32, None)?;
+env.register_file(&handle_path)?;
 ```
 
-### 3. 资源注册
+`is_disposable` / `is_delivery` classification and `ResourceBoundary` are the
+contract adapters use to reject writes outside managed paths. Wiring Git,
+command execution, Codex/OpenCode, and the "delivered" transition of
+`progress.rs` into this API is implementation step 3/5 — this step only
+provides the primitives and does not treat a bare destroy as business success.
 
-```rust
-// 注册Git worktree
-env.register_worktree(worktree_path)?;
+## Tests
 
-// 注册子进程
-env.register_process(child_pid)?;
-
-// 注册打开的文件
-env.register_file(file_path)?;
-```
-
-### 4. 环境销毁
-
-```rust
-use herdr_flow::task_env::destroy_environment;
-
-// 销毁环境，释放所有资源
-destroy_environment(&env)?;
-```
-
-## 实现特性
-
-### ✓ 已实现
-
-- [x] 环境身份、根目录、交付目标定义
-- [x] 创建与恢复绑定同一环境，不重复分配
-- [x] 正式交付物与用户已有文件保护
-- [x] 中断创建、重复销毁的崩溃恢复
-- [x] 幂等的基础销毁操作
-- [x] 环境状态持久化到~/.herdr/flow/task_environments/
-- [x] 全局环境注册表
-- [x] 资源边界验证（防止写入未管理路径）
-- [x] Worktree、进程、文件句柄注册
-- [x] 清理失败的重试机制
-
-### 待集成（后续实施步骤）
-
-- [ ] 集成到Git适配器（实施3）
-- [ ] 集成到命令执行适配器（实施3）
-- [ ] 集成到Codex/OpenCode适配器（实施3）
-- [ ] 真实交付调用（实施5）
-- [ ] 最终完成转换（实施5）
-
-## 数据结构
-
-### TaskEnvironment
-
-```rust
-pub struct TaskEnvironment {
-    pub task_id: String,
-    pub workspace_root: PathBuf,
-    pub temp_root: PathBuf,
-    pub delivery_targets: Vec<DeliveryTarget>,
-    pub state: EnvironmentState,
-    pub worktree_registrations: Vec<PathBuf>,
-    pub child_processes: Vec<i32>,
-    pub open_files: Vec<PathBuf>,
-    // ...
-}
-```
-
-### DeliveryTarget
-
-```rust
-pub struct DeliveryTarget {
-    pub path: PathBuf,
-    pub target_type: String,
-    pub description: Option<String>,
-}
-```
-
-### EnvironmentState
-
-```rust
-pub enum EnvironmentState {
-    Creating,     // 环境创建中
-    Active,       // 环境活跃
-    Destroying,   // 环境销毁中
-    DestroyFailed, // 销毁失败
-}
-```
-
-## 崩溃恢复
-
-系统在以下场景中支持恢复：
-
-1. **创建中断**：下次调用自动检测并从断点继续
-2. **销毁中断**：CleanupState保存剩余清理任务
-3. **清理失败**：调用`cleanup_failed_environment(task_id)`重试
-
-## 资源清理顺序
-
-1. 终止活跃子进程（SIGTERM → SIGKILL）
-2. 移除Git worktree注册
-3. 删除workspace和temp目录
-4. 取消环境注册
-5. 删除状态文件
-
-## 测试
-
-运行单元测试：
+`tests/task_env_tests.rs` (18 tests) covers: round-trip create/destroy, restore
+without duplication, delivery survival, symlink alias rejection, pre-existing
+assets, delivery inside a root, protected permissions, forged `gitdir`,
+descriptor release, descendant termination, invalid pids, failed-destroy slot
+retention and retry, retry exhaustion, interrupted create, concurrent
+registrations, task-id traversal, boundary validation, and idempotent destroy.
 
 ```bash
 cargo test --test task_env_tests
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
-
-## 相关文件
-
-- `src/task_env/mod.rs` - 公共API
-- `src/task_env/env.rs` - 核心环境管理
-- `src/task_env/boundary.rs` - 边界保护和路径验证
-- `src/task_env/registry.rs` - 全局环境注册表
-- `src/task_env/cleanup.rs` - 清理和销毁逻辑
-- `tests/task_env_tests.rs` - 集成测试
-
-## 下一步
-
-本实现提供了Issue #33所需的基础能力。后续实施步骤需要：
-
-1. **实施3**：在各适配器中使用TaskEnvironment
-   - Git操作传递环境，worktree在环境内创建
-   - 命令执行在环境内运行，注册进程
-   - 验证所有写入路径在环境边界内
-
-2. **实施5**：集成到任务完成流程
-   - 在`progress::apply_complete`中调用销毁
-   - 确认交付成功后才销毁环境
-   - 任务成功 = 正式交付 + 环境已销毁

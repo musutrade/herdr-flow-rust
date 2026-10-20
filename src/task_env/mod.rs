@@ -1,22 +1,40 @@
-//! Task environment lifecycle management.
+//! Task environment lifecycle: identity, disposable boundary, delivery targets
+//! and crash-safe destruction.
 //!
-//! Establishes clear resource ownership from task creation: agreements on formal
-//! deliverables in target locations, and all task work within disposable environments.
-//! Provides create, restore, stop, and destroy operations with crash recovery.
+//! An environment owns two disposable roots (workspace and temporary), keeps
+//! formal delivery targets outside them, occupies one resource slot while it
+//! lives, and is destroyed as a unit. Adapters receive the environment and use
+//! [`validate_path`] before writing, so work cannot escape into unmanaged
+//! directories or into a delivery target.
 
 mod boundary;
 mod cleanup;
 mod env;
 mod registry;
 
-pub use boundary::{validate_path, DeliveryTarget, ResourceBoundary};
-pub use cleanup::{cleanup_failed_environment, CleanupState};
-pub use env::{TaskEnvironment, EnvironmentState};
-pub use registry::{EnvironmentRegistry, register_environment, unregister_environment};
+pub use boundary::{
+    is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets,
+    validate_no_overlap, validate_path, DeliveryTarget, ResourceBoundary,
+};
+pub use cleanup::{cleanup_failed_environment, CleanupState, MAX_ATTEMPTS};
+pub use env::{
+    process_is_alive, process_start_time, restore, validate_ancestors, EnvironmentState,
+    RegisteredProcess, TaskEnvironment,
+};
+pub use registry::register_environment;
+pub use registry::{
+    cleanup_state_path, environment_state_path, is_registered, limit, list_registered,
+    load_registry, occupied_slots, registry_path, state_root, unregister_environment,
+    validate_task_id, EnvironmentRegistry, Registry, RegistryEntry, DEFAULT_LIMIT,
+};
 
 use crate::error::Result;
 
-/// Create a new task environment with the given identity and targets.
+/// Create a new task environment and reserve its resource slot.
+///
+/// `workspace_root` and `temp_root` must be absent or empty: the environment
+/// only ever destroys directories it created. Delivery targets must resolve
+/// outside both roots.
 pub fn create_environment(
     task_id: &str,
     workspace_root: &std::path::Path,
@@ -26,22 +44,18 @@ pub fn create_environment(
     env::create(task_id, workspace_root, delivery_targets, temp_root)
 }
 
-/// Restore an existing task environment from its persistent state.
-pub fn restore_environment(task_id: &str, state_root: &std::path::Path) -> Result<TaskEnvironment> {
-    env::restore(task_id, state_root)
+/// Reopen the environment belonging to `task_id`.
+///
+/// Restoring never allocates a second environment: it returns the registered
+/// document, including one left in `creating` or `destroying` by a crash.
+pub fn restore_environment(task_id: &str) -> Result<TaskEnvironment> {
+    restore(task_id)
 }
 
-/// Destroy a task environment, releasing all resources.
-pub fn destroy_environment(env: &TaskEnvironment) -> Result<()> {
-    cleanup::destroy(env)
-}
-
-/// Check if a path is within the environment's disposable boundary.
-pub fn is_disposable(env: &TaskEnvironment, path: &std::path::Path) -> bool {
-    boundary::is_within_disposable(env, path)
-}
-
-/// Check if a path is a valid delivery target.
-pub fn is_delivery_target(env: &TaskEnvironment, path: &std::path::Path) -> bool {
-    boundary::is_delivery(env, path)
+/// Destroy an environment: release every resource, then free its slot.
+///
+/// Idempotent. A failed attempt keeps the plan and the slot, and can be
+/// resumed with [`cleanup_failed_environment`].
+pub fn destroy_environment(environment: &TaskEnvironment) -> Result<()> {
+    cleanup::destroy(environment)
 }

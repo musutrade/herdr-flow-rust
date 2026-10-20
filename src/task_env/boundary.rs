@@ -1,27 +1,29 @@
-//! Resource boundary protection and path validation.
+//! Delivery targets and the disposable/protected resource boundary.
+//!
+//! Every comparison resolves both sides with `util::resolve_path`, so a
+//! symlink alias cannot be used to smuggle a delivery target inside the
+//! disposable boundary (or to hide a disposable path behind an alias).
 
 use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FlowError, Result};
 use crate::util;
+
 use super::env::TaskEnvironment;
 
-/// A formal delivery target outside the disposable environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A formal delivery location that must survive environment destruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryTarget {
-    /// Target path (must be outside disposable boundaries).
+    /// Resolved absolute target path.
     pub path: PathBuf,
-    
-    /// Target type (e.g., "pr", "branch", "file").
+    /// Kind of artefact, for diagnostics (for example `branch` or `file`).
     pub target_type: String,
-    
-    /// Optional description.
     pub description: Option<String>,
 }
 
 impl DeliveryTarget {
-    /// Create a new delivery target.
     pub fn new(path: PathBuf, target_type: String) -> Self {
         Self {
             path,
@@ -29,9 +31,8 @@ impl DeliveryTarget {
             description: None,
         }
     }
-    
-    /// Create a delivery target with description.
-    pub fn with_description(path: PathBuf, target_type: String, description: String) -> Self {
+
+    pub fn described(path: PathBuf, target_type: String, description: String) -> Self {
         Self {
             path,
             target_type,
@@ -40,174 +41,169 @@ impl DeliveryTarget {
     }
 }
 
-/// A resource boundary defining disposable and protected areas.
-#[derive(Debug)]
+/// Normalise and validate delivery targets against both disposable roots.
+pub fn validate_delivery_targets(
+    targets: Vec<DeliveryTarget>,
+    workspace_root: &Path,
+    temp_root: &Path,
+) -> Result<Vec<DeliveryTarget>> {
+    let mut resolved = Vec::with_capacity(targets.len());
+    for target in targets {
+        let path = util::resolve_path(&target.path);
+        for root in [workspace_root, temp_root] {
+            if util::is_relative_to(&path, root) {
+                return Err(FlowError::progress(format!(
+                    "delivery target {} is inside disposable root {}",
+                    path.display(),
+                    root.display()
+                )));
+            }
+        }
+        resolved.push(DeliveryTarget {
+            path,
+            target_type: target.target_type,
+            description: target.description,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Disposable and protected path sets for one environment.
+#[derive(Debug, Clone)]
 pub struct ResourceBoundary {
-    /// Disposable workspace roots.
     pub disposable: Vec<PathBuf>,
-    
-    /// Protected delivery targets.
     pub protected: Vec<PathBuf>,
 }
 
 impl ResourceBoundary {
-    /// Create a boundary from an environment.
     pub fn from_environment(env: &TaskEnvironment) -> Self {
-        let disposable = vec![
-            env.workspace_root.clone(),
-            env.temp_root.clone(),
-        ];
-        
-        let protected = env.delivery_targets
-            .iter()
-            .map(|t| t.path.clone())
-            .collect();
-        
         Self {
-            disposable,
-            protected,
+            disposable: vec![
+                util::resolve_path(&env.workspace_root),
+                util::resolve_path(&env.temp_root),
+            ],
+            protected: env
+                .delivery_targets
+                .iter()
+                .map(|target| util::resolve_path(&target.path))
+                .collect(),
         }
     }
-    
-    /// Check if a path is within any disposable boundary.
+
+    /// True when `path` lands inside a disposable root.
     pub fn is_disposable(&self, path: &Path) -> bool {
         let resolved = util::resolve_path(path);
-        self.disposable.iter().any(|root| {
-            util::is_relative_to(&resolved, root)
-        })
+        self.disposable
+            .iter()
+            .any(|root| util::is_relative_to(&resolved, root))
     }
-    
-    /// Check if a path is a protected target.
+
+    /// True when `path` is, or lives under, a protected target.
     pub fn is_protected(&self, path: &Path) -> bool {
         let resolved = util::resolve_path(path);
-        self.protected.iter().any(|target| {
-            util::resolve_path(target) == resolved || 
-            util::is_relative_to(&resolved, target)
-        })
+        self.protected
+            .iter()
+            .any(|target| util::is_relative_to(&resolved, target))
     }
-    
-    /// Validate that a path is within the allowed boundaries.
+
+    /// Reject paths that are neither disposable nor protected.
     pub fn validate(&self, path: &Path) -> Result<()> {
-        if self.is_protected(path) {
+        if self.is_disposable(path) || self.is_protected(path) {
             return Ok(());
         }
-        
-        if self.is_disposable(path) {
-            return Ok(());
-        }
-        
-        Err(FlowError::progress(&format!(
-            "path {:?} is outside managed boundaries",
-            path
+        Err(FlowError::progress(format!(
+            "path {} is outside every managed boundary",
+            path.display()
         )))
     }
 }
 
-/// Check if a path is within the environment's disposable boundary.
+/// True when `path` lies inside the environment's disposable roots.
 pub fn is_within_disposable(env: &TaskEnvironment, path: &Path) -> bool {
-    let boundary = ResourceBoundary::from_environment(env);
-    boundary.is_disposable(path)
+    ResourceBoundary::from_environment(env).is_disposable(path)
 }
 
-/// Check if a path is a delivery target.
+/// True when `path` is a formal delivery target.
 pub fn is_delivery(env: &TaskEnvironment, path: &Path) -> bool {
-    let boundary = ResourceBoundary::from_environment(env);
-    boundary.is_protected(path)
+    ResourceBoundary::from_environment(env).is_protected(path)
 }
 
-/// Validate that a path is within allowed boundaries for the environment.
+/// Validate that `path` is inside a managed boundary.
 pub fn validate_path(env: &TaskEnvironment, path: &Path) -> Result<()> {
-    let boundary = ResourceBoundary::from_environment(env);
-    boundary.validate(path)
+    ResourceBoundary::from_environment(env).validate(path)
 }
 
-/// Detect if two paths overlap (one contains the other).
-#[allow(dead_code)]
-pub fn paths_overlap(a: &Path, b: &Path) -> bool {
-    let a_resolved = util::resolve_path(a);
-    let b_resolved = util::resolve_path(b);
-    
-    util::is_relative_to(&a_resolved, &b_resolved) ||
-    util::is_relative_to(&b_resolved, &a_resolved)
+/// True when either resolved path contains the other.
+pub fn paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = util::resolve_path(left);
+    let right = util::resolve_path(right);
+    util::is_relative_to(&left, &right) || util::is_relative_to(&right, &left)
 }
 
-/// Validate that workspace roots don't overlap with protected paths.
-#[allow(dead_code)]
+/// Reject workspace/temp/protected combinations that would overlap.
 pub fn validate_no_overlap(
     workspace_root: &Path,
     temp_root: &Path,
     protected_paths: &[PathBuf],
 ) -> Result<()> {
-    // Check workspace against protected
     for protected in protected_paths {
-        if paths_overlap(workspace_root, protected) {
-            return Err(FlowError::progress(&format!(
-                "workspace {:?} overlaps with protected path {:?}",
-                workspace_root, protected
-            )));
+        for root in [workspace_root, temp_root] {
+            if paths_overlap(root, protected) {
+                return Err(FlowError::progress(format!(
+                    "{} overlaps with protected path {}",
+                    root.display(),
+                    protected.display()
+                )));
+            }
         }
     }
-    
-    // Check temp against protected
-    for protected in protected_paths {
-        if paths_overlap(temp_root, protected) {
-            return Err(FlowError::progress(&format!(
-                "temp root {:?} overlaps with protected path {:?}",
-                temp_root, protected
-            )));
-        }
-    }
-    
-    // Check workspace against temp
     if paths_overlap(workspace_root, temp_root) {
-        return Err(FlowError::progress(&format!(
-            "workspace {:?} overlaps with temp root {:?}",
-            workspace_root, temp_root
+        return Err(FlowError::progress(format!(
+            "{} overlaps with {}",
+            workspace_root.display(),
+            temp_root.display()
         )));
     }
-    
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    
+    use crate::util::fs::test_tempdir;
+    use std::os::unix::fs::symlink;
+
     #[test]
-    fn test_paths_overlap() {
-        assert!(paths_overlap(
-            Path::new("/foo/bar"),
-            Path::new("/foo")
-        ));
-        
-        assert!(paths_overlap(
-            Path::new("/foo"),
-            Path::new("/foo/bar")
-        ));
-        
-        assert!(!paths_overlap(
-            Path::new("/foo/bar"),
-            Path::new("/baz/qux")
-        ));
+    fn overlap_detects_containment_in_both_directions() {
+        assert!(paths_overlap(Path::new("/foo/bar"), Path::new("/foo")));
+        assert!(paths_overlap(Path::new("/foo"), Path::new("/foo/bar")));
+        assert!(!paths_overlap(Path::new("/foo/bar"), Path::new("/baz/qux")));
     }
-    
+
     #[test]
-    fn test_boundary_validation() {
+    fn symlink_alias_is_not_a_disposable_or_protected_escape() {
+        let directory = test_tempdir();
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = directory.path().join("alias");
+        symlink(&real, &alias).unwrap();
+
         let boundary = ResourceBoundary {
-            disposable: vec![
-                PathBuf::from("/tmp/task-123"),
-                PathBuf::from("/work/task-123"),
-            ],
-            protected: vec![
-                PathBuf::from("/repo/main"),
-            ],
+            disposable: vec![real.clone()],
+            protected: vec![directory.path().join("protected")],
         };
-        
-        assert!(boundary.is_disposable(Path::new("/tmp/task-123/file.txt")));
-        assert!(boundary.is_disposable(Path::new("/work/task-123/subdir/file.txt")));
-        assert!(boundary.is_protected(Path::new("/repo/main/file.txt")));
-        assert!(!boundary.is_disposable(Path::new("/other/path")));
-        assert!(!boundary.is_protected(Path::new("/other/path")));
+        assert!(boundary.is_disposable(&alias.join("child")));
+        assert!(!boundary.is_protected(&alias.join("child")));
+    }
+
+    #[test]
+    fn validate_rejects_unmanaged_paths() {
+        let boundary = ResourceBoundary {
+            disposable: vec![PathBuf::from("/tmp/task")],
+            protected: vec![PathBuf::from("/repo/main")],
+        };
+        assert!(boundary.validate(Path::new("/tmp/task/file")).is_ok());
+        assert!(boundary.validate(Path::new("/repo/main/file")).is_ok());
+        assert!(boundary.validate(Path::new("/elsewhere")).is_err());
     }
 }
