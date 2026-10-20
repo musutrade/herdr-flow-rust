@@ -195,6 +195,16 @@ impl TaskEnvironment {
     /// group, and it inherits the environment marker. Only processes started
     /// this way (or descended from them) can be registered and reclaimed.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        self.process_command(program, true)
+    }
+
+    /// Trusted namespace bootstrap only: bwrap must write uid_map before its
+    /// read-only mount policy can take effect. Never execute an agent directly.
+    pub(crate) fn namespace_command(&self) -> Command {
+        self.process_command("/usr/bin/bwrap", false)
+    }
+
+    fn process_command(&self, program: impl AsRef<OsStr>, confine: bool) -> Command {
         let mut command = Command::new(program);
         command.env(MARKER_ENV, &self.instance_id);
         // Keep temporary files inside the disposable boundary as well.
@@ -208,7 +218,11 @@ impl TaskEnvironment {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                confine_renames_to(&roots)
+                if confine {
+                    confine_renames_to(&roots)
+                } else {
+                    Ok(())
+                }
             });
         }
         command
@@ -534,7 +548,7 @@ struct LandlockPathBeneathAttr {
 /// assets), cannot truncate state files, and cannot rename or remove the roots
 /// themselves. This makes both the cleanup metadata and the parent directory
 /// entry something the task cannot rewrite.
-fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
+pub(crate) fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
     set_no_new_privs().and_then(|()| {
         required_landlock_abi().and_then(|abi| {
             let handled = handled_access(abi);
@@ -548,7 +562,22 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
 fn add_root_rules(ruleset: i32, handled: u64, roots: &[PathBuf]) -> std::io::Result<()> {
     roots
         .iter()
-        .try_for_each(|root| add_root_rule(ruleset, handled, root))
+        .try_for_each(|root| add_root_rule(ruleset, handled, root))?;
+    add_null_rule(ruleset)
+}
+
+// /dev/null is a sink, not retained task storage. Native runtimes use it for
+// detached subprocess I/O. No other device or global path becomes writable.
+fn add_null_rule(ruleset: i32) -> std::io::Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+        .open("/dev/null")?;
+    let rule = LandlockPathBeneathAttr {
+        allowed_access: LANDLOCK_ACCESS_FS_WRITE_FILE,
+        parent_fd: file.as_raw_fd(),
+    };
+    add_rule_syscall(ruleset, &rule)
 }
 
 fn set_no_new_privs() -> std::io::Result<()> {
@@ -1051,7 +1080,11 @@ fn materialize(workspace_root: &Path, temp_root: &Path) -> Result<()> {
                 root.display()
             )));
         }
-        std::fs::create_dir(root).map_err(|error| {
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(root)
+        }
+        .map_err(|error| {
             FlowError::progress(format!("cannot create {}: {error}", root.display()))
         })?;
     }

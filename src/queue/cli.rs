@@ -824,7 +824,15 @@ fn task_action_state(
     spec: &J,
     factory: &ReceiverFactory,
 ) -> Result<Outcome> {
-    let session = crate::opencode::session::receiver_session(root)?;
+    let session = if args.action == "task-accept" {
+        let queue = super::load_queue(root)?;
+        let task = &queue["tasks"][spec["task"].as_str().unwrap_or_default()];
+        let op = &task["operations"][spec["operation"].as_str().unwrap_or_default()];
+        let identity = json!({"adapter":op.get("adapter").cloned().unwrap_or(json!("codex")),"session":op["session"]});
+        Some(crate::identity::environment(&identity)?)
+    } else {
+        crate::opencode::session::receiver_session(root)?
+    };
     let state = task_action(root, &args.action, spec, session.as_deref(), factory)?;
     Ok(Outcome::state(state))
 }

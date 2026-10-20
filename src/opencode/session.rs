@@ -148,10 +148,10 @@ impl SessionAdapter {
         let Some(mut journal) = load_submission(&self.root())? else {
             return Ok(None);
         };
+        verify_journal_binding(&journal, &self.state)?;
         if terminal(&journal) {
             return Ok(Some(journal));
         }
-        verify_journal_binding(&journal, &self.state)?;
         let live = self.live_state()?;
         let messages = self.api.get(&self.route("/message?limit=200"))?;
         let rows = messages

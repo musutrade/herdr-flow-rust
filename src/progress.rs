@@ -601,15 +601,17 @@ fn attach_registration_writer_steps(
     writer_session(wait)
         .and_then(|session| reserve_registration_writer(s, spec, task_json, task, &session))
         .and_then(|writer| writer_with_evidence(spec, writer))
-        .and_then(|writer| set_task_writer(task_json, writer))
+        .and_then(|mut writer| {
+            writer["producer"] = crate::identity::required_producer(wait)?;
+            set_task_writer(task_json, writer)
+        })
 }
 
 fn writer_session(wait: &J) -> Result<String> {
-    text(
-        model::get(wait, "producer_session"),
-        "initial producer session",
-        128,
-    )
+    Ok(crate::identity::required_producer(wait)?["session"]
+        .as_str()
+        .unwrap()
+        .to_string())
 }
 
 fn reserve_registration_writer(
@@ -976,7 +978,7 @@ fn require_dispatch_instruction(a: &J) -> Result<()> {
 
 fn dispatch_wait(s: &J, t: &J, a: &J, context: &mut DispatchContext) -> Result<()> {
     dispatch_probe_wait(s, t, a, &context.assignment)
-        .and_then(|wait| ensure_producer_session(&wait, &context.session).map(|()| wait))
+        .and_then(|wait| ensure_producer_session(&wait, a, &context.session).map(|()| wait))
         .and_then(|wait| set_dispatch_wait_id(context, &wait))
         .and_then(|()| {
             ensure_wait_unconsumed(s, &context.wait_id, "successor wait already has events")
@@ -992,9 +994,13 @@ fn dispatch_probe_wait(s: &J, t: &J, a: &J, assignment: &str) -> Result<J> {
     wait_for(s, model::get(a, "wait"), &probe)
 }
 
-fn ensure_producer_session(wait: &J, session: &str) -> Result<()> {
+fn ensure_producer_session(wait: &J, action: &J, session: &str) -> Result<()> {
+    let actual = crate::identity::required_producer(wait)?;
+    let expected = crate::identity::validate(
+        &json!({"adapter":action.get("adapter").cloned().unwrap_or(json!("codex")),"session":session}),
+    )?;
     ensure(
-        model::string(wait, "producer_session").as_deref() == Some(session),
+        actual == expected,
         "successor result wait must pin the receiving producer session",
     )
 }
@@ -1061,13 +1067,17 @@ fn reserve_dispatch_writer_now(s: &J, t: &mut J, a: &J, context: &DispatchContex
                 &model::string(t, "task").unwrap_or_default(),
             )
         })
-        .map(|writer| t["writer"] = writer)
+        .map(|mut writer| {
+            writer["producer"] = json!({"adapter":a.get("adapter").cloned().unwrap_or(json!("codex")),"session":context.session});
+            t["writer"] = writer;
+        })
 }
 
 fn record_dispatch_operation(t: &mut J, a: &J, now: f64, context: &DispatchContext) {
     lineage::advance_session(t);
     t["operations"][&context.opid] = json!({
         "id": context.opid,
+        "adapter": a.get("adapter").cloned().unwrap_or(json!("codex")),
         "assignment": context.assignment,
         "session": context.session,
         "owner": context.owner,
@@ -1685,6 +1695,19 @@ fn commit_sent(s: &mut J, spec: &J, mut task: J, now: f64) -> Result<J> {
 }
 
 pub fn accept(s: &mut J, spec: &J, session: &str, now: f64) -> Result<J> {
+    accept_identity(s, spec, &json!({"adapter":"codex","session":session}), now)
+}
+
+pub fn accept_identity(s: &mut J, spec: &J, identity: &J, now: f64) -> Result<J> {
+    let identity = crate::identity::validate(identity)?;
+    let name = model::string(spec, "task").unwrap_or_default();
+    let operation = spec_operation(spec);
+    let expected = s["tasks"][name]["operations"][operation]
+        .get("adapter")
+        .cloned()
+        .unwrap_or(json!("codex"));
+    ensure(identity["adapter"] == expected, "takeover adapter mismatch")?;
+    let session = identity["session"].as_str().unwrap();
     object(spec, "takeover spec")
         .and_then(|_| accept_load(s, spec, session, now))
         .map(|(task, evidence)| accept_commit(s, spec, session, evidence, task, now))

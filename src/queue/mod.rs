@@ -319,6 +319,7 @@ const WAIT_TEXT_KEYS: &[&str] = &["task", "owner", "reason", "condition"];
 
 /// Validate the JSON object accepted by `queue add`.
 pub fn validate_wait(w: &J) -> Result<()> {
+    crate::identity::producer(w)?;
     ensure_wait_required(w)?;
     validate_wait_fields(w)
 }
@@ -547,17 +548,32 @@ fn signal_producer(
 }
 
 fn ensure_signal_producer(w: &J) -> Result<()> {
-    match model::string(w, "producer_session") {
-        Some(producer_session) => ensure_producer_thread(&producer_session),
-        _ => Ok(()),
-    }
+    crate::identity::check_environment(w)
 }
 
-fn ensure_producer_thread(producer_session: &str) -> Result<()> {
-    if std::env::var("CODEX_THREAD_ID").ok().as_deref() != Some(producer_session) {
-        return Err(queue_error("producer session mismatch"));
+/// Native adapter already verified its remote session; never impersonate an env var.
+pub(crate) fn signal_native(root: &Path, identity: &J, result: &J) -> Result<J> {
+    let s = load_queue(root)?;
+    let id = result["wait"]
+        .as_str()
+        .ok_or_else(|| queue_error("missing wait"))?;
+    let w = wait_for_signal(&s, id)?;
+    if crate::identity::required_producer(&w)? != crate::identity::validate(identity)? {
+        return Err(queue_error("native producer identity mismatch"));
     }
-    Ok(())
+    ensure_signal_allowed(&s, &w)?;
+    let outcome = result["outcome"].as_str().unwrap_or_default();
+    let summary = result["summary"].as_str().unwrap_or_default();
+    validate_signal_input(outcome, summary)?;
+    signal_store(
+        root,
+        &s,
+        id,
+        &w,
+        outcome,
+        summary,
+        result["evidence"].as_str(),
+    )
 }
 
 fn signal_store(
@@ -2684,7 +2700,14 @@ fn task_accept(s: &mut J, spec: &J, session: Option<&str>, now: f64) -> Result<(
             "task mutation requires the registered coordinator session",
         ));
     };
-    progress::accept(s, spec, session, now).map(|_| ())
+    let name = spec["task"].as_str().unwrap_or_default();
+    let operation = spec["operation"].as_str().unwrap_or_default();
+    let adapter = s["tasks"][name]["operations"][operation]
+        .get("adapter")
+        .cloned()
+        .unwrap_or(json!("codex"));
+    progress::accept_identity(s, spec, &json!({"adapter":adapter,"session":session}), now)
+        .map(|_| ())
 }
 
 fn task_mutate(
