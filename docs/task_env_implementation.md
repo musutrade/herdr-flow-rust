@@ -13,7 +13,7 @@ An environment is identified by `task_id` plus a random `instance_id`, and owns:
 | workspace root | `workspace_root` | yes, identity-checked |
 | temporary root | `temp_root` | yes, identity-checked |
 | worktrees | inside `workspace_root` | removed from the recorded repo |
-| child processes | registered process groups | whole group terminated |
+| child processes | registered groups + snapshotted descendants | frozen, then killed |
 | files kept open | `open_files` | handles closed, entries unlinked |
 | delivery targets | `delivery_targets` | **never** |
 
@@ -28,7 +28,8 @@ Three facts make deletion safe:
 3. **Per-task lock.** The live handle holds an exclusive `flock` on
    `locks/<task>.lock`. `restore_environment` and `cleanup_failed_environment`
    refuse to run while another handle owns the task, so descriptors and slots
-   are only ever released by their owner.
+   are only ever released by their owner. The handle is deliberately not
+   `Clone`: a cloned snapshot could omit resources registered after the clone.
 
 Delivery targets are resolved and must not overlap either disposable root in
 either direction; this also closes the "protected directory contains the
@@ -77,20 +78,30 @@ recovery). It fails while a live handle owns the task.
 1. verify the document's `instance_id` matches the handle;
 2. write the cleanup plan and mark the document `destroying`;
 3. close the environment's descriptors;
-4. terminate registered process groups (re-enumerating members after each
-   signal, so children spawned in a SIGTERM handler are also killed);
+4. terminate registered processes: freeze with `SIGSTOP` first, include the
+   descendant snapshot taken at registration plus a fresh `/proc` descendant
+   walk, then `SIGKILL` every recorded pid. Freezing first means a `SIGTERM`
+   handler can never spawn a late child, and the snapshot catches a descendant
+   that called `setsid()` or was orphaned by an early-exiting parent;
 5. remove worktrees through the repository recorded at registration and verify
    with `git worktree list`; a leftover registration keeps the item pending;
 6. unlink registered files relative to an `O_NOFOLLOW` walk (a leaf swapped for
-   a symlink loses only the link), then remove roots whose identity still
-   matches, widening permissions on directories only;
+   a symlink loses only the link), then remove roots through a pinned
+   `O_NOFOLLOW` directory descriptor whose `(dev, ino)` still matches. The tree
+   is emptied with `unlinkat` relative to that descriptor, so renaming or
+   replacing the path after verification cannot redirect a deletion; directory
+   modes are widened with `fchmod` only;
 7. only when everything is gone: remove the plan, the document (if it is still
    this instance) and the index entry.
 
 A failure keeps the plan, the document (`destroy_failed`) and the slot.
-`cleanup_failed_environment(task_id)` resumes it, up to `MAX_ATTEMPTS`.
-`interrupted_tasks()` / `recover_interrupted(task_id)` handle environments left
-behind by a crash during create or destroy.
+`cleanup_failed_environment(task_id)` resumes it, up to `MAX_ATTEMPTS`; items
+whose resources are already gone are treated as complete, so a crash mid-retry
+can finish. `interrupted_tasks()` / `recover_interrupted(task_id)` handle any
+non-active document (`creating`, `destroying`, `destroy_failed`) or a leftover
+plan. A root without a recorded identity is only reclaimed when it is empty and
+no other live task claims it, so recovering an interrupted intent can never
+delete another environment's data.
 
 ## Resource slots
 
@@ -112,8 +123,10 @@ env.register_worktree(&worktree)?;                 // repo captured from .git
 
 Registered processes must be spawned in their own session/process group
 (`setsid`, as `util::process::spawn_with_ready` already does); registration of a
-process sharing the supervisor's group is refused because its descendants could
-not be reclaimed.
+process sharing the supervisor's group is refused. Destruction is forceful: the
+group is frozen before any signal, so graceful shutdown handlers do not run.
+That trade-off is deliberate, because a handler that spawns a detached child
+would otherwise outlive the environment.
 
 Wiring Git, command execution, Codex/OpenCode and the "delivered" transition of
 `progress.rs` into this API is implementation step 3/5 — this step provides the
@@ -121,7 +134,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (25 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (29 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -129,7 +142,9 @@ descriptor ownership, stale-handle isolation, early-exit and SIGTERM-spawned
 descendants, process-group registration, failed-destroy slot retention and
 retry, retry exhaustion, interrupted create, interrupted-state recovery,
 concurrent registrations, task-id traversal, internal-name shadowing, boundary
-validation, and idempotent destroy.
+validation, intent recovery that must not touch another task's root, recovery
+from a `destroying` state, retry after the root is already gone, and idempotent
+destroy.
 
 ```bash
 cargo test --test task_env_tests

@@ -332,6 +332,22 @@ pub fn unregister_environment(task_id: &str, instance_id: &str) -> Result<()> {
     }
 }
 
+/// Whether another live environment (different instance) claims `path`.
+pub fn root_claimed_by_other(path: &Path, instance_id: &str) -> Result<bool> {
+    let registry = load_registry()?;
+    let mut claimed = false;
+    for entry in registry.entries() {
+        if entry.instance_id == instance_id {
+            continue;
+        }
+        if util::overlap(path, &entry.workspace_root) || util::overlap(path, &entry.temp_root) {
+            claimed = true;
+            break;
+        }
+    }
+    Ok(claimed)
+}
+
 pub fn is_registered(task_id: &str) -> Result<bool> {
     validate_task_id(task_id)?;
     Ok(load_registry()?.contains(task_id))

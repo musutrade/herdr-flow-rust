@@ -432,7 +432,7 @@ fn destroy_terminates_the_whole_registered_process_group() {
 }
 
 #[test]
-fn child_spawned_in_sigterm_handler_is_also_killed() {
+fn sigterm_handler_cannot_spawn_a_survivor() {
     let harness = Harness::new();
     let mut env = harness.create("sigterm-child");
     let pidfile = harness.path().join("trap-child.pid");
@@ -441,21 +441,51 @@ fn child_spawned_in_sigterm_handler_is_also_killed() {
         "trap 'sleep 60 & echo $! > \"$1\"' TERM; while :; do sleep 0.05; done",
         &pidfile,
     );
-    let parent_pid = parent.id() as i32;
-    env.register_process(parent_pid).unwrap();
+    env.register_process(parent.id() as i32).unwrap();
 
+    // Destruction freezes the process group before signalling, so the TERM
+    // handler either never runs or any child it did spawn is killed in the
+    // same pass. Both outcomes are acceptable; a survivor is not.
     destroy_environment(&env).unwrap();
     let _ = parent.wait();
-    let child = wait_for_pid_file(&pidfile);
-    let still_alive = alive(child);
-    if still_alive {
-        // SAFETY: best-effort cleanup of the isolated child we spawned.
-        unsafe { libc::kill(child, libc::SIGKILL) };
+    if let Ok(text) = fs::read_to_string(&pidfile) {
+        if let Ok(child) = text.trim().parse::<i32>() {
+            let still_alive = alive(child);
+            if still_alive {
+                // SAFETY: best-effort cleanup of the isolated child we spawned.
+                unsafe { libc::kill(child, libc::SIGKILL) };
+            }
+            assert!(
+                !still_alive,
+                "child spawned during SIGTERM survived destroy"
+            );
+        }
     }
-    assert!(
-        !still_alive,
-        "child spawned during SIGTERM survived destroy"
+}
+
+#[test]
+fn descendant_that_left_the_group_is_killed_from_the_registration_snapshot() {
+    let harness = Harness::new();
+    let mut env = harness.create("setsid-orphan");
+    let pidfile = harness.path().join("setsid.pid");
+
+    // The parent starts a child in a new session, then exits. The child is
+    // recorded at registration, while its parent link is still visible.
+    let mut parent = spawn_detached(
+        "setsid sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
+        &pidfile,
     );
+    let descendant = wait_for_pid_file(&pidfile);
+    env.register_process(parent.id() as i32).unwrap();
+    let _ = parent.wait();
+
+    destroy_environment(&env).unwrap();
+    let still_alive = alive(descendant);
+    if still_alive {
+        // SAFETY: best-effort cleanup of the isolated descendant we spawned.
+        unsafe { libc::kill(descendant, libc::SIGKILL) };
+    }
+    assert!(!still_alive, "setsid descendant survived destroy");
 }
 
 #[test]
@@ -558,6 +588,79 @@ fn interrupted_state_is_detected_and_recovered() {
     assert!(recover_interrupted("recover").unwrap());
     assert!(!environment_state_path("recover").unwrap().exists());
     assert!(!is_registered("recover").unwrap());
+}
+
+#[test]
+fn recovery_of_an_unclaimed_intent_cannot_delete_another_task_root() {
+    let harness = Harness::new();
+    let owner = harness.create("owner");
+    let intent = harness.create("intent");
+
+    // Simulate a crash after the intent was written but before the root was
+    // claimed: point the intent document at the owner's live workspace.
+    let text = fs::read_to_string(intent.state_file()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["state"] = serde_json::json!("creating");
+    value["workspace_root"] = serde_json::json!(owner.workspace_root);
+    value["workspace_identity"] = serde_json::Value::Null;
+    value["temp_root"] = serde_json::json!(harness.temp("intent"));
+    value["temp_identity"] = serde_json::Value::Null;
+    fs::write(
+        intent.state_file(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    let asset = owner.workspace_root.join("owner-data");
+    fs::write(&asset, "owned by a live environment").unwrap();
+    drop(intent);
+
+    recover_interrupted("intent").unwrap();
+    assert!(asset.exists(), "recovery deleted another live task root");
+    assert!(is_registered("owner").unwrap());
+    assert!(!environment_state_path("intent").unwrap().exists());
+
+    destroy_environment(&owner).unwrap();
+}
+
+#[test]
+fn destroying_state_is_recovered() {
+    let harness = Harness::new();
+    let env = harness.create("destroying-state");
+    let text = fs::read_to_string(env.state_file()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["state"] = serde_json::json!("destroying");
+    fs::write(
+        env.state_file(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    let state_file = env.state_file().to_path_buf();
+    drop(env);
+
+    assert!(interrupted_tasks()
+        .unwrap()
+        .contains(&"destroying-state".to_string()));
+    assert!(recover_interrupted("destroying-state").unwrap());
+    assert!(!state_file.exists());
+    assert!(!is_registered("destroying-state").unwrap());
+}
+
+#[test]
+fn retry_after_the_root_is_already_gone_completes() {
+    let harness = Harness::new();
+    let mut env = harness.create("gone-root");
+    let file = env.workspace_root.join("owned.txt");
+    fs::write(&file, "task data").unwrap();
+    env.register_file(&file).unwrap();
+
+    // Simulate a crash after the root was deleted but before the plan was
+    // finalised.
+    fs::remove_dir_all(&env.workspace_root).unwrap();
+    destroy_environment(&env).unwrap();
+
+    assert!(!environment_state_path("gone-root").unwrap().exists());
+    assert!(!is_registered("gone-root").unwrap());
+    assert!(!cleanup_state_path("gone-root").unwrap().exists());
 }
 
 #[test]

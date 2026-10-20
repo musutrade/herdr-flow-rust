@@ -19,9 +19,9 @@ pub use boundary::{
 pub use cleanup::PendingDirectory;
 pub use cleanup::{cleanup_failed_environment, CleanupState, MAX_ATTEMPTS};
 pub use env::{
-    discover_repository, process_is_alive, process_start_time, recover_interrupted, restore,
-    validate_ancestors, EnvironmentState, RegisteredProcess, RootIdentity, TaskEnvironment,
-    WorktreeRegistration,
+    discover_repository, process_is_alive, process_record_is_alive, process_start_time,
+    recover_interrupted, restore, validate_ancestors, EnvironmentState, ProcessRecord,
+    RegisteredProcess, RootIdentity, TaskEnvironment, WorktreeRegistration,
 };
 pub use registry::{
     cleanup_state_path, environment_state_path, interrupted_tasks, is_registered, limit,

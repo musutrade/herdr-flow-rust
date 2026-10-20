@@ -82,10 +82,22 @@ pub struct RegisteredProcess {
     pub pid: i32,
     pub pgid: i32,
     pub start_time: Option<u64>,
+    /// Descendants visible at registration. Captured while the process is
+    /// alive so a later orphan that leaves the process group or session can
+    /// still be attributed to this environment.
+    pub descendants: Vec<ProcessRecord>,
+}
+
+/// A process identity that survives pid reuse only while the start time
+/// matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessRecord {
+    pub pid: i32,
+    pub start_time: Option<u64>,
 }
 
 /// A live task environment with an explicit disposable boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TaskEnvironment {
     pub task_id: String,
     pub instance_id: String,
@@ -215,6 +227,7 @@ impl TaskEnvironment {
             pid,
             pgid,
             start_time: process_start_time(pid),
+            descendants: descendants_snapshot(pid),
         };
         if !self.child_processes.contains(&entry) {
             self.child_processes.push(entry);
@@ -370,6 +383,70 @@ fn process_state(pid: i32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.rsplit_once(')')?.1;
     rest.split_whitespace().next()?.chars().next()
+}
+
+/// Whether a recorded process identity still names a live process.
+pub fn process_record_is_alive(record: &ProcessRecord) -> bool {
+    if record.pid <= 1 {
+        return false;
+    }
+    if matches!(process_state(record.pid), Some('Z') | None) {
+        return false;
+    }
+    match (process_start_time(record.pid), record.start_time) {
+        (Some(current), Some(expected)) => current == expected,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// All transitive children of `pid` that are currently visible.
+pub fn descendants_snapshot(pid: i32) -> Vec<ProcessRecord> {
+    let mut parents = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(child) = name.parse::<i32>() else {
+            continue;
+        };
+        if let Some(parent) = parent_of(child) {
+            parents.insert(child, parent);
+        }
+    }
+
+    let mut found = Vec::new();
+    let mut frontier = vec![pid];
+    while let Some(current) = frontier.pop() {
+        for (child, parent) in &parents {
+            if *parent == current
+                && !found
+                    .iter()
+                    .any(|record: &ProcessRecord| record.pid == *child)
+            {
+                found.push(ProcessRecord {
+                    pid: *child,
+                    start_time: process_start_time(*child),
+                });
+                frontier.push(*child);
+            }
+        }
+    }
+    found
+}
+
+fn parent_of(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // After comm: state ppid pgrp ...
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Whether a registered process is still the same live (non-zombie) process.
@@ -556,7 +633,13 @@ pub fn recover_interrupted(task_id: &str) -> Result<bool> {
         return Ok(false);
     }
     let env = restore(task_id)?;
-    if !env.state.is_live() {
+    // Any non-active document, or a leftover plan, describes an interrupted
+    // create or destroy that must be completed.
+    let interrupted = env.state != EnvironmentState::Active
+        || registry::cleanup_state_path(task_id)
+            .map(|path| path.exists())
+            .unwrap_or(false);
+    if !interrupted {
         return Ok(false);
     }
     super::cleanup::destroy(&env)?;
@@ -719,40 +802,6 @@ pub(crate) fn open_beneath(root: &File, relative: &Path) -> Result<File> {
     Ok(current)
 }
 
-/// Identity of an entry relative to an open directory, without following a
-/// final symlink.
-pub(crate) fn identity_at(dir: &File, name: &std::ffi::OsStr) -> Result<Option<RootIdentity>> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let name = CString::new(name.as_bytes())
-        .map_err(|_| FlowError::progress("path component contains NUL"))?;
-    // SAFETY: zeroed stat is a valid initial value for fstatat to fill.
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: dir is live, name is NUL-terminated, stat is writable.
-    let result = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            &mut stat,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result == 0 {
-        return Ok(Some(RootIdentity {
-            dev: stat.st_dev,
-            ino: stat.st_ino,
-        }));
-    }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::NotFound {
-        return Ok(None);
-    }
-    Err(FlowError::progress(format!(
-        "cannot stat {name:?}: {error}"
-    )))
-}
-
 /// Entry kind relative to an open directory, without following a symlink.
 pub(crate) fn kind_at(dir: &File, name: &std::ffi::OsStr) -> Result<Option<EntryKind>> {
     use std::ffi::CString;
@@ -821,5 +870,114 @@ pub(crate) fn unlink_at(dir: &File, name: &std::ffi::OsStr) -> Result<()> {
     }
     Err(FlowError::progress(format!(
         "cannot unlink {name:?}: {error}"
+    )))
+}
+
+/// Open a child directory relative to `parent`, without following a symlink.
+pub(crate) fn open_child_dir(parent: &File, name: &std::ffi::OsStr) -> Result<Option<File>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))?;
+    // SAFETY: parent is a live directory fd, name is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENOENT) | Some(libc::ENOTDIR) | Some(libc::ELOOP)
+        ) {
+            return Ok(None);
+        }
+        return Err(FlowError::progress(format!(
+            "cannot open {:?}: {error}",
+            name
+        )));
+    }
+    // SAFETY: successful openat returns a fresh descriptor we now own.
+    Ok(Some(unsafe {
+        <File as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    }))
+}
+
+/// Names of the entries in an open directory.
+pub(crate) fn directory_entries(dir: &File) -> Result<Vec<std::ffi::OsString>> {
+    let alias = format!("/proc/self/fd/{}", dir.as_raw_fd());
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(alias)?.flatten() {
+        names.push(entry.file_name());
+    }
+    Ok(names)
+}
+
+/// Make an open directory writable by its owner.
+pub(crate) fn make_dir_writable(dir: &File) -> Result<()> {
+    let metadata = dir.metadata()?;
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o700 == 0o700 {
+        return Ok(());
+    }
+    // SAFETY: dir is a live descriptor; fchmod takes scalars.
+    if unsafe { libc::fchmod(dir.as_raw_fd(), mode | 0o700) } != 0 {
+        return Err(FlowError::progress(format!(
+            "cannot chmod open directory: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+/// Remove every entry inside an open directory, then leave the directory
+/// itself in place. All operations are relative to pinned descriptors, so a
+/// path swapped after verification cannot redirect the deletion.
+pub(crate) fn clear_directory(dir: &File, depth: usize) -> Result<()> {
+    if depth > 128 {
+        return Err(FlowError::progress("directory nesting too deep"));
+    }
+    make_dir_writable(dir)?;
+    for name in directory_entries(dir)? {
+        match kind_at(dir, &name)? {
+            None => continue,
+            Some(EntryKind::Directory) => {
+                let Some(child) = open_child_dir(dir, &name)? else {
+                    continue;
+                };
+                clear_directory(&child, depth + 1)?;
+                unlink_at_dir(dir, &name)?;
+            }
+            Some(_) => unlink_at(dir, &name)?,
+        }
+    }
+    Ok(())
+}
+
+/// `unlinkat(..., AT_REMOVEDIR)` relative to an open directory.
+pub(crate) fn unlink_at_dir(dir: &File, name: &std::ffi::OsStr) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| FlowError::progress("path component contains NUL"))?;
+    // SAFETY: dir is live, name is NUL-terminated, AT_REMOVEDIR is scalar.
+    let result = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ENOENT) | Some(libc::ENOTEMPTY)
+    ) {
+        return Ok(());
+    }
+    Err(FlowError::progress(format!(
+        "cannot remove directory {name:?}: {error}"
     )))
 }
