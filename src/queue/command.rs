@@ -210,6 +210,7 @@ fn assignment_task(s: &J, w: &J) -> Option<J> {
 }
 
 fn managed_session(
+    s: &J,
     t: Option<&J>,
     w: &J,
     wait_id: &str,
@@ -217,7 +218,10 @@ fn managed_session(
     env_session: Option<&str>,
 ) -> Result<Option<String>> {
     match t {
-        Some(t) => validate_managed_command(t, w, wait_id, cwd, env_session).map(Some),
+        Some(t) => {
+            progress::lineage::ensure_current(s, t)?;
+            validate_managed_command(t, w, wait_id, cwd, env_session).map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -230,7 +234,7 @@ fn command_assignment(
     env_session: Option<String>,
 ) -> Result<(J, Option<J>, Option<String>)> {
     let t = assignment_task(&s, &w);
-    let session = managed_session(t.as_ref(), &w, wait_id, cwd, env_session.as_deref())?;
+    let session = managed_session(&s, t.as_ref(), &w, wait_id, cwd, env_session.as_deref())?;
     Ok((s, t, session))
 }
 

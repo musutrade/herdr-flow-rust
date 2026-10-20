@@ -1,5 +1,9 @@
 # V1 result application and takeover
 
+For versioned requirements, non-Git artifacts and concurrent development/acceptance
+activities, see [the #34 lineage contract](task-lineage.md). The legacy commands
+below remain compatible; they do not implicitly migrate tasks.
+
 This is the first V1 implementation slice, Issues #15/#13, in the order specified
 by #9. It adds progress records to the existing `queue.json`; it does not enable
 PR publication, automatic merge, trusted App checks or batching. Those remain
