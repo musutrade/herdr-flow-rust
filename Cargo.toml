@@ -15,7 +15,7 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 sha1 = "0.11"
 sha2 = "0.10"
 tempfile = "3"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 ureq = { version = "3.4.2", default-features = false, features = ["json"] }
 base64 = "0.23"
 
