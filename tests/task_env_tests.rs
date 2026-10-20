@@ -575,6 +575,7 @@ fn plan_only_recovery_is_discovered_and_completed() {
     assert!(interrupted_tasks()
         .unwrap()
         .contains(&"plan-only".to_string()));
+    assert!(resume_delivery_cleanup("plan-only").is_err());
     assert!(recover_interrupted("plan-only").unwrap());
     assert!(!cleanup_state_path("plan-only").unwrap().exists());
     assert_eq!(occupied_slots().unwrap(), 0);
@@ -917,6 +918,7 @@ fn renamed_root_without_replacement_retains_the_slot() {
 
 fn write_root_plan(env: &TaskEnvironment, quarantine: Option<Quarantine>, roots: Vec<PathBuf>) {
     let plan = CleanupState {
+        delivery_confirmed: false,
         task_id: env.task_id.clone(),
         instance_id: env.instance_id.clone(),
         roots: vec![

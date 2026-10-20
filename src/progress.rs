@@ -1868,7 +1868,8 @@ fn control_task(s: &J, name: Option<&J>, version: Option<&J>) -> Result<J> {
 }
 
 fn control_allowed(t: &J) -> bool {
-    model::string(t, "control").as_deref() != Some("cancelled")
+    t["delivery"].is_null()
+        && model::string(t, "control").as_deref() != Some("cancelled")
         && model::string(t, "phase").as_deref() != Some("completed")
 }
 
@@ -2653,4 +2654,12 @@ pub fn diagnostics(s: &J, now: Option<f64>) -> Result<J> {
         .map(|(name, task)| diagnose(s, task, now).map(|diagnosis| (name.clone(), diagnosis)))
         .collect::<Result<Map<String, Value>>>()?;
     Ok(Value::Object(output))
+}
+
+/// Existing customer Git paths retain their PR/batch/CI/Gate prerequisites.
+pub fn delivery_prerequisites(t: &J) -> Result<()> {
+    ensure_batch_landed(t)?;
+    ensure_lane_settled(t)?;
+    ensure_pr_merged(t)?;
+    ensure_writer_released(t)
 }

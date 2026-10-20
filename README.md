@@ -211,3 +211,6 @@ and development output collection: [runtime contract](references/task-runtime.md
 
 Fixed-version independent acceptance and four-outcome continuation:
 [acceptance contract](references/independent-acceptance.md).
+
+Correct delivery, uncertain-operation recovery and final destruction:
+[delivery contract](references/delivery.md).

@@ -5,14 +5,15 @@ mod common;
 mod rpc_fixture;
 #[test]
 fn persistent_connection_records_exact_turns_and_never_answers_approval() {
-    let server = rpc_fixture::Server::start(|mut peer| {
+    let (release, received) = std::sync::mpsc::channel();
+    let server = rpc_fixture::Server::start(move |mut peer| {
         peer.initialize();
         let request = peer.request();
         assert_eq!(request["method"], "thread/read");
         peer.json(&json!({"id":request["id"],"result":{"thread":{"id":"s"}}}));
+        received.recv_timeout(Duration::from_secs(10)).unwrap();
         peer.json(&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"completed"}}}));
         peer.json(&json!({"id":91,"method":"item/commandExecution/requestApproval","params":{"threadId":"s","turnId":"t"}}));
-        std::thread::sleep(Duration::from_millis(100));
     });
     let dir = common::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -35,6 +36,7 @@ fn persistent_connection_records_exact_turns_and_never_answers_approval() {
     }
     let result = call(&root, "thread/read", &json!({"threadId":"s"})).unwrap();
     assert_eq!(result["thread"]["id"], "s");
+    release.send(()).unwrap();
     assert!(task.join().unwrap().is_err());
     server.finish();
     let events = util::read_json(&root.join("broker-events.json")).unwrap();

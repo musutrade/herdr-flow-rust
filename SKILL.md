@@ -13,7 +13,7 @@ text recognition.
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
 `herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
-`herdr-flow task-runtime` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
+`herdr-flow task-runtime`, `herdr-flow delivery` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
 use `herdr-flow <command> --help` for the exact options. Run
 `cargo test --all-targets --locked` after changing the implementation.
 
@@ -92,6 +92,23 @@ rewrite the independent verdict to skip failure. Consume persisted repair/recove
 intents once; use existing authorization, and revise requirements only for confirmed
 changes. Passing prepares delivery without granting permission or claiming delivery.
 All reports and runtime state remain disposable with the task environment.
+
+## Correct delivery and final destruction
+
+Follow [delivery and destruction](references/delivery.md) after independent
+acceptance passes. Prepare a fixed-object delivery intent against the existing
+authorization and registered external target. The customer executor must observe
+actual delivery; normal exits, ACKs and claims do not establish it. On unknown
+results query the existing operation; never blindly repeat push, merge or upload.
+Keep the existing project PR/batch/CI/Gate prerequisites where applicable.
+
+After confirmed delivery, the external lifecycle supervisor runs `delivery finish`.
+It freezes writes, terminates task-exclusive sessions/processes, removes shared
+task associations and destroys both roots. Cleanup failure keeps the task and slot
+open, and retries only cleanup. Do not archive completed tasks, retain queue backups
+or copy temporary evidence into the formal delivery location. Success leaves only
+the agreed formal result. The supervisor must live outside the environment it
+terminates; all task logs and native session storage must remain disposable.
 
 ## Rotate sessions
 

@@ -181,9 +181,12 @@ be restored and readiness verified before automatic notification is claimed.
 A lane keeps 32 completed batch records with an older count; source landing
 mappings remain on their bounded managed tasks. Limits are 128 batches, 256 gate
 operations, 16 rebuilds per batch, 256 final PR commits, and existing queue/task
-limits. Preserve unresolved state at a limit and reconcile/archive outside the
-checkout. Deployment retains owned cleanup/retention responsibility for workspaces,
-logs and gate caches; this consumer never deletes active data automatically.
+limits. Preserve unresolved state at a limit and reconcile it before continuing.
+For environment-managed version 2 tasks, these records are temporary: use a
+task-owned lane/queue and [delivery destruction](delivery.md) after confirmed
+landing. Workspaces, logs, gate caches and completed batch records are destroyed
+with the environment; never archive them or retain full queue backups at completion.
+The legacy batch consumer itself still does not delete active data.
 
 Real temporary Git repositories, private refs/indexes, a stdio verifier fixture
 and injected GitHub GETs cover capacity, dependency validation, some repair guards,

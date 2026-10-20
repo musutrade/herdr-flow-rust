@@ -238,6 +238,33 @@ fn pr_prepare_begin_reconcile_and_landing() {
         model::dig_str(&landed, &["pr", "landing", "commit"]).as_deref(),
         Some(repo.head.as_str())
     );
+    let artifact = json!({"adapter":"git","id":repo.head});
+    assert!(matches!(
+        herdr_flow::delivery::publication::verify(&s, &landed, &landed, &artifact, Some(&api))
+            .unwrap(),
+        herdr_flow::delivery::Observation::Delivered(_)
+    ));
+    let wrong = json!({"adapter":"git","id":"0".repeat(40)});
+    assert!(
+        herdr_flow::delivery::publication::verify(&s, &landed, &landed, &wrong, Some(&api))
+            .is_err()
+    );
+    let mut member = landed.clone();
+    member["pr"] = Value::Null;
+    let mut mapping = landed["pr"]["landing"].clone();
+    mapping["head"] = wrong["id"].clone();
+    mapping["batch_head"] = artifact["id"].clone();
+    member["batch_delivery"] = json!({"phase":"landed","landing":mapping});
+    assert!(matches!(
+        herdr_flow::delivery::publication::verify(&s, &member, &landed, &wrong, Some(&api))
+            .unwrap(),
+        herdr_flow::delivery::Observation::Delivered(_)
+    ));
+    member["batch_delivery"]["phase"] = json!("pending");
+    assert!(
+        herdr_flow::delivery::publication::verify(&s, &member, &landed, &wrong, Some(&api))
+            .is_err()
+    );
     let _ = BASE_SHA_PLACEHOLDER;
 }
 

@@ -67,6 +67,9 @@ pub struct Quarantine {
 pub struct CleanupState {
     pub task_id: String,
     pub instance_id: String,
+    /// Minimal proof that a delivery-confirmed environment entered cleanup.
+    #[serde(default)]
+    pub delivery_confirmed: bool,
     /// Every root this environment owns.
     pub roots: Vec<PendingDirectory>,
     pub pending_processes: Vec<RegisteredProcess>,
@@ -96,6 +99,8 @@ impl CleanupState {
         Ok(Self {
             task_id: env.task_id.clone(),
             instance_id: env.instance_id.clone(),
+            delivery_confirmed: env.delivery["phase"] == "cleaning"
+                && env.delivery["shared_removed"] == true,
             roots,
             pending_processes: env.child_processes.clone(),
             pending_worktrees: env.worktree_registrations.clone(),
@@ -224,10 +229,6 @@ fn load_plan(task_id: &str) -> Result<CleanupState> {
     Ok(state)
 }
 
-fn remove_plan(task_id: &str) -> Result<()> {
-    util::remove_file_if_exists(&registry::cleanup_state_path(task_id)?)
-}
-
 fn plan_exists(task_id: &str) -> bool {
     registry::cleanup_state_path(task_id)
         .map(|path| path.exists())
@@ -245,24 +246,31 @@ pub fn destroy(env: &TaskEnvironment) -> Result<()> {
     let mut document = load_document(&state_file)?;
     ensure_document_instance(&document, &env.instance_id)?;
     let Some(mut state) = load_or_build_plan(env, &document)? else {
+        registry::finish_cleanup(&env.task_id)?;
         env.release_ownership();
         drop(transient_lock);
         return Ok(());
     };
 
-    mark_document(&mut document, EnvironmentState::Destroying);
-    env.release_file_handles();
-    let outcome = run_cleanup(&mut state);
-
-    if state.is_complete() {
-        finish(&env.task_id, &env.instance_id)?;
-        env.release_ownership();
-        drop(transient_lock);
-        return Ok(());
-    }
-    persist_failure(&state, &mut document);
+    let result = destroy_plan(env, &mut document, &mut state);
     env.release_ownership();
     drop(transient_lock);
+    result
+}
+fn destroy_plan(
+    env: &TaskEnvironment,
+    document: &mut Option<TaskEnvironment>,
+    state: &mut CleanupState,
+) -> Result<()> {
+    if let Some(doc) = document.as_mut() {
+        doc.mark_destroying()?;
+    }
+    env.release_file_handles();
+    let outcome = run_cleanup(state);
+    if state.is_complete() && outcome.is_ok() {
+        return finish(&env.task_id, &env.instance_id);
+    }
+    persist_failure(state, document);
     outcome
 }
 
@@ -347,6 +355,15 @@ fn persist_failure(state: &CleanupState, document: &mut Option<TaskEnvironment>)
 
 /// Resume a failed cleanup for `task_id`.
 pub fn cleanup_failed_environment(task_id: &str) -> Result<()> {
+    resume_cleanup(task_id, false)
+}
+
+/// Resume the plan-only tail of a confirmed delivery, without redispatch.
+pub fn resume_delivery_cleanup(task_id: &str) -> Result<()> {
+    resume_cleanup(task_id, true)
+}
+
+fn resume_cleanup(task_id: &str, require_delivery: bool) -> Result<()> {
     registry::validate_task_id(task_id)?;
     let _lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
         FlowError::progress(format!(
@@ -355,19 +372,32 @@ pub fn cleanup_failed_environment(task_id: &str) -> Result<()> {
     })?;
 
     let mut state = load_plan(task_id)?;
+    validate_retry(&state, require_delivery)?;
+    resume_plan(task_id, &mut state)
+}
+fn validate_retry(state: &CleanupState, require_delivery: bool) -> Result<()> {
+    if require_delivery && !state.delivery_confirmed {
+        return Err(FlowError::progress(
+            "cleanup plan does not attest confirmed delivery",
+        ));
+    }
     if state.attempts >= MAX_ATTEMPTS {
         return Err(FlowError::progress(format!(
-            "cleanup for task {task_id} already failed {} times; manual attention required",
-            state.attempts
+            "cleanup for task {task} already failed {} times; manual attention required",
+            state.attempts,
+            task = state.task_id
         )));
     }
 
-    let outcome = run_cleanup(&mut state);
-    if state.is_complete() {
+    Ok(())
+}
+fn resume_plan(task_id: &str, state: &mut CleanupState) -> Result<()> {
+    let outcome = run_cleanup(state);
+    if state.is_complete() && outcome.is_ok() {
         finish(task_id, &state.instance_id)?;
         return Ok(());
     }
-    save_plan(&state)?;
+    save_plan(state)?;
     outcome
 }
 
@@ -375,21 +405,14 @@ pub fn cleanup_failed_environment(task_id: &str) -> Result<()> {
 fn finish(task_id: &str, instance_id: &str) -> Result<()> {
     registry::unregister_environment(task_id, instance_id)?;
     remove_document_if_current(task_id, instance_id)?;
-    remove_plan(task_id)
+    registry::finish_cleanup(task_id)
 }
 
 fn remove_document_if_current(task_id: &str, instance_id: &str) -> Result<()> {
     let state_file = registry::environment_state_path(task_id)?;
-    let Ok(text) = std::fs::read_to_string(&state_file) else {
-        return Ok(());
-    };
-    let Ok(doc) = serde_json::from_str::<TaskEnvironment>(&text) else {
-        return Ok(());
-    };
-    if doc.instance_id == instance_id {
-        util::remove_file_if_exists(&state_file)?;
-    }
-    Ok(())
+    let document = load_document(&state_file)?;
+    ensure_document_instance(&document, instance_id)?;
+    util::remove_file_if_exists(&state_file)
 }
 
 fn run_cleanup(state: &mut CleanupState) -> Result<()> {
@@ -1024,3 +1047,24 @@ fn unmount_under(dir: &Path) {
 
 #[cfg(not(target_os = "linux"))]
 fn unmount_under(_dir: &Path) {}
+
+/// Freeze writes and confirm task-exclusive runtimes have exited before shared
+/// records are removed. Errors retain the environment and its occupied slot.
+pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
+    if !env.owns_lock() {
+        return Err(FlowError::progress(
+            "quiesce requires environment ownership",
+        ));
+    }
+    env.mark_destroying()?;
+    terminate_marked(&env.instance_id)?;
+    for process in &env.child_processes {
+        if process_is_alive(process) {
+            return Err(FlowError::progress(
+                "registered task process is still alive",
+            ));
+        }
+    }
+    env.release_file_handles();
+    Ok(())
+}

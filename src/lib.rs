@@ -8,6 +8,7 @@ pub mod batch;
 pub mod ci;
 pub mod codex;
 pub mod crap;
+pub mod delivery;
 pub mod error;
 pub mod guard;
 pub mod herdr;

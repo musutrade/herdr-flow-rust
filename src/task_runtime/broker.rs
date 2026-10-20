@@ -83,10 +83,12 @@ fn execute(
     result
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
-    client.drain(0.001)?;
+    // EOF may arrive after valid frames in the same drain. Persist those
+    // frames before reporting the disconnected transport to the supervisor.
+    let transport = client.drain(0.001).map(|_| ());
     let events = client.pop_events();
     if events.is_empty() && root.join("broker-events.json").exists() {
-        return Ok(());
+        return transport;
     }
     let mut journal = if root.join("broker-events.json").exists() {
         util::read_state_json(root, "broker-events.json")?
@@ -102,7 +104,8 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
             && journal["pending"].as_object().unwrap().len() <= 64,
         "native event journal reached its bound",
     )?;
-    util::atomic_write_json(&root.join("broker-events.json"), &journal)
+    util::atomic_write_json(&root.join("broker-events.json"), &journal)?;
+    transport
 }
 fn record(journal: &mut J, event: &J) {
     let params = &event["params"];
