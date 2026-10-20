@@ -218,8 +218,12 @@ repository's authorization, review or merge rules.
   absolute existing cwd and a timeout, and redacts credentials/user paths/tokens
   from diagnostics. Workspace overlap checks resolve paths before comparison.
 - **Transport:** the app-server Unix socket must be a socket owned by the current
-  user and must not be world-writable. JSON-RPC messages and headers have size
-  limits, and JSON nesting is bounded.
+  user and must not be world-writable. Both RPC and TUI also authenticate the
+  connected peer with Linux `SO_PEERCRED` before forwarding handshake or business
+  data; query failure or a different effective UID closes the connection. This
+  protects against cross-UID endpoint substitution, not malicious same-UID
+  processes. JSON-RPC messages and headers have size limits, and JSON nesting is
+  bounded.
 - **External observations:** external Checks bind an exact App, name,
   `external_id`, full SHA and base. The inventory is capped at 32 entries, and a
   commit with more than 1000 Check suites is refused rather than inferred green.

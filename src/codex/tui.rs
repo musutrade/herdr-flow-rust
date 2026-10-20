@@ -1864,7 +1864,11 @@ fn finish_connect(fd: RawFd, result: Result<()>) -> Result<UnixStream> {
         close_socket(fd);
         return Err(error);
     }
-    Ok(unsafe { UnixStream::from_raw_fd(fd) })
+    // SAFETY: open_upstream_socket created this owned fd and all error paths
+    // above close it. Transfer its sole ownership to the stream exactly once.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    crate::codex::peer::verify(&stream)?;
+    Ok(stream)
 }
 
 fn close_socket(fd: RawFd) {
