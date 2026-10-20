@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -340,6 +340,7 @@ pub fn process_identity(pid: u32) -> Result<J> {
 }
 
 pub fn current_uid() -> u32 {
+    // SAFETY: geteuid takes no pointers and has no caller preconditions.
     unsafe { libc::geteuid() }
 }
 
@@ -535,6 +536,8 @@ pub fn terminate_child(child: &mut Child) {
 }
 
 fn set_cloexec(fd: RawFd, enabled: bool) {
+    // SAFETY: fcntl receives scalar descriptor/flag arguments and does not take
+    // ownership. Invalid descriptors are rejected by the kernel.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
         if flags >= 0 {
@@ -576,10 +579,14 @@ pub fn spawn_with_ready(
     set_cloexec(write_fd, true);
     let mut command = ready_command(argv, log, log_err, cwd, write_fd);
     let mut child = spawn_ready_child(&mut command, read_fd, write_fd)?;
+    // SAFETY: the parent still owns this pipe end; the spawned child has its own
+    // inherited descriptor table. Close the parent's writer exactly once.
     unsafe {
         libc::close(write_fd);
     }
     let ready = read_ready(read_fd, timeout);
+    // SAFETY: read_ready only borrows the parent's reader; it is no longer used
+    // after this single close, including on error.
     unsafe {
         libc::close(read_fd);
     }
@@ -618,6 +625,8 @@ fn open_log_file(log_path: &Path) -> Result<fs::File> {
 
 fn readiness_pipe() -> Result<(RawFd, RawFd)> {
     let mut fds = [0 as RawFd; 2];
+    // SAFETY: fds provides two writable c_int slots for the entire call. Only a
+    // successful pipe call transfers the two new descriptors to the caller.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(FlowError::io(format!(
             "cannot create readiness pipe: {}",
@@ -645,6 +654,9 @@ fn ready_command(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    // SAFETY: after fork the closure uses only async-signal-safe dup2, fcntl
+    // (via set_cloexec), setsid and errno access; it does not allocate or lock.
+    // write_fd stays open through spawn; fd 3 is the child's readiness writer.
     unsafe {
         command.pre_exec(move || {
             if libc::dup2(write_fd, 3) < 0 {
@@ -662,6 +674,8 @@ fn ready_command(
 
 fn spawn_ready_child(command: &mut Command, read_fd: RawFd, write_fd: RawFd) -> Result<Child> {
     command.spawn().map_err(|error| {
+        // SAFETY: spawn failed before these owned parent pipe ends were handed
+        // back to spawn_with_ready. This is their sole error-path cleanup.
         unsafe {
             libc::close(read_fd);
             libc::close(write_fd);
@@ -685,6 +699,8 @@ fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: poll_fd is one live writable pollfd; fd is borrowed from the
+        // caller and remains open until read_ready returns.
         let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
         if result < 0 {
             let error = std::io::Error::last_os_error();
@@ -699,6 +715,8 @@ fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
             ));
         }
         let mut buffer = [0u8; 4096];
+        // SAFETY: buffer is writable for exactly buffer.len() bytes and remains
+        // live during read. The caller retains ownership of fd.
         let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
         if read <= 0 {
             return Err(FlowError::watch(
@@ -733,6 +751,8 @@ pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> R
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    // SAFETY: this post-fork closure calls only async-signal-safe setsid and
+    // reads errno on failure; it captures no allocation or synchronization.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {
@@ -767,6 +787,8 @@ pub fn open_dir_fd(path: &Path) -> Result<RawFd> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| FlowError::io("path contains NUL"))?;
+    // SAFETY: c_path is NUL-terminated and lives through open. O_CREAT is absent,
+    // so no variadic mode argument is needed. Success returns a newly owned fd.
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
@@ -868,6 +890,8 @@ pub fn write_ready_fd(fd: RawFd, value: &J) {
     data.push(b'\n');
     let mut written = 0;
     while written < data.len() {
+        // SAFETY: the remaining slice is readable for the supplied length.
+        // fd is the inherited writer consumed by this function, not a File fd.
         let result =
             unsafe { libc::write(fd, data[written..].as_ptr().cast(), data.len() - written) };
         if result <= 0 {
@@ -875,15 +899,11 @@ pub fn write_ready_fd(fd: RawFd, value: &J) {
         }
         written += result as usize;
     }
+    // SAFETY: this consumes the caller-supplied readiness descriptor once, after
+    // the final write; no Rust owner subsequently closes or uses it here.
     unsafe {
         libc::close(fd);
     }
-}
-
-// Keep a reference so unused imports are not a problem while modules grow.
-#[allow(dead_code)]
-fn _fd_from_raw(fd: RawFd) -> File {
-    unsafe { File::from_raw_fd(fd) }
 }
 
 #[cfg(test)]
@@ -893,11 +913,15 @@ mod tests {
 
     fn pipe() -> (RawFd, RawFd) {
         let mut fds = [0 as RawFd; 2];
+        // SAFETY: this test supplies two writable descriptor slots and returns
+        // their ownership only after pipe succeeds.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         (fds[0], fds[1])
     }
 
     fn close(fd: RawFd) {
+        // SAFETY: test callers transfer one owned raw pipe end to this helper
+        // and do not use it afterward.
         unsafe {
             libc::close(fd);
         }
@@ -907,7 +931,6 @@ mod tests {
     fn ready_fd_round_trips_and_times_out() {
         let (read_fd, write_fd) = pipe();
         write_ready_fd(write_fd, &serde_json::json!({"ready": true}));
-        close(write_fd);
         let value = read_ready(read_fd, Duration::from_secs(1)).unwrap();
         assert_eq!(value["ready"], true);
         close(read_fd);
@@ -923,9 +946,11 @@ mod tests {
     fn cloexec_flag_can_be_set_and_cleared() {
         let (read_fd, write_fd) = pipe();
         set_cloexec(read_fd, true);
+        // SAFETY: the test keeps read_fd open; F_GETFD takes no pointer or owner.
         let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
         assert!(flags & libc::FD_CLOEXEC != 0);
         set_cloexec(read_fd, false);
+        // SAFETY: read_fd remains owned and open until the closes below.
         let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
         assert!(flags & libc::FD_CLOEXEC == 0);
         close(read_fd);
