@@ -13,7 +13,7 @@ An environment is identified by `task_id` plus a random `instance_id`, and owns:
 | workspace root | `workspace_root` | yes, identity-checked |
 | temporary root | `temp_root` | yes, identity-checked |
 | worktrees | inside `workspace_root` | removed from the recorded repo |
-| child processes | registered groups, snapshots and adopted orphans | frozen, then killed |
+| child processes | processes carrying the environment marker | frozen, then killed |
 | files kept open | `open_files` | handles closed, entries unlinked |
 | delivery targets | `delivery_targets` | **never** |
 
@@ -25,12 +25,14 @@ Three facts make deletion safe:
 2. **Root identity.** `(device, inode)` is recorded at creation. Cleanup
    re-checks it with `fstatat(AT_SYMLINK_NOFOLLOW)`; a root swapped for a
    symlink or a different directory is refused, and the slot stays occupied.
-3. **Subreaper ownership.** The supervisor registers as a child subreaper
-   (`PR_SET_CHILD_SUBREAPER`), so a descendant that detaches with `setsid()`
-   and loses its parent is reparented to the supervisor instead of init. At
-   destroy, direct children that appeared after registration and are not
-   claimed by another live environment are treated as this environment's
-   orphans, frozen and killed.
+3. **Process marker.** Every process the environment starts carries
+   `HERDR_TASK_ENV_INSTANCE=<instance_id>` in its environment. The marker is
+   inherited across `fork`/`exec`, survives `setsid()`, and stays readable at
+   `/proc/<pid>/environ` after the process is orphaned. Cleanup kills exactly
+   the processes carrying the marker plus their current descendants, so it
+   cannot hit an unrelated child or another environment's orphan, and another
+   environment's bookkeeping cannot hide one of ours. Processes not started
+   through `TaskEnvironment::command` are refused at registration.
 4. **Per-task lock.** The live handle holds an exclusive `flock` on
    `locks/<task>.lock`. `restore_environment` and `cleanup_failed_environment`
    refuse to run while another handle owns the task, so descriptors and slots
@@ -84,23 +86,23 @@ recovery). It fails while a live handle owns the task.
 1. verify the document's `instance_id` matches the handle;
 2. write the cleanup plan and mark the document `destroying`;
 3. close the environment's descriptors;
-4. terminate registered processes: freeze with `SIGSTOP` first, include the
-   descendant snapshot taken at registration plus a fresh `/proc` descendant
-   walk, then `SIGKILL` every recorded pid. Freezing first means a `SIGTERM`
-   handler can never spawn a late child. Adopted orphans (children that
-   appeared after registration and are not owned by another environment) are
-   killed in the same pass and reaped, so a `setsid()` child spawned even after
-   registration cannot survive;
+4. terminate processes: scan `/proc` for the marker, add their current
+   descendants, freeze everything with `SIGSTOP`, then `SIGKILL`. Freezing
+   first means a `SIGTERM` handler cannot spawn a late child, and the marker
+   catches detached or orphaned descendants. A registered pid whose identity
+   no longer matches is never signalled; an unmarked live pid keeps the slot
+   instead of being guessed at;
 5. remove worktrees through the repository recorded at registration and verify
    with `git worktree list`; a leftover registration keeps the item pending;
 6. unlink registered files relative to an `O_NOFOLLOW` walk (a leaf swapped for
    a symlink loses only the link), then remove roots through a pinned
    `O_NOFOLLOW` directory descriptor whose `(dev, ino)` still matches. The tree
-   is emptied with `unlinkat` relative to that descriptor, so renaming or
-   replacing the path after verification cannot redirect a deletion. The final
-   name is re-checked against the recorded identity, and a rename or
-   replacement keeps the plan (and slot) alive instead of reporting a false
-   success; directory modes are widened with `fchmod` only;
+   is emptied with `unlinkat` relative to that descriptor. The final entry is
+   renamed to an unpredictable quarantine name, its identity is verified there,
+   and only then unlinked. A path swapped at the last moment is moved aside
+   untouched, and any rename or replacement keeps the plan (and slot) alive
+   instead of reporting a false success; directory modes are widened with
+   `fchmod` only;
 7. only when everything is gone: remove the plan, the document (if it is still
    this instance) and the index entry.
 
@@ -145,7 +147,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (31 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (37 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -155,7 +157,9 @@ retry, retry exhaustion, interrupted create, interrupted-state recovery,
 concurrent registrations, task-id traversal, internal-name shadowing, boundary
 validation, intent recovery that must not touch another task's root, recovery
 from a `destroying` state, retry after the root is already gone, and idempotent
-destroy, descendants spawned after registration, and plan-only recovery.
+destroy, descendants spawned after registration, unrelated supervisor children,
+cross-environment orphan isolation, mismatched process identity, multi-root
+claim merging, renamed-root slot retention, and plan-only recovery.
 
 ```bash
 cargo test --test task_env_tests

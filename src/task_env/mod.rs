@@ -19,15 +19,16 @@ pub use boundary::{
 pub use cleanup::PendingDirectory;
 pub use cleanup::{cleanup_failed_environment, CleanupState, MAX_ATTEMPTS};
 pub use env::{
-    discover_repository, process_is_alive, process_record_is_alive, process_start_time,
-    recover_interrupted, restore, validate_ancestors, EnvironmentState, ProcessRecord,
-    RegisteredProcess, RootIdentity, TaskEnvironment, WorktreeRegistration,
+    discover_repository, marked_processes, process_has_marker, process_is_alive,
+    process_record_is_alive, process_start_time, recover_interrupted, restore, validate_ancestors,
+    EnvironmentState, ProcessRecord, RegisteredProcess, RootIdentity, TaskEnvironment,
+    WorktreeRegistration, MARKER_ENV,
 };
 pub use registry::{
-    cleanup_state_path, environment_state_path, interrupted_tasks, is_registered, limit,
-    list_registered, load_registry, occupied_slots, register_environment, registry_path,
-    state_root, unregister_environment, validate_task_id, EnvironmentRegistry, Registry,
-    RegistryEntry, DEFAULT_LIMIT,
+    claim_roots_exclusively, cleanup_state_path, environment_state_path, interrupted_tasks,
+    is_registered, limit, list_registered, load_registry, occupied_slots, register_environment,
+    registry_path, state_root, unregister_environment, validate_task_id, EnvironmentRegistry,
+    Registry, RegistryEntry, DEFAULT_LIMIT,
 };
 
 use crate::error::Result;

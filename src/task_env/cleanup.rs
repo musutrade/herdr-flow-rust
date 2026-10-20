@@ -1,29 +1,34 @@
 //! Crash-safe, descriptor-anchored destruction of a task environment.
 //!
-//! Deletion never trusts a path that was merely checked earlier:
+//! Ownership is proven, never inferred:
 //!
-//! * a disposable root is opened once with `O_NOFOLLOW`, its `(device, inode)`
-//!   is compared with the value recorded at creation, and the tree is then
-//!   emptied through that pinned descriptor. Renaming or replacing the path
-//!   afterwards cannot redirect a single unlink;
-//! * registered files are unlinked relative to the same pinned walk, so a leaf
-//!   swapped for a symlink loses only the link, never its target;
-//! * permissions are widened with `fchmod` on directories only, so a hard link
-//!   can never expose a delivery file to a mode change;
-//! * processes are frozen (`SIGSTOP`) before being enumerated, and the
-//!   descendant set captured at registration is included. A descendant that
-//!   calls `setsid()` or is spawned in a `SIGTERM` handler is therefore still
-//!   attributed to the environment and killed;
+//! * every process the environment starts carries a unique marker in its
+//!   environment ([`super::env::MARKER_ENV`]). The marker is inherited across
+//!   `fork`/`exec`, survives `setsid()` and remains readable at
+//!   `/proc/<pid>/environ` after the process is orphaned. Cleanup kills exactly
+//!   the marked processes and their current descendants, so it cannot hit an
+//!   unrelated child or another environment's orphan;
+//! * registered files are unlinked relative to an `O_NOFOLLOW` walk, so a leaf
+//!   swapped for a symlink loses only the link;
+//! * a disposable root is pinned by descriptor and `(device, inode)`; the tree
+//!   is emptied through that descriptor, permissions are widened with `fchmod`
+//!   on directories only, and the final directory entry is removed through a
+//!   random quarantine name whose identity is re-verified. A rename or
+//!   replacement keeps the plan and slot instead of deleting unknown data or
+//!   reporting a false success;
 //! * worktrees are removed through the repository recorded at registration and
-//!   verified with `git worktree list`; a leftover record keeps the item
-//!   pending instead of reporting success.
+//!   verified with `git worktree list`.
 //!
 //! A plan is persisted before anything is touched and removed only after every
 //! step succeeded. A failure keeps the plan and the resource slot; retries go
 //! through [`cleanup_failed_environment`], and items whose resources are
-//! already gone are treated as complete so a crash mid-retry can finish.
+//! already gone count as complete so a crash mid-retry can finish.
 
+use std::ffi::{CString, OsStr};
 use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -33,9 +38,9 @@ use crate::util;
 
 use super::env::{
     clear_directory, descendants_snapshot, kind_at, open_beneath, open_child_dir,
-    open_dir_nofollow, process_is_alive, process_record_is_alive, process_start_time, unlink_at,
-    unlink_at_dir, EntryKind, EnvironmentState, ProcessRecord, RegisteredProcess, RootIdentity,
-    TaskEnvironment, WorktreeRegistration,
+    open_dir_nofollow, process_is_alive, process_record_is_alive, unlink_at, unlink_at_dir,
+    EntryKind, EnvironmentState, ProcessRecord, RegisteredProcess, RootIdentity, TaskEnvironment,
+    WorktreeRegistration,
 };
 use super::registry;
 
@@ -43,8 +48,6 @@ use super::registry;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingDirectory {
     pub path: PathBuf,
-    /// `None` only for a document written before creation completed; such a
-    /// root is never removed on identity alone.
     pub identity: Option<RootIdentity>,
 }
 
@@ -53,13 +56,18 @@ pub struct PendingDirectory {
 pub struct CleanupState {
     pub task_id: String,
     pub instance_id: String,
-    /// Every root the document knows about.
+    /// Every root this environment owns.
     pub roots: Vec<PendingDirectory>,
     pub pending_processes: Vec<RegisteredProcess>,
     pub pending_worktrees: Vec<WorktreeRegistration>,
     pub pending_files: Vec<PathBuf>,
     /// Roots still to release; a subset of `roots`.
     pub pending_root_removals: Vec<PathBuf>,
+    /// Root whose removal was committed to disk before unlinking. A crash
+    /// between unlink and the next save is completed on retry; a missing root
+    /// without this marker was renamed externally and keeps the slot.
+    #[serde(default)]
+    pub removal_in_progress: Option<PathBuf>,
     pub started_at: f64,
     pub updated_at: f64,
     pub attempts: u32,
@@ -72,9 +80,24 @@ pub const MAX_ATTEMPTS: u32 = 5;
 impl CleanupState {
     fn from_environment(env: &TaskEnvironment) -> Result<Self> {
         let now = util::now();
+
+        // Roots without a recorded identity come from an interrupted create.
+        // Claim them atomically in the registry before considering removal, so
+        // a concurrent task cannot take them in between.
+        let unclaimed: Vec<PathBuf> = env
+            .roots()
+            .into_iter()
+            .filter(|(_, identity)| identity.is_none())
+            .map(|(path, _)| path)
+            .collect();
+        let claimed = if unclaimed.is_empty() {
+            Vec::new()
+        } else {
+            registry::claim_roots_exclusively(&env.task_id, &env.instance_id, &unclaimed)?
+        };
+
         let mut roots = Vec::new();
         let mut pending_root_removals = Vec::new();
-
         for (path, identity) in env.roots() {
             for target in &env.delivery_targets {
                 if util::overlap(&path, &target.path) {
@@ -86,16 +109,22 @@ impl CleanupState {
                 }
             }
 
-            let effective_identity = match identity {
-                Some(identity) => Some(identity),
-                None => reclaim_unclaimed_empty_root(&path, &env.task_id, &env.instance_id)?,
+            let identity = match identity {
+                Some(identity) => identity,
+                None if claimed.iter().any(|root| root == &path) => {
+                    match std::fs::symlink_metadata(&path) {
+                        Ok(metadata) => RootIdentity::of(&metadata),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                // Never recorded and never claimed: not ours, leave it alone.
+                None => continue,
             };
-            if effective_identity.is_some() {
-                pending_root_removals.push(path.clone());
-            }
+            pending_root_removals.push(path.clone());
             roots.push(PendingDirectory {
                 path,
-                identity: effective_identity,
+                identity: Some(identity),
             });
         }
 
@@ -107,6 +136,7 @@ impl CleanupState {
             pending_worktrees: env.worktree_registrations.clone(),
             pending_files: env.open_files.clone(),
             pending_root_removals,
+            removal_in_progress: None,
             started_at: now,
             updated_at: now,
             attempts: 0,
@@ -125,26 +155,6 @@ impl CleanupState {
         self.attempts += 1;
         self.updated_at = util::now();
         self.last_error = error;
-    }
-}
-
-/// A root without a recorded identity is only reclaimed when it is empty and no
-/// other live task claims it. This is the recovery path for a crash between the
-/// create intent and the root claim; it must never touch another task's data.
-fn reclaim_unclaimed_empty_root(
-    path: &Path,
-    task_id: &str,
-    instance_id: &str,
-) -> Result<Option<RootIdentity>> {
-    // The emptiness check and the ownership claim are one registry-locked
-    // operation, so a concurrent task cannot claim the root in between.
-    if !registry::claim_root_exclusively(task_id, instance_id, path)? {
-        return Ok(None);
-    }
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(RootIdentity::of(&metadata))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -183,7 +193,7 @@ fn plan_exists(task_id: &str) -> bool {
 /// Destroy an environment: release every resource, then drop the slot.
 ///
 /// The plan is built from the durable document, not from the caller's handle,
-/// so a handle that is a stale snapshot cannot omit resources registered later.
+/// so a stale handle cannot omit resources registered later.
 pub fn destroy(env: &TaskEnvironment) -> Result<()> {
     registry::validate_task_id(&env.task_id)?;
 
@@ -311,37 +321,28 @@ fn finish(task_id: &str, instance_id: &str) -> Result<()> {
 fn run_cleanup(state: &mut CleanupState) -> Result<()> {
     let mut errors = Vec::new();
 
-    // Orphans adopted by the subreaper after registration are not in any
-    // snapshot taken earlier; attribute them here, excluding identities owned
-    // by other live environments.
-    let claimed = registry::claimed_processes(&state.instance_id).unwrap_or_default();
-    let baselines: Vec<ProcessRecord> = state
-        .pending_processes
-        .iter()
-        .flat_map(|process| process.direct_children.iter().cloned())
-        .collect();
-    let self_pid = std::process::id() as i32;
-    let adopted: Vec<ProcessRecord> = super::env::direct_children_of(self_pid)
-        .into_iter()
-        .filter(|child| !contains_record(&baselines, child))
-        .filter(|child| !contains_record(&claimed, child))
-        .filter(|child| !state.pending_processes.iter().any(|p| p.pid == child.pid))
-        .collect();
-    for child in &adopted {
-        if let Err(error) = terminate_adopted(child) {
-            errors.push(format!("adopted process {}: {error}", child.pid));
-        }
+    // Positive attribution: every process started by this environment carries
+    // its marker, including descendants that detached or were orphaned.
+    let mut targets = super::env::marked_processes(&state.instance_id);
+    for record in targets.clone() {
+        targets.extend(descendants_snapshot(record.pid));
     }
-
-    state
-        .pending_processes
-        .retain(|entry| match terminate_process(entry) {
-            Ok(()) => false,
-            Err(error) => {
-                errors.push(format!("process {}: {error}", entry.pid));
-                true
-            }
-        });
+    if let Err(error) = terminate_records(&mut targets) {
+        errors.push(format!("processes: {error}"));
+    }
+    // A registered process that is still alive but unmarked cannot be proven
+    // ours; never signal it, and never report the slot as clean.
+    state.pending_processes.retain(|entry| {
+        if process_is_alive(entry) {
+            errors.push(format!(
+                "registered process {} is alive but not marked by this environment",
+                entry.pid
+            ));
+            true
+        } else {
+            false
+        }
+    });
 
     state
         .pending_worktrees
@@ -363,20 +364,39 @@ fn run_cleanup(state: &mut CleanupState) -> Result<()> {
             }
         });
 
-    state.pending_root_removals.retain(|path| {
-        let root = state.roots.iter().find(|root| &root.path == path);
-        let Some(root) = root else {
+    let pending = std::mem::take(&mut state.pending_root_removals);
+    let mut remaining = Vec::new();
+    for path in pending {
+        let Some(root) = state.roots.iter().find(|root| root.path == path) else {
             errors.push(format!("root {} is not owned by this plan", path.display()));
-            return true;
+            remaining.push(path);
+            continue;
         };
+        let committed = state.removal_in_progress.as_deref() == Some(path.as_path());
+        if committed && !path.exists() {
+            // We committed to removing this root before the crash; the name is
+            // gone, so the removal completed.
+            state.removal_in_progress = None;
+            continue;
+        }
+        // Persist the commitment before deleting so a crash here is provable.
+        state.removal_in_progress = Some(path.clone());
+        if let Err(error) = save_plan(state) {
+            errors.push(format!("root {}: {error}", path.display()));
+            remaining.push(path);
+            continue;
+        }
         match remove_root(root) {
-            Ok(()) => false,
+            Ok(()) => {
+                state.removal_in_progress = None;
+            }
             Err(error) => {
                 errors.push(format!("root {}: {error}", path.display()));
-                true
+                remaining.push(path);
             }
         }
-    });
+    }
+    state.pending_root_removals = remaining;
 
     if errors.is_empty() {
         state.record(None);
@@ -391,80 +411,29 @@ fn run_cleanup(state: &mut CleanupState) -> Result<()> {
     }
 }
 
-fn contains_record(records: &[ProcessRecord], candidate: &ProcessRecord) -> bool {
-    records.iter().any(|record| {
-        record.pid == candidate.pid
-            && match (record.start_time, candidate.start_time) {
-                (Some(left), Some(right)) => left == right,
-                _ => true,
-            }
-    })
-}
-
-/// Freeze and kill a registered process together with every descendant we can
-/// attribute to it.
-///
-/// `SIGSTOP` comes first so no `SIGTERM` handler can spawn a new child, and the
-/// descendant snapshot taken at registration is included so a process that
-/// called `setsid()` or was orphaned by an early-exiting parent is still found.
-fn terminate_process(entry: &RegisteredProcess) -> Result<()> {
-    if entry.pid <= 1 || entry.pgid <= 1 {
-        return Err(FlowError::progress(format!(
-            "refusing to signal invalid process {}/{}",
-            entry.pid, entry.pgid
-        )));
-    }
-    // SAFETY: getpgrp takes no pointers and has no caller preconditions.
-    if entry.pgid == unsafe { libc::getpgrp() } {
-        return Err(FlowError::progress(format!(
-            "refusing to signal the supervisor's process group {}",
-            entry.pgid
-        )));
-    }
-
-    let mut targets: Vec<ProcessRecord> = entry.descendants.clone();
-    if process_is_alive(entry) {
-        targets.push(ProcessRecord {
-            pid: entry.pid,
-            start_time: entry.start_time,
-        });
-        signal_group(entry.pgid, libc::SIGSTOP);
-        targets.extend(descendants_snapshot(entry.pid));
-    }
-    for record in &entry.descendants {
-        if process_record_is_alive(record) {
-            targets.extend(descendants_snapshot(record.pid));
-        }
-    }
-    for pid in group_members(entry.pgid) {
-        targets.push(ProcessRecord {
-            pid,
-            start_time: process_start_time(pid),
-        });
-    }
+/// Freeze, kill and verify a set of positively-identified processes.
+fn terminate_records(targets: &mut Vec<ProcessRecord>) -> Result<()> {
     targets.sort_by_key(|record| record.pid);
     targets.dedup_by_key(|record| record.pid);
-
-    if targets
-        .iter()
-        .all(|record| !process_record_is_alive(record))
-    {
+    targets.retain(process_record_is_alive);
+    if targets.is_empty() {
         return Ok(());
     }
 
-    for record in &targets {
+    // Freeze everything first so no process can spawn or reparent a new child
+    // between enumeration and termination.
+    for record in targets.iter() {
         // SAFETY: pids are positive scalars; a dead pid is a no-op.
         unsafe {
             libc::kill(record.pid, libc::SIGSTOP);
         }
     }
-    for record in &targets {
+    for record in targets.iter() {
         // SAFETY: pids are positive scalars; a dead pid is a no-op.
         unsafe {
             libc::kill(record.pid, libc::SIGKILL);
         }
     }
-    signal_group(entry.pgid, libc::SIGKILL);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
     loop {
@@ -473,7 +442,7 @@ fn terminate_process(entry: &RegisteredProcess) -> Result<()> {
             .filter(|record| process_record_is_alive(record))
             .map(|record| record.pid)
             .collect();
-        if survivors.is_empty() && group_members(entry.pgid).is_empty() {
+        if survivors.is_empty() {
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -483,57 +452,6 @@ fn terminate_process(entry: &RegisteredProcess) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-}
-
-fn signal_group(pgid: i32, signal: i32) {
-    // SAFETY: kill with a negated group id takes only scalars; pgid > 1 and
-    // differs from our own group.
-    unsafe {
-        libc::kill(-pgid, signal);
-    }
-}
-
-/// Live (non-zombie) processes whose process group is `pgid`.
-fn group_members(pgid: i32) -> Vec<i32> {
-    let mut members = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return members;
-    };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<i32>() else {
-            continue;
-        };
-        if process_group_of(pid) == Some(pgid) && !is_zombie(pid) {
-            members.push(pid);
-        }
-    }
-    members.sort_unstable();
-    members
-}
-
-fn process_group_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(2)?
-        .parse()
-        .ok()
-}
-
-fn is_zombie(pid: i32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    matches!(
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .and_then(|state| state.chars().next()),
-        Some('Z')
-    )
 }
 
 /// Remove a registered file by unlinking its entry, never its symlink target.
@@ -555,13 +473,13 @@ fn remove_registered_file(file: &Path, roots: &[PendingDirectory]) -> Result<()>
         }
         Ok(_) => {}
     }
-    if root.identity.is_none() {
+    let Some(expected) = root.identity else {
         return Err(FlowError::progress(format!(
             "root {} has no recorded ownership; refusing to unlink {}",
             root.path.display(),
             file.display()
         )));
-    }
+    };
 
     let relative = file.strip_prefix(&root.path).map_err(|_| {
         FlowError::progress(format!(
@@ -579,11 +497,16 @@ fn remove_registered_file(file: &Path, roots: &[PendingDirectory]) -> Result<()>
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
 
     let root_dir = open_dir_nofollow(&root.path)?;
-    verify_root_identity(&root_dir, root)?;
+    let actual = RootIdentity::of(&root_dir.metadata()?);
+    if actual != expected {
+        return Err(FlowError::progress(format!(
+            "{} identity changed; refusing to unlink",
+            root.path.display()
+        )));
+    }
     let parent = open_beneath(&root_dir, parent_relative)?;
     match kind_at(&parent, name)? {
         None => Ok(()),
-        // Removing the link itself is always safe: the target is untouched.
         Some(EntryKind::Symlink) | Some(EntryKind::File) | Some(EntryKind::Other) => {
             unlink_at(&parent, name)
         }
@@ -600,11 +523,19 @@ fn owner_of<'a>(path: &Path, roots: &'a [PendingDirectory]) -> Option<&'a Pendin
         .find(|root| util::is_relative_to(path, &root.path))
 }
 
-/// Remove a root after pinning it by descriptor and verifying `(dev, ino)`.
+/// Remove a root through a pinned descriptor and a quarantine name.
 ///
-/// The tree is emptied relative to that descriptor. If the path is renamed or
-/// replaced after this point, the replacement is left alone.
+/// The final directory entry is never unlinked by its original name. It is
+/// renamed to an unpredictable name and its identity is verified there before
+/// unlinking, so a path swapped at the last moment is moved aside and left
+/// alone instead of being deleted. Any uncertainty keeps the slot.
 fn remove_root(root: &PendingDirectory) -> Result<()> {
+    let Some(expected) = root.identity else {
+        return Err(FlowError::progress(format!(
+            "root {} has no recorded identity; refusing to remove",
+            root.path.display()
+        )));
+    };
     let Some(parent_path) = root.path.parent() else {
         return Err(FlowError::progress(format!(
             "{} has no parent directory",
@@ -620,7 +551,12 @@ fn remove_root(root: &PendingDirectory) -> Result<()> {
 
     let parent = open_dir_nofollow(parent_path)?;
     match kind_at(&parent, name)? {
-        None => return Ok(()),
+        None => {
+            return Err(FlowError::progress(format!(
+                "{} is missing; ownership cannot be confirmed",
+                root.path.display()
+            )))
+        }
         Some(EntryKind::Symlink) => {
             return Err(FlowError::progress(format!(
                 "{} was replaced by a symlink; refusing to follow it",
@@ -643,114 +579,101 @@ fn remove_root(root: &PendingDirectory) -> Result<()> {
         )));
     };
     let actual = RootIdentity::of(&dir.metadata()?);
-    if let Some(expected) = root.identity {
-        if actual != expected {
-            return Err(FlowError::progress(format!(
-                "{} was replaced by a different directory (inode {} -> {}); refusing to remove",
-                root.path.display(),
-                expected.ino,
-                actual.ino
-            )));
-        }
+    if actual != expected {
+        return Err(FlowError::progress(format!(
+            "{} was replaced by a different directory (inode {} -> {}); refusing to remove",
+            root.path.display(),
+            expected.ino,
+            actual.ino
+        )));
     }
 
     unmount_under(&root.path);
     clear_directory(&dir, 0)?;
+    if dir.metadata()?.nlink() == 0 {
+        return Ok(());
+    }
 
-    // Re-verify the name before removing it: the path may have been renamed or
-    // replaced while the tree was being emptied. A replacement is never
-    // removed, and an incomplete removal keeps the plan (and slot) alive.
-    match kind_at(&parent, name)? {
-        None => Ok(()),
+    let quarantine = format!(".herdr-rm-{}", util::uuid_hex());
+    let quarantine_os = OsStr::new(&quarantine);
+    match rename_noreplace(&parent, name, quarantine_os) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if dir.metadata()?.nlink() == 0 {
+                Ok(())
+            } else {
+                Err(FlowError::progress(format!(
+                    "{} was renamed during cleanup; slot retained",
+                    root.path.display()
+                )))
+            };
+        }
+        Err(error) => {
+            return Err(FlowError::progress(format!(
+                "cannot quarantine {}: {error}",
+                root.path.display()
+            )))
+        }
+    }
+
+    // Whatever landed under the quarantine name must be our inode before it
+    // may be unlinked. A replacement is moved back untouched.
+    match kind_at(&parent, quarantine_os)? {
         Some(EntryKind::Directory) => {
-            let Some(check) = open_child_dir(&parent, name)? else {
+            let Some(check) = open_child_dir(&parent, quarantine_os)? else {
+                return Err(FlowError::progress("quarantined entry vanished"));
+            };
+            if RootIdentity::of(&check.metadata()?) != expected {
+                let _ = rename_noreplace(&parent, quarantine_os, name);
                 return Err(FlowError::progress(format!(
-                    "{} changed while being removed",
+                    "{} was replaced during cleanup; replacement preserved and slot retained",
                     root.path.display()
                 )));
-            };
-            let actual = RootIdentity::of(&check.metadata()?);
-            if let Some(expected) = root.identity {
-                if actual != expected {
-                    return Err(FlowError::progress(format!(
-                        "{} was renamed or replaced during cleanup; slot retained",
-                        root.path.display()
-                    )));
-                }
             }
-            unlink_at_dir(&parent, name)
+            unlink_at_dir(&parent, quarantine_os)?;
+            if dir.metadata()?.nlink() != 0 {
+                return Err(FlowError::progress(format!(
+                    "{} is still linked elsewhere; slot retained",
+                    root.path.display()
+                )));
+            }
+            Ok(())
         }
-        Some(_) => Err(FlowError::progress(format!(
-            "{} was replaced by a non-directory during cleanup; slot retained",
+        Some(_) => {
+            let _ = rename_noreplace(&parent, quarantine_os, name);
+            Err(FlowError::progress(format!(
+                "{} was replaced by a non-directory during cleanup; slot retained",
+                root.path.display()
+            )))
+        }
+        None => Err(FlowError::progress(format!(
+            "quarantined copy of {} vanished; slot retained",
             root.path.display()
         ))),
     }
 }
 
-/// Freeze and kill an adopted orphan and its descendants.
-fn terminate_adopted(record: &ProcessRecord) -> Result<()> {
-    if !process_record_is_alive(record) {
-        return Ok(());
-    }
-    let mut targets = descendants_snapshot(record.pid);
-    targets.push(record.clone());
-    targets.sort_by_key(|item| item.pid);
-    targets.dedup_by_key(|item| item.pid);
-    targets.retain(process_record_is_alive);
-    if targets.is_empty() {
-        return Ok(());
-    }
-    for item in &targets {
-        // SAFETY: pids are positive scalars; a dead pid is a no-op.
-        unsafe {
-            libc::kill(item.pid, libc::SIGSTOP);
-        }
-    }
-    for item in &targets {
-        // SAFETY: pids are positive scalars; a dead pid is a no-op.
-        unsafe {
-            libc::kill(item.pid, libc::SIGKILL);
-        }
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
-    loop {
-        // These orphans were reparented to us, so we are also responsible for
-        // reaping them; otherwise they linger as zombies and keep a pid.
-        for item in &targets {
-            // SAFETY: waitpid with WNOHANG takes scalars; a non-child returns
-            // ECHILD and a still-running child returns 0.
-            unsafe {
-                libc::waitpid(item.pid, std::ptr::null_mut(), libc::WNOHANG);
-            }
-        }
-        let survivors: Vec<i32> = targets
-            .iter()
-            .filter(|item| process_record_is_alive(item))
-            .map(|item| item.pid)
-            .collect();
-        if survivors.is_empty() {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(FlowError::progress(format!(
-                "adopted processes survived SIGKILL: {survivors:?}"
-            )));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-fn verify_root_identity(root_dir: &File, root: &PendingDirectory) -> Result<()> {
-    let metadata = root_dir.metadata()?;
-    let actual = RootIdentity::of(&metadata);
-    match root.identity {
-        Some(expected) if actual != expected => Err(FlowError::progress(format!(
-            "{} identity changed (inode {} -> {}); refusing to operate",
-            root.path.display(),
-            expected.ino,
-            actual.ino
-        ))),
-        _ => Ok(()),
+/// Atomically rename `from` to `to` in the same directory, never replacing `to`.
+fn rename_noreplace(parent: &File, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+    let from = CString::new(from.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let to = CString::new(to.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: both names are NUL-terminated and parent is a live directory fd.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.as_raw_fd(),
+            from.as_ptr(),
+            parent.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 

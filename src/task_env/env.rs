@@ -9,10 +9,12 @@
 //! * a per-task exclusive lock held for the lifetime of the handle, so two
 //!   handles cannot own the same environment and release each other's slot.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,14 @@ use crate::util;
 
 use super::boundary::DeliveryTarget;
 use super::registry;
+
+/// Environment variable that marks every process the task starts.
+///
+/// The value is the environment's `instance_id`. It is inherited across
+/// `fork`/`exec`, survives `setsid()`, and remains readable at
+/// `/proc/<pid>/environ` after the process is orphaned. Cleanup therefore has
+/// positive evidence of ownership instead of guessing from process groups.
+pub const MARKER_ENV: &str = "HERDR_TASK_ENV_INSTANCE";
 
 /// Lifecycle state of a task environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +189,33 @@ impl TaskEnvironment {
             .is_some()
     }
 
+    /// Build a command that starts a task process owned by this environment.
+    ///
+    /// The child is placed in its own session so it leads its own process
+    /// group, and it inherits the environment marker. Only processes started
+    /// this way (or descended from them) can be registered and reclaimed.
+    pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = Command::new(program);
+        command.env(MARKER_ENV, &self.instance_id);
+        // SAFETY: setsid has no memory arguments and is called in the child
+        // between fork and exec.
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command
+    }
+
+    /// Whether `pid` carries this environment's marker.
+    pub fn owns_process(&self, pid: i32) -> bool {
+        process_has_marker(pid, &self.instance_id)
+    }
+
     /// Register a worktree that lives inside the disposable workspace.
     pub fn register_worktree(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
@@ -212,6 +249,12 @@ impl TaskEnvironment {
         if pid <= 1 {
             return Err(FlowError::progress(format!(
                 "invalid process id {pid}: must be greater than 1"
+            )));
+        }
+        if !self.owns_process(pid) {
+            return Err(FlowError::progress(format!(
+                "pid {pid} was not started with this environment's marker {}; spawn it with TaskEnvironment::command so it can be reclaimed",
+                MARKER_ENV
             )));
         }
         let pgid = process_group(pid).ok_or_else(|| {
@@ -249,6 +292,12 @@ impl TaskEnvironment {
     /// way to guarantee a file does not outlive the environment.
     pub fn register_handle(&mut self, path: &Path, handle: File) -> Result<()> {
         let resolved = util::resolve_path(path);
+        if !self.owns_path(&resolved) {
+            return Err(FlowError::progress(format!(
+                "refusing to register {} outside the disposable boundary",
+                resolved.display()
+            )));
+        }
         if self.open_files.contains(&resolved) {
             return Ok(());
         }
@@ -263,6 +312,12 @@ impl TaskEnvironment {
     /// Open `path` without following a final symlink and take ownership.
     pub fn register_file(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
+        if !self.owns_path(&resolved) {
+            return Err(FlowError::progress(format!(
+                "refusing to register {} outside the disposable boundary",
+                resolved.display()
+            )));
+        }
         if self.open_files.contains(&resolved) {
             return Ok(());
         }
@@ -431,20 +486,39 @@ pub fn direct_children_of(pid: i32) -> Vec<ProcessRecord> {
     children
 }
 
-/// Make this process the reaper for orphaned task descendants.
-///
-/// A process that calls `setsid()` and is later orphaned would otherwise be
-/// reparented to init and become untraceable. As a child subreaper, the
-/// supervisor receives it instead, where cleanup can find and kill it.
-pub fn ensure_subreaper() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: prctl takes scalar arguments only.
-        unsafe {
-            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+/// Whether a process carries the marker for `instance_id`.
+pub fn process_has_marker(pid: i32, instance_id: &str) -> bool {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    let needle = format!("{MARKER_ENV}={instance_id}");
+    bytes
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == needle.as_bytes())
+}
+
+/// Every process that carries the marker for `instance_id`.
+pub fn marked_processes(instance_id: &str) -> Vec<ProcessRecord> {
+    let mut records = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return records;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        if process_has_marker(pid, instance_id) {
+            records.push(ProcessRecord {
+                pid,
+                start_time: process_start_time(pid),
+            });
         }
-    });
+    }
+    records.sort_by_key(|record| record.pid);
+    records
 }
 
 /// All transitive children of `pid` that are currently visible.
@@ -528,7 +602,6 @@ pub fn create(
     temp_root: &Path,
 ) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
-    ensure_subreaper();
 
     let lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
         FlowError::progress(format!(
@@ -604,6 +677,7 @@ pub fn create(
         instance_id: env.instance_id.clone(),
         workspace_root: workspace_root.clone(),
         temp_root: temp_root.clone(),
+        roots: vec![workspace_root.clone(), temp_root.clone()],
         state_file: state_file.clone(),
         registered_at: now,
     };

@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier, MutexGuard};
@@ -89,20 +88,15 @@ fn delivery(path: PathBuf) -> DeliveryTarget {
     DeliveryTarget::new(path, "file".to_string())
 }
 
-/// Spawn a shell in its own session/process group.
-fn spawn_detached(script: &str, arg: &Path) -> std::process::Child {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(script).arg("herdr-test").arg(arg);
-    // SAFETY: setsid has no memory arguments; called in the child before exec.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    command.spawn().unwrap()
+/// Spawn a shell owned by `env` (session leader + ownership marker).
+fn spawn_detached(env: &TaskEnvironment, script: &str, arg: &Path) -> std::process::Child {
+    env.command("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("herdr-test")
+        .arg(arg)
+        .spawn()
+        .unwrap()
 }
 
 fn wait_for_pid_file(path: &Path) -> i32 {
@@ -423,7 +417,11 @@ fn destroy_terminates_the_whole_registered_process_group() {
 
     // The parent stays alive just long enough to be registered, then exits and
     // leaves a background child behind in the same process group.
-    let mut parent = spawn_detached("sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0", &pidfile);
+    let mut parent = spawn_detached(
+        &env,
+        "sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
+        &pidfile,
+    );
     let descendant = wait_for_pid_file(&pidfile);
     env.register_process(parent.id() as i32).unwrap();
     let _ = parent.wait();
@@ -445,6 +443,7 @@ fn sigterm_handler_cannot_spawn_a_survivor() {
     let pidfile = harness.path().join("trap-child.pid");
 
     let mut parent = spawn_detached(
+        &env,
         "trap 'sleep 60 & echo $! > \"$1\"' TERM; while :; do sleep 0.05; done",
         &pidfile,
     );
@@ -471,14 +470,15 @@ fn sigterm_handler_cannot_spawn_a_survivor() {
 }
 
 #[test]
-fn descendant_that_left_the_group_is_killed_from_the_registration_snapshot() {
+fn descendant_that_left_the_group_is_killed_by_the_marker() {
     let harness = Harness::new();
     let mut env = harness.create("setsid-orphan");
     let pidfile = harness.path().join("setsid.pid");
 
-    // The parent starts a child in a new session, then exits. The child is
-    // recorded at registration, while its parent link is still visible.
+    // The parent starts a child in a new session, then exits. The marker is
+    // inherited by the child and survives the orphaned state.
     let mut parent = spawn_detached(
+        &env,
         "setsid sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
         &pidfile,
     );
@@ -496,7 +496,7 @@ fn descendant_that_left_the_group_is_killed_from_the_registration_snapshot() {
 }
 
 #[test]
-fn descendant_spawned_after_registration_is_reaped_as_an_adopted_orphan() {
+fn descendant_spawned_after_registration_is_still_marked() {
     let harness = Harness::new();
     let mut env = harness.create("late-orphan");
     let pidfile = harness.path().join("late.pid");
@@ -504,6 +504,7 @@ fn descendant_spawned_after_registration_is_reaped_as_an_adopted_orphan() {
 
     // Register first, then let the parent spawn a detached child and exit.
     let mut parent = spawn_detached(
+        &env,
         "while [ ! -f \"$1.go\" ]; do sleep 0.01; done; setsid sleep 60 & echo $! > \"$1\"; exit 0",
         &pidfile,
     );
@@ -527,17 +528,18 @@ fn descendant_spawned_after_registration_is_reaped_as_an_adopted_orphan() {
 #[test]
 fn plan_only_recovery_is_discovered_and_completed() {
     let harness = Harness::new();
-    let env = harness.create("plan-only");
-    fs::remove_dir_all(&env.workspace_root).unwrap();
-    fs::write(&env.workspace_root, "force failure").unwrap();
+    let mut env = harness.create("plan-only");
+    let file = env.workspace_root.join("owned.txt");
+    fs::write(&file, "task data").unwrap();
+    env.register_file(&file).unwrap();
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
     assert!(destroy_environment(&env).is_err());
     assert!(cleanup_state_path("plan-only").unwrap().exists());
 
     // Simulate a crash after the document was removed but before the plan was.
-    let workspace = env.workspace_root.clone();
     fs::remove_file(env.state_file()).unwrap();
     drop(env);
-    fs::remove_file(&workspace).unwrap();
 
     assert!(interrupted_tasks()
         .unwrap()
@@ -545,6 +547,122 @@ fn plan_only_recovery_is_discovered_and_completed() {
     assert!(recover_interrupted("plan-only").unwrap());
     assert!(!cleanup_state_path("plan-only").unwrap().exists());
     assert_eq!(occupied_slots().unwrap(), 0);
+}
+
+#[test]
+fn unrelated_supervisor_child_survives_destroy() {
+    let harness = Harness::new();
+    // Not started through the environment, so it carries no marker.
+    let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = unrelated.id() as i32;
+    let env = harness.create("unrelated");
+
+    destroy_environment(&env).unwrap();
+    assert!(alive(pid), "destroy killed an unrelated supervisor child");
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+}
+
+#[test]
+fn destroying_one_environment_leaves_anothers_orphan_alone() {
+    let harness = Harness::new();
+    let first = harness.create("first-env");
+    let mut second = harness.create("second-env");
+    let pidfile = harness.path().join("second-orphan.pid");
+
+    let mut parent = spawn_detached(
+        &second,
+        "setsid sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
+        &pidfile,
+    );
+    let orphan = wait_for_pid_file(&pidfile);
+    second.register_process(parent.id() as i32).unwrap();
+    let _ = parent.wait();
+
+    destroy_environment(&first).unwrap();
+    assert!(alive(orphan), "destroying A killed B's marked orphan");
+
+    destroy_environment(&second).unwrap();
+    assert!(!alive(orphan), "B's own destroy left its orphan alive");
+}
+
+#[test]
+fn another_environments_registration_cannot_hide_an_orphan() {
+    let harness = Harness::new();
+    let mut first = harness.create("hidden-orphan");
+    let pidfile = harness.path().join("hidden.pid");
+    let mut parent = spawn_detached(
+        &first,
+        "setsid sleep 60 & echo $! > \"$1\"; sleep 0.3; exit 0",
+        &pidfile,
+    );
+    let orphan = wait_for_pid_file(&pidfile);
+    first.register_process(parent.id() as i32).unwrap();
+    let _ = parent.wait();
+    // Register a second environment after the orphan exists.
+    let second = harness.create("hiding-env");
+
+    destroy_environment(&first).unwrap();
+    assert!(!alive(orphan), "A's orphan survived A's destroy");
+    destroy_environment(&second).unwrap();
+}
+
+#[test]
+fn mismatched_process_identity_is_never_signalled() {
+    let harness = Harness::new();
+    let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = unrelated.id() as i32;
+    let env = harness.create("identity");
+
+    // Create a plan, then inject a record that claims the unrelated pid with a
+    // stale start time, simulating pid reuse.
+    fs::remove_dir_all(&env.workspace_root).unwrap();
+    fs::write(&env.workspace_root, "force failure").unwrap();
+    assert!(destroy_environment(&env).is_err());
+    let plan_path = cleanup_state_path("identity").unwrap();
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan["pending_processes"] = serde_json::json!([{
+        "pid": pid,
+        "pgid": pid,
+        "start_time": 1,
+    }]);
+    plan["removal_in_progress"] = serde_json::json!(env.workspace_root);
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    fs::remove_file(&env.workspace_root).unwrap();
+    drop(env);
+
+    cleanup_failed_environment("identity").unwrap();
+    assert!(alive(pid), "a mismatched identity was signalled");
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+}
+
+#[test]
+fn claiming_two_roots_keeps_both_claims() {
+    let harness = Harness::new();
+    harness.prepare("claim");
+    let a = harness.path().join("claim").join("a");
+    let b = harness.path().join("claim").join("b");
+    for dir in [&a, &b] {
+        fs::create_dir(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let claimed =
+        claim_roots_exclusively("claim-task", "instance-a", &[a.clone(), b.clone()]).unwrap();
+    assert_eq!(claimed.len(), 2);
+    let registry = load_registry().unwrap();
+    let entry = registry.get("claim-task").expect("claim entry missing");
+    assert_eq!(entry.claimed_roots().len(), 2);
+
+    // A different instance can claim neither root.
+    assert!(claim_roots_exclusively("other-task", "instance-b", &[a])
+        .unwrap()
+        .is_empty());
+    assert!(claim_roots_exclusively("other-task", "instance-b", &[b])
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -565,15 +683,23 @@ fn processes_outside_their_own_group_are_rejected() {
 #[test]
 fn failed_destroy_keeps_the_slot_and_retry_completes_it() {
     let harness = Harness::new();
-    let env = harness.create("retry");
-    fs::remove_dir_all(&env.workspace_root).unwrap();
-    fs::write(&env.workspace_root, "force ENOTDIR").unwrap();
+    let mut env = harness.create("retry");
+    let file = env.workspace_root.join("owned.txt");
+    fs::write(&file, "task data").unwrap();
+    env.register_file(&file).unwrap();
+    // A directory where a registered file used to be makes that step fail.
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
 
     assert!(destroy_environment(&env).is_err());
     assert!(is_registered("retry").unwrap());
     assert!(occupied_slots().unwrap() >= 1);
-    fs::remove_file(&env.workspace_root).unwrap();
+    let restored = restore_environment("retry").unwrap();
+    assert_eq!(restored.state, EnvironmentState::DestroyFailed);
+    drop(restored);
 
+    // The root pass still removed the workspace, so the pending file is simply
+    // gone; the retry must finish as an idempotent no-op.
     cleanup_failed_environment("retry").unwrap();
     assert!(!env.state_file().exists());
     assert!(!is_registered("retry").unwrap());
@@ -584,9 +710,12 @@ fn failed_destroy_keeps_the_slot_and_retry_completes_it() {
 fn failed_cleanup_exhausts_retries_and_keeps_the_slot() {
     let harness = Harness::new();
     std::env::set_var("HERDR_TASK_ENV_LIMIT", "1");
-    let env = harness.create("stuck");
-    fs::remove_dir_all(&env.workspace_root).unwrap();
-    fs::write(&env.workspace_root, "force ENOTDIR").unwrap();
+    let mut env = harness.create("stuck");
+    let file = env.workspace_root.join("owned.txt");
+    fs::write(&file, "task data").unwrap();
+    env.register_file(&file).unwrap();
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
     assert!(destroy_environment(&env).is_err());
 
     harness.prepare("other");
@@ -598,13 +727,16 @@ fn failed_cleanup_exhausts_retries_and_keeps_the_slot() {
     );
     assert!(blocked.is_err(), "limit ignored the pending cleanup");
 
-    for _ in 0..MAX_ATTEMPTS {
-        let _ = cleanup_failed_environment("stuck");
-    }
+    // Drive the plan to the retry bound and confirm it refuses to continue.
+    let plan_path = cleanup_state_path("stuck").unwrap();
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan["attempts"] = serde_json::json!(MAX_ATTEMPTS);
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
     let exhausted = cleanup_failed_environment("stuck").unwrap_err();
     assert!(exhausted.to_string().contains("already failed"));
 
-    fs::remove_file(&env.workspace_root).unwrap();
+    let _ = file;
     std::env::remove_var("HERDR_TASK_ENV_LIMIT");
 }
 
@@ -705,21 +837,43 @@ fn destroying_state_is_recovered() {
 }
 
 #[test]
-fn retry_after_the_root_is_already_gone_completes() {
+fn retry_after_a_committed_root_removal_completes() {
     let harness = Harness::new();
-    let mut env = harness.create("gone-root");
-    let file = env.workspace_root.join("owned.txt");
-    fs::write(&file, "task data").unwrap();
-    env.register_file(&file).unwrap();
+    let env = harness.create("gone-root");
+    let workspace = env.workspace_root.clone();
+    // Fail at the root step so the root stays pending in the plan.
+    fs::remove_dir_all(&workspace).unwrap();
+    fs::write(&workspace, "force failure").unwrap();
+    assert!(destroy_environment(&env).is_err());
+    assert!(cleanup_state_path("gone-root").unwrap().exists());
 
-    // Simulate a crash after the root was deleted but before the plan was
-    // finalised.
-    fs::remove_dir_all(&env.workspace_root).unwrap();
-    destroy_environment(&env).unwrap();
+    // Simulate a crash after the commit was persisted and the root unlinked.
+    fs::remove_file(&workspace).unwrap();
+    let plan_path = cleanup_state_path("gone-root").unwrap();
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan["removal_in_progress"] = serde_json::json!(workspace);
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    drop(env);
 
+    cleanup_failed_environment("gone-root").unwrap();
     assert!(!environment_state_path("gone-root").unwrap().exists());
     assert!(!is_registered("gone-root").unwrap());
-    assert!(!cleanup_state_path("gone-root").unwrap().exists());
+    assert!(!plan_path.exists());
+}
+
+#[test]
+fn renamed_root_without_replacement_retains_the_slot() {
+    let harness = Harness::new();
+    let env = harness.create("renamed-root");
+    let moved = harness.path().join("renamed-away");
+    fs::rename(&env.workspace_root, &moved).unwrap();
+
+    assert!(destroy_environment(&env).is_err());
+    assert!(is_registered("renamed-root").unwrap());
+    assert!(env.state_file().exists());
+    assert!(cleanup_state_path("renamed-root").unwrap().exists());
+    assert!(moved.exists(), "the renamed root must not be deleted");
 }
 
 #[test]
@@ -740,6 +894,7 @@ fn concurrent_registrations_do_not_lose_updates() {
                 instance_id: format!("instance-{index}"),
                 workspace_root: root.join("workspace"),
                 temp_root: root.join("temp"),
+                roots: vec![root.join("workspace"), root.join("temp")],
                 state_file: state,
                 registered_at: 0.0,
             })
