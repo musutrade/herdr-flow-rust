@@ -33,7 +33,18 @@ pub fn packet(queue: &J, wait: &J, instruction: &str, evidence: &[String]) -> Re
         req.is_object(),
         "fresh sessions require linked requirements",
     )?;
-    Ok(json!({"binding":binding,"requirement":req,"instruction":instruction,"evidence":evidence}))
+    Ok(
+        json!({"binding":binding,"requirement":req,"instruction":instruction,"evidence":evidence,"acceptance_origin":task["acceptance_origin"],"open_gaps":parent["open_gaps"],"acceptance_protocol":acceptance_protocol(req)}),
+    )
+}
+
+fn acceptance_protocol(requirement: &J) -> J {
+    json!({"role":"acceptance", "report_file":".herdr-verdict.json",
+        "instruction":"For acceptance roles, derive checks only from the supplied requirement basis. Write the independent JSON report in report_file inside cwd before finishing. Each source MUST exactly copy one string from requirement.basis.original, changes or specifications; never use a JSON pointer or paraphrase. Each criterion MUST match an ID from requirement.criteria. An execution response is not a verdict. Inspect agreements before declaring ambiguity; do not ask again for existing authorization.",
+        "shape":{"conclusion":"passed|failed|unable|ambiguous","scope":"checked scope","checks":[{"id":"check-id","criterion":requirement["criteria"][0]["id"],"source":requirement["basis"]["original"][0],"status":"passed|failed|blocked","evidence":"evidence reference"}],
+        "gaps":[{"id":"gap-id","criterion":requirement["criteria"][0]["id"],"source":requirement["basis"]["original"][0],"evidence":"evidence reference","release_condition":"what resolves the gap"}],"reuses":[],"resolutions":[]},
+        "unable_fields":["blocker","restore_condition"],"ambiguous_fields":["question","unresolved_after_review","agreements_checked"],"agreement_rule":"agreements_checked must include all basis original/changes/specifications references, basis.confirmation, and every existing authorization source",
+        "resolution_shape":{"activity":"previous reviewer activity","gap":"previous gap id","evidence":"release evidence reference","explanation":"why the condition is met"}})
 }
 
 /// One create attempt per private runtime. A failed/ambiguous response leaves
@@ -63,6 +74,7 @@ fn creation_journal(env: &TaskEnvironment, runtime: &J, q: &J, spec: &J) -> Resu
     let input = make_packet(q, wait, spec)?;
     verify_snapshot(runtime, &input["binding"])?;
     verify_acceptance_workspace(q, runtime, &input["binding"])?;
+    fresh_report_path(runtime, &input["binding"])?;
     let digest = util::pyjson::sha256_hex(serde_json::to_string(&input)?.as_bytes());
     Ok(
         json!({"phase":"creating","instance":env.instance_id,"runtime":runtime,
@@ -370,6 +382,18 @@ fn verify_producer(wait: &J, state: &J) -> Result<()> {
     Ok(())
 }
 
+fn fresh_report_path(state: &J, binding: &J) -> Result<()> {
+    if binding["lineage"]["role"] == "acceptance" {
+        ensure(
+            !Path::new(&required(state, "cwd")?)
+                .join(".herdr-verdict.json")
+                .exists(),
+            "fresh acceptance cannot inherit an existing verdict file",
+        )?;
+    }
+    Ok(())
+}
+
 fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
     ensure(
         binding["artifact_adapter"] == "git",
@@ -412,6 +436,7 @@ fn dispatch_packet(queue_root: &Path, journal: &J, state: &J) -> Result<String> 
     let q = queue::load_queue(queue_root)?;
     verify_queue(&q, journal, state)?;
     verify_snapshot(state, &journal["packet"]["binding"])?;
+    fresh_report_path(state, &journal["packet"]["binding"])?;
     let prompt = serde_json::to_string(&journal["packet"])?;
     ensure(
         util::pyjson::sha256_hex(prompt.as_bytes()) == journal["packet_sha256"],
@@ -563,6 +588,13 @@ fn publish_codex(
     if journal["outcome"].is_null() {
         return Ok(journal);
     }
+    progress::acceptance::native::collect(
+        queue_root,
+        &required(creation, "wait")?,
+        &json!({"adapter":"codex","session":state["session"]}),
+        Path::new(&required(state, "cwd")?),
+        journal["outcome"].as_str().unwrap_or_default(),
+    )?;
     queue::signal_native(
         queue_root,
         &json!({"adapter":"codex","session":state["session"]}),

@@ -104,3 +104,8 @@ Astra/high for independent review, and Sol/medium for validation/publication.
 This is a workload recommendation, not a measured guarantee. Independent review
 also requires a fresh context and evidence, regardless of model choice. CI
 observation runs without a model. Config does not grant merge/push permission.
+
+Independent review role behavior follows [independent acceptance](independent-acceptance.md):
+check only agreed criteria on the fixed snapshot and return an immutable verdict.
+The coordinator applies the verdict and existing authorization; the developer
+repairs recorded gaps, then a fresh reviewer verifies release evidence.

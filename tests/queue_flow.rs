@@ -699,14 +699,32 @@ fn lineage_actions_and_result_ack_persist_in_the_existing_queue() {
     run(&json!({"kind":"activity","task":"document","state_version":s["tasks"]["document"]["state_version"],
         "activity":"review-document","role":"acceptance","input":id,"session_epoch":1,
         "result_wait":{"id":"review-document","epoch":1,"assignment":"review-a1","owner":"review","kind":"signal","reason":"review","condition":"result","timeout_seconds":600}})).unwrap();
-    queue::signal(
-        &h.queue,
-        "review-document",
-        "complete",
-        "verified",
-        Some("evidence"),
-    )
-    .unwrap();
+    let mut registered = queue::load_queue(&h.queue).unwrap();
+    registered["waits"]["review-document"]["producer"] =
+        json!({"adapter":"codex","session":SESSION});
+    let verdict = herdr_flow::progress::acceptance::submit(&mut registered,"review-document",&json!({"adapter":"codex","session":SESSION}),&json!({"conclusion":"passed","scope":"document","checks":[{"id":"content","criterion":"goal","source":"user request","status":"passed","evidence":"independently checked evidence"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
+    queue::save(&h.queue, &mut registered).unwrap();
+    let signal = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args([
+            "queue",
+            "signal",
+            "--state-dir",
+            h.queue.to_str().unwrap(),
+            "--wait",
+            "review-document",
+            "--outcome",
+            "complete",
+            "--summary",
+            "verified",
+        ])
+        .env("CODEX_THREAD_ID", SESSION)
+        .output()
+        .unwrap();
+    assert!(
+        signal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signal.stderr)
+    );
     let s = h.tick(None);
     let e = event_for(&s, "review-document");
     let active = s["active"].as_str().unwrap();
@@ -717,7 +735,7 @@ fn lineage_actions_and_result_ack_persist_in_the_existing_queue() {
         "ACK is receipt, not approval"
     );
     let apply = json!({"task":"review-document","state_version":s["tasks"]["review-document"]["state_version"],"event":e,
-        "acceptance":{"goal":"independently checked evidence"},"next_action":{"kind":"complete"}});
+        "verdict":verdict["id"],"next_action":{"kind":"delivery","owner":"coordinator","reason":"independent pass","condition":"existing delivery authorization"}});
     let s = queue::task_action(&h.queue, "task-apply", &apply, Some(SESSION), &factory).unwrap();
     assert_eq!(s["tasks"]["document"]["approved"]["candidate"], id);
     assert_eq!(queue::load_queue(&h.queue).unwrap(), s);

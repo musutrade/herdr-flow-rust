@@ -148,13 +148,7 @@ fn publish_result(
     mut journal: J,
     queue_root: &Path,
 ) -> Result<J> {
-    if journal["source_fingerprint_after"].is_null() {
-        journal["source_fingerprint_after"] = json!(util::fingerprint(Path::new(&required(
-            &adapter.state,
-            "cwd"
-        )?))?);
-        capture_output(&adapter.state, &mut journal)?;
-    }
+    prepare_output(adapter, &mut journal)?;
     let wait_id = required(&journal["context"], "wait")?;
     let outcome = result_outcome(&journal)?.to_string();
     journal["outcome"] = json!(outcome);
@@ -167,10 +161,38 @@ fn publish_result(
         "OpenCode {} finished: {outcome}; inspect the bound report before accepting findings",
         adapter.session()
     );
+    collect_verdict(adapter, queue_root, &wait_id, &outcome)?;
     signal_report(queue_root, adapter, &wait_id, &outcome, &summary, &evidence)?;
     journal["phase"] = json!("signalled");
     save_submission(root, &journal)?;
     Ok(journal)
+}
+
+fn collect_verdict(
+    adapter: &SessionAdapter,
+    queue_root: &Path,
+    wait_id: &str,
+    outcome: &str,
+) -> Result<()> {
+    progress::acceptance::native::collect(
+        queue_root,
+        wait_id,
+        &json!({"adapter":"opencode","session":adapter.state["session"]}),
+        Path::new(&required(&adapter.state, "cwd")?),
+        outcome,
+    )?;
+    Ok(())
+}
+
+fn prepare_output(adapter: &SessionAdapter, journal: &mut J) -> Result<()> {
+    if journal["source_fingerprint_after"].is_null() {
+        journal["source_fingerprint_after"] = json!(util::fingerprint(Path::new(&required(
+            &adapter.state,
+            "cwd"
+        )?))?);
+        capture_output(&adapter.state, journal)?;
+    }
+    Ok(())
 }
 
 fn signal_report(

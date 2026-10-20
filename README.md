@@ -208,3 +208,6 @@ references/                行为契约与操作文档
 
 Task-owned native Codex / OpenCode sessions, adapter-qualified producer identities
 and development output collection: [runtime contract](references/task-runtime.md).
+
+Fixed-version independent acceptance and four-outcome continuation:
+[acceptance contract](references/independent-acceptance.md).

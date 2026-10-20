@@ -138,3 +138,7 @@ defaults to `untrusted`. An explicitly authorized runtime may select
 are the only supported policies. This does not answer pending requests or change
 a user's settings. A native command that needs approval stays blocked for explicit
 handling.
+
+Formal reviewer reports and their four continuation outcomes use the
+[independent acceptance protocol](independent-acceptance.md). Native collectors
+register the bound report separately from execution completion.
