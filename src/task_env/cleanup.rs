@@ -93,6 +93,11 @@ impl CleanupState {
     fn from_environment(env: &TaskEnvironment) -> Result<Self> {
         let now = util::now();
 
+        // Reject unsafe legacy roots before taking any recovery claims.
+        for (path, _) in env.roots() {
+            registry::validate_outside_control(&path)?;
+        }
+
         // Roots without a recorded identity come from an interrupted create.
         // Claim them atomically in the registry before considering removal, so
         // a concurrent task cannot take them in between.
@@ -111,9 +116,6 @@ impl CleanupState {
         let mut roots = Vec::new();
         let mut pending_root_removals = Vec::new();
         for (path, identity) in env.roots() {
-            // Never act on a configuration where a root overlaps the control
-            // documents that authorize this very cleanup.
-            registry::validate_outside_control(&path)?;
             for target in &env.delivery_targets {
                 if util::overlap(&path, &target.path) {
                     return Err(FlowError::progress(format!(
@@ -188,12 +190,19 @@ fn load_plan(task_id: &str) -> Result<CleanupState> {
             path.display()
         ))
     })?;
-    serde_json::from_str(&text).map_err(|error| {
+    let state: CleanupState = serde_json::from_str(&text).map_err(|error| {
         FlowError::progress(format!(
             "cannot parse cleanup plan {}: {error}",
             path.display()
         ))
-    })
+    })?;
+    // Existing plans bypass from_environment, including retries with no
+    // environment document. Validate before any cleanup or completion side
+    // effect, even when the plan's pending collections are already empty.
+    for root in &state.roots {
+        registry::validate_outside_control(&root.path)?;
+    }
+    Ok(state)
 }
 
 fn remove_plan(task_id: &str) -> Result<()> {

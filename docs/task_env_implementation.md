@@ -161,7 +161,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (44 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (45 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -177,7 +177,10 @@ claim merging, renamed-root slot retention, plan-only recovery, every
 quarantine crash phase, quarantine replacement preservation, a task process
 being denied rename/remove/write access outside its roots, and a task being
 denied rewriting its own environment document, control-root overlap rejection
-on create/restore, and cleanup rejection of a legacy overlapping document.
+on create/restore, and cleanup rejection of legacy overlapping documents and
+plans. Loaded plans are checked before terminating processes, removing resources
+or finalizing cleanup, including documentless recovery and plans with no pending
+resources; rejection preserves the plan and slot.
 
 ## Security contract
 

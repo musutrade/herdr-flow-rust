@@ -1069,6 +1069,75 @@ fn restore_rejects_a_document_whose_root_overlaps_control() {
 }
 
 #[test]
+fn existing_cleanup_plans_cannot_authorize_control_roots() {
+    for scenario in ["retry", "destroy", "plan-only", "complete"] {
+        let harness = Harness::new();
+        let env = harness.create(scenario);
+        let control = state_root().unwrap();
+        let unsafe_root = control.join("envs");
+        let sentinel = unsafe_root.join("other-control-data");
+        fs::write(&sentinel, "preserve control data").unwrap();
+        let pending = if scenario == "complete" {
+            Vec::new()
+        } else {
+            vec![unsafe_root.clone()]
+        };
+        write_root_plan(&env, None, pending);
+        let plan_path = cleanup_state_path(scenario).unwrap();
+        let mut plan: CleanupState =
+            serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+        plan.roots[0] = PendingDirectory {
+            path: unsafe_root.clone(),
+            identity: Some(RootIdentity::of(&fs::metadata(&unsafe_root).unwrap())),
+        };
+        fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+
+        let document = env.state_file().to_path_buf();
+        if scenario == "plan-only" {
+            fs::remove_file(&document).unwrap();
+        }
+        let plan_before = fs::read(&plan_path).unwrap();
+        let document_before = fs::read(&document).ok();
+        let registry_path = control.join("registry.json");
+        let registry_before = fs::read(&registry_path).unwrap();
+        let slots_before = occupied_slots().unwrap();
+        let mut child = env.command("sleep").arg("30").spawn().unwrap();
+
+        let result = if scenario == "destroy" {
+            destroy_environment(&env)
+        } else {
+            drop(env);
+            if scenario == "plan-only" {
+                recover_interrupted(scenario).map(|_| ())
+            } else {
+                cleanup_failed_environment(scenario)
+            }
+        };
+        let child_survived = alive(child.id() as i32);
+        let _ = child.kill();
+        child.wait().unwrap();
+
+        let error = result.expect_err("accepted a legacy plan containing control roots");
+        assert!(error.to_string().contains("control root"), "{error}");
+        assert!(
+            child_survived,
+            "{scenario}: signalled a process before validation"
+        );
+        assert_eq!(
+            fs::read_to_string(&sentinel).unwrap(),
+            "preserve control data"
+        );
+        assert_eq!(fs::read(&plan_path).unwrap(), plan_before);
+        assert_eq!(fs::read(&document).ok(), document_before);
+        assert_eq!(fs::read(&registry_path).unwrap(), registry_before);
+        assert_eq!(occupied_slots().unwrap(), slots_before);
+        assert!(harness.workspace(scenario).exists());
+        assert!(harness.temp(scenario).exists());
+        assert!(is_registered(scenario).unwrap());
+    }
+}
+
+#[test]
 fn task_process_cannot_rewrite_entries_outside_its_roots() {
     let harness = Harness::new();
     let env = harness.create("landlock");
