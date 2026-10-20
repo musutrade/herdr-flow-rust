@@ -4,6 +4,7 @@
 //! actions. Callers persist the returned mutation before doing anything
 //! outside the queue.
 
+pub mod acceptance;
 pub mod artifact;
 pub mod lineage;
 
@@ -1271,8 +1272,9 @@ pub fn apply_with_adapter(
     adapter: &dyn artifact::ArtifactAdapter,
 ) -> Result<J> {
     let mut staged = s.clone();
-    let child = apply_inner(&mut staged, spec, now)?;
-    lineage::applied(&mut staged, spec, &child, now, adapter)?;
+    let prepared = acceptance::prepare(&staged, spec)?;
+    let child = apply_inner(&mut staged, &prepared, now)?;
+    lineage::applied(&mut staged, &prepared, &child, now, adapter)?;
     *s = staged;
     Ok(child)
 }

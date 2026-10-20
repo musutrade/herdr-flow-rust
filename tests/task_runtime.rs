@@ -421,6 +421,10 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             assert!(!root.join("creation.json").exists());
             blocked["tasks"].as_object_mut().unwrap().remove("other");
             queue::save(&q, &mut blocked)?;
+            fs::write(cwd.join(".herdr-verdict.json"), "inherited report")?;
+            assert!(task_runtime::native::create(&env, &root, &request).is_err());
+            assert!(!root.join("creation.json").exists());
+            fs::remove_file(cwd.join(".herdr-verdict.json"))?;
             let state = task_runtime::native::create(&env, &root, &request)?;
             assert_eq!(
                 state["session"],
@@ -438,8 +442,20 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             let turn = task_runtime::native::dispatch(&env, &root)?;
             assert_eq!(turn["phase"], "submitted");
             assert!(task_runtime::native::dispatch(&env, &root).is_err());
+            std::fs::write(
+                cwd.join(".herdr-verdict.json"),
+                serde_json::to_vec(
+                    &json!({"conclusion":"passed","scope":"file","checks":[{"id":"content","criterion":"goal","source":"file must contain version A","status":"passed","evidence":"fixture check"}],"gaps":[],"reuses":[],"resolutions":[]}),
+                )?,
+            )?;
             let result = task_runtime::native::collect(&env, &root)?;
             assert_eq!(result["phase"], "signalled");
+            let collected = queue::load_queue(&q)?;
+            assert_eq!(
+                collected["tasks"]["review"]["verdict"]["envelope"]["reviewer"]["adapter"],
+                adapter
+            );
+            assert!(collected["tasks"]["project"]["approved"].is_null());
             assert_eq!(
                 task_runtime::native::collect(&env, &root)?["outcome"],
                 "complete"
@@ -497,3 +513,6 @@ fn fixture_transport_rejects_an_unexpected_response_shape() {
         .is_err());
     server.finish();
 }
+
+#[path = "common/acceptance_live.rs"]
+mod acceptance_live;

@@ -53,6 +53,10 @@ fn activity(s: &mut J, name: &str, role: &str, input: &J) {
     mutate(s, activity_spec(name, role, input)).unwrap();
 }
 fn event(s: &mut J, name: &str) -> String {
+    if s["tasks"][name]["lineage"]["role"] == "acceptance" && lineage::current(s, &s["tasks"][name])
+    {
+        submit_verdict(s, name);
+    }
     let w = s["waits"][name].clone();
     let id = format!("event-{name}-{}", s["events"].as_object().unwrap().len());
     let mut e =
@@ -61,7 +65,16 @@ fn event(s: &mut J, name: &str) -> String {
     s["events"][&id] = e;
     id
 }
+fn submit_verdict(s: &mut J, name: &str) {
+    let identity = herdr_flow::identity::required_producer(&s["waits"][name]).unwrap();
+    let report = json!({"conclusion":"passed","scope":"original requirement", "checks":[{"id":"c","criterion":"goal","source":"user request","status":"passed","evidence":"inspected evidence"}],"gaps":[],"reuses":[],"resolutions":[]});
+    progress::acceptance::submit(s, name, &identity, &report).unwrap();
+}
 fn apply_spec(s: &J, name: &str, event: &str) -> J {
+    if s["tasks"][name]["lineage"]["role"] == "acceptance" {
+        return json!({"task":name,"state_version":s["tasks"][name]["state_version"],"event":event,
+            "verdict":s["tasks"][name]["verdict"]["id"],"next_action":{"kind":"delivery","owner":"coordinator","reason":"passed","condition":"existing delivery authorization"}});
+    }
     json!({"task":name, "state_version":s["tasks"][name]["state_version"], "event":event,
         "acceptance":{"goal":"inspected evidence"}, "next_action":{"kind":"complete"}})
 }
@@ -412,7 +425,7 @@ fn obsolete_operation_cannot_begin_or_take_over_and_forged_links_are_rejected() 
     let mut s = state();
     add(&mut s, &a);
     select(&mut s, &a);
-    activity(&mut s, "review", "acceptance", &a);
+    activity(&mut s, "review", "development", &a);
     let mut forged = s["waits"]["review"].clone();
     forged["id"] = json!("forged");
     forged["task"] = json!("forged");
@@ -432,7 +445,9 @@ fn obsolete_operation_cannot_begin_or_take_over_and_forged_links_are_rejected() 
     spec["next_action"] = json!({"kind":"dispatch","operation":"op","assignment":"a2","session":SESSION,"owner":"review",
         "writes":false,"authorization":"develop","action":"development","instruction":"check","wait":"new-session"});
     progress::apply(&mut s, &spec, 4.0).unwrap();
-    select(&mut s, &a);
+    let mut revision = plan();
+    revision["kind"] = json!("revise");
+    mutate(&mut s, revision).unwrap();
     let v = s["tasks"]["review"]["state_version"].clone();
     assert!(progress::begin(
         &mut s,

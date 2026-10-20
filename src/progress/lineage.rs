@@ -33,6 +33,7 @@ fn route(s: &mut J, spec: &J, now: f64, adapter: &dyn ArtifactAdapter) -> Result
         Some("candidate") => candidate(s, spec, now, adapter),
         Some("activity") => activity(s, spec, now, adapter),
         Some("checks") => checks(s, spec, now),
+        Some("continue") => acceptance::resume(s, spec, now, adapter),
         _ => Err(progress_error("unknown lineage action")),
     }
 }
@@ -165,11 +166,32 @@ fn revise(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let mut t = load_parent(s, spec)?;
     let revision = model::int(&t, "requirement_revision").unwrap_or(0) + 1;
     ensure(revision <= 128, "requirement revision capacity reached")?;
-    let next = requirement(spec, revision)?;
+    let inherited = inherited_revision(&t, spec);
+    let next = requirement(&inherited, revision)?;
     t["requirements"][revision.to_string()] = next;
     t["requirement_revision"] = json!(revision);
     replace_candidate(&mut t, Value::Null);
     Ok(save_parent(s, t, now, "requirements_revised"))
+}
+
+fn inherited_revision(t: &J, spec: &J) -> J {
+    let mut next = spec.clone();
+    if next.get("authorization").is_none() {
+        next["authorization"] = json!(req(t)["authorization"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, value)| {
+                let mut item = value.clone();
+                item["id"] = json!(id);
+                item
+            })
+            .collect::<Vec<_>>());
+    }
+    if next.get("acceptance").is_none() {
+        next["acceptance"] = req(t)["criteria"].clone();
+    }
+    next
 }
 
 fn artifact(s: &mut J, spec: &J, now: f64, adapter: &dyn ArtifactAdapter) -> Result<J> {
@@ -435,7 +457,10 @@ pub fn applied(
     let name = field(link, "requirement")?;
     let mut parent = s["tasks"][&name].clone();
     apply_output(&mut parent, child, spec, adapter)?;
-    record_approval(&mut parent, child, adapter)?;
+    if child["lineage"]["role"] == "acceptance" {
+        adapter.verify(artifact_record(&parent, &child["candidate"])?)?;
+    }
+    acceptance::record(&mut parent, child, spec)?;
     save_parent(s, parent, now, "activity_result_applied");
     Ok(())
 }
@@ -457,20 +482,6 @@ fn apply_output(parent: &mut J, child: &J, spec: &J, adapter: &dyn ArtifactAdapt
     parent["artifacts"][id]["activity"] = child["task"].clone();
     let name = field(child, "task")?;
     parent["activities"][name]["output"] = output["id"].clone();
-    Ok(())
-}
-
-fn record_approval(parent: &mut J, child: &J, adapter: &dyn ArtifactAdapter) -> Result<()> {
-    if child["lineage"]["role"] != "acceptance" {
-        return Ok(());
-    }
-    if child["phase"] != "completed" {
-        return Ok(());
-    }
-    adapter.verify(artifact_record(parent, &child["candidate"])?)?;
-    parent["approved"] = json!({"candidate": child["candidate"],
-        "revision":child["lineage"]["revision"], "round":child["lineage"]["round"],
-        "activity":child["task"]});
     Ok(())
 }
 

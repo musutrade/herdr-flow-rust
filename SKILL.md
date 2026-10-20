@@ -13,7 +13,7 @@ text recognition.
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
 `herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
-and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
+`herdr-flow task-runtime` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
 use `herdr-flow <command> --help` for the exact options. Run
 `cargo test --all-targets --locked` after changing the implementation.
 
@@ -75,6 +75,23 @@ work, then require exact assignment/session takeover. Recheck stalled-event stat
 versions before recovery; never replay an ambiguous dispatch or release a writer
 merely because the task was cancelled. Complete original acceptance separately
 from a worker assignment or batch.
+
+## Independent acceptance roles
+
+For linked versioned tasks, follow [independent acceptance](references/independent-acceptance.md).
+A developer returns an output artifact; a fresh independent reviewer inspects the
+fixed candidate against original requirements, confirmed changes and specifications.
+The reviewer writes a grounded four-outcome report: passed, failed, unable or
+ambiguous. It records gaps, release evidence and any valid reused evidence, without
+inventing criteria or inheriting the developer conversation. Check existing
+agreements before requesting clarification.
+
+The coordinator ACKs receipt, then applies the immutable report ID and the matching
+continuation atomically. Execution completion never means acceptance passed. Do not
+rewrite the independent verdict to skip failure. Consume persisted repair/recovery
+intents once; use existing authorization, and revise requirements only for confirmed
+changes. Passing prepares delivery without granting permission or claiming delivery.
+All reports and runtime state remain disposable with the task environment.
 
 ## Rotate sessions
 

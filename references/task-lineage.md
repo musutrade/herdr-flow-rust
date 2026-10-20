@@ -5,7 +5,9 @@ lock, coordinator identity check and atomic save as `task-apply`. It records
 relationships and existing authorization; it does not send prompts, manufacture
 permission, deliver an artifact or destroy an environment. Use the task environment
 from #33 for disposable resources. Independent native producer/session collection,
-acceptance outcome routing and final delivery/cleanup continue in #35–#37.
+and four-outcome acceptance are documented in [task-runtime.md](task-runtime.md)
+and [independent-acceptance.md](independent-acceptance.md). Final delivery/cleanup
+continues in #37.
 
 ## Identities and compatibility
 
@@ -162,12 +164,12 @@ as the result application and successor intent. Verification failure rolls the
 entire transaction back. A new output is recorded in the parent's artifacts and
 activity record; it never changes the review candidate or grants approval.
 
-The existing completion action on a current acceptance child requires the stable
-completion evidence, resolved findings and released writer. It records approval
-for exactly that child's requirement revision, candidate and round, and revalidates
-the object. This is the existing explicit coordinator result-application contract,
-not the four-outcome acceptance policy of #36. Completing a child is not delivery
-or completion of the parent task environment.
+Current linked acceptance uses the [independent verdict protocol](independent-acceptance.md).
+Only applying a bound immutable `passed` report records approval for that exact
+requirement revision, candidate and round, after revalidating the object. Ordinary
+execution completion and coordinator-supplied evidence cannot grant approval.
+Failed, unable and ambiguous reports save their corresponding continuation instead.
+Completing a child is not delivery or completion of the parent task environment.
 
 Collection archives/withdraws late results; already collected results are checked
 again at application. Begin, takeover, command execution and recovery also reject
@@ -189,11 +191,14 @@ review of A. Review A can approve only A; selecting B clears that approval.
 
 All relationship records, migration records and evidence are runtime task data,
 not permanent completion archives. They belong to the disposable environment and
-are removed by the final lifecycle in #37. This change does not claim real native
-Agent handoff or customer delivery/cleanup acceptance; its tests cover queue
+are removed with the owned task environment. The lineage tests cover queue
 persistence, association, ACK, stale-result rejection, resource exclusion and
-non-replayed operation recovery.
+non-replayed operation recovery. Native-role verification is described in the
+runtime and independent-acceptance contracts; customer delivery remains #37.
 
 Native producer identities, fresh task-owned sessions, development output collection
 and disposal are specified in [task-runtime.md](task-runtime.md). Linked native
 waits use `producer: {adapter, session}`; legacy `producer_session` is Codex-only.
+
+Linked acceptance now requires an immutable independent verdict; see
+[independent acceptance](independent-acceptance.md) for application and recovery.
