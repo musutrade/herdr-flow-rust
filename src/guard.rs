@@ -1,7 +1,7 @@
 //! Cooperative Codex context monitoring and acknowledged Herdr session rotation.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -560,32 +560,43 @@ struct TranscriptFacts {
 }
 
 pub fn transcript_state(path: &Path, cursor: Option<&J>) -> Result<J> {
-    let data = util::read_bytes(path)?;
-    transcript_state_data(path, cursor, data)
-}
-
-fn transcript_state_data(path: &Path, cursor: Option<&J>, data: Vec<u8>) -> Result<J> {
-    let metadata = std::fs::metadata(path)?;
-    transcript_state_cursor(cursor, data, &metadata)
+    let mut file = File::open(path)?;
+    // Identity, size, prefix and tail all refer to this fd, even if the path is
+    // replaced while scanning. Appends beyond this size are read next time.
+    let facts = transcript_facts(&file.metadata()?);
+    transcript_state_cursor(cursor, &mut file, facts)
 }
 
 fn transcript_state_cursor(
     cursor: Option<&J>,
-    data: Vec<u8>,
-    metadata: &std::fs::Metadata,
+    file: &mut File,
+    facts: TranscriptFacts,
 ) -> Result<J> {
-    let facts = transcript_facts(metadata);
+    let prefix = transcript_read_range(file, 0, HEAD_BYTES.min(facts.size))?;
     let has_object = cursor.and_then(Value::as_object).is_some();
     let cursor = transcript_cursor_map(cursor);
     let base_reusable = transcript_reusable_base(has_object, &cursor, facts);
     let (initial_head_len, initial_head_sha) =
-        transcript_head_initial(&cursor, &data, facts, base_reusable);
+        transcript_head_initial(&cursor, &prefix, facts, base_reusable);
     let reusable = transcript_head_reusable(base_reusable, &cursor, &initial_head_sha);
     let (head_len, head_sha) =
-        transcript_head_final(reusable, &data, facts, initial_head_len, initial_head_sha);
+        transcript_head_final(reusable, &prefix, facts, initial_head_len, initial_head_sha);
     let state = transcript_initial_state(&cursor, reusable);
     let offset = transcript_initial_offset(&cursor, reusable);
+    let data = transcript_read_range(file, offset, facts.size - offset)?;
     transcript_state_parse(data, state, offset, facts, head_len, head_sha)
+}
+
+fn transcript_read_range(file: &mut File, offset: usize, length: usize) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut data = Vec::new();
+    file.take(length as u64).read_to_end(&mut data)?;
+    if data.len() != length {
+        return Err(guard_error(
+            "transcript changed size while reading; rescan required",
+        ));
+    }
+    Ok(data)
 }
 
 fn transcript_facts(metadata: &std::fs::Metadata) -> TranscriptFacts {
@@ -622,12 +633,16 @@ fn transcript_reusable_base(
     facts: TranscriptFacts,
 ) -> bool {
     let inode_ok = transcript_inode_matches(cursor, facts);
-    let offset_ok = facts.size >= transcript_initial_offset(cursor, true);
+    let offset_ok = cursor
+        .get("offset")
+        .and_then(Value::as_u64)
+        .map(|offset| offset <= facts.size as u64)
+        .unwrap_or(false);
     let head_ok = cursor.get("head").and_then(Value::as_str).is_some();
     let head_len_ok = cursor
         .get("head_len")
         .and_then(Value::as_u64)
-        .map(|length| length as usize <= facts.size)
+        .map(|length| length <= HEAD_BYTES.min(facts.size) as u64)
         .unwrap_or(false);
     [has_object, inode_ok, offset_ok, head_ok, head_len_ok]
         .into_iter()
@@ -704,7 +719,7 @@ fn transcript_state_parse(
     head_len: usize,
     head_sha: String,
 ) -> Result<J> {
-    let offset = transcript_consume(&data, offset, &mut state)?;
+    let offset = offset + transcript_consume(&data, 0, &mut state)?;
     transcript_state_output(&state, offset, facts, head_len, head_sha)
 }
 
