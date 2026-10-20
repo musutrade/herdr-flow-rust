@@ -359,6 +359,33 @@ pub fn lock_is_free(path: &Path) -> bool {
     matches!(FileLock::acquire(path, false), Ok(Some(_)))
 }
 
+/// Try to take an exclusive flock without blocking. Returns true on success
+/// and false when another owner holds the lock.
+pub fn flock_try_exclusive(fd: RawFd) -> Result<bool> {
+    // SAFETY: caller passes a live descriptor; flock takes only scalars.
+    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)) {
+        return Ok(false);
+    }
+    Err(FlowError::io(format!("cannot lock file: {error}")))
+}
+
+/// Take an exclusive blocking flock on an already-open file descriptor.
+pub fn flock_exclusive(fd: RawFd) -> Result<()> {
+    // SAFETY: caller must ensure fd is valid and live during this call.
+    let result = unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        Err(FlowError::io(format!("cannot lock file: {error}")))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FileIdentity {
     pub dev: u64,

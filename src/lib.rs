@@ -20,6 +20,7 @@ pub mod pr;
 pub mod progress;
 pub mod queue;
 pub mod runtime;
+pub mod task_env;
 pub mod util;
 pub mod watch_service;
 
