@@ -185,14 +185,20 @@ fn ensure(condition: bool, message: &str) -> Result<()> {
 }
 
 fn same_model(a: &J, b: &J) -> bool {
+    let Some(variant) = model_variant(a) else {
+        return false;
+    };
     ["providerID", "id"]
         .iter()
         .all(|key| a.get(*key) == b.get(*key))
-        && model_variant(a) == model_variant(b)
+        && Some(variant) == model_variant(b)
 }
 
-fn model_variant(model: &J) -> &str {
-    model["variant"].as_str().unwrap_or("default")
+fn model_variant(model: &J) -> Option<&str> {
+    match model.get("variant") {
+        None | Some(Value::Null) => Some("default"),
+        Some(value) => value.as_str().filter(|value| !value.is_empty()),
+    }
 }
 
 fn validate_binding(state: &J) -> Result<()> {
@@ -217,6 +223,10 @@ fn validate_binding_fields(state: &J) -> Result<()> {
     )?;
     required(&state["model"], "providerID")?;
     required(&state["model"], "id")?;
+    ensure(
+        model_variant(&state["model"]).is_some(),
+        "invalid OpenCode model variant",
+    )?;
     Ok(())
 }
 
@@ -482,7 +492,7 @@ fn submission_body(id: &str, text: &str, model: &J) -> J {
 
 fn verify_variant(actual: &J, model: &J) -> Result<()> {
     ensure(
-        model_variant(actual) == model_variant(model),
+        model_variant(actual).is_some() && model_variant(actual) == model_variant(model),
         "OpenCode model variant mismatch",
     )
 }

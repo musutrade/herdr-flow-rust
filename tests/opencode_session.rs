@@ -219,6 +219,14 @@ fn native_binding_status_and_exact_submission_completion() {
 fn refuses_identity_model_version_busy_and_approval_mismatches() {
     let f = Fixture::new();
     let adapter = f.adapter();
+    for invalid in [json!(false), json!(42), json!(""), json!({})] {
+        let mut state = f.state.clone();
+        state["model"]["variant"] = invalid.clone();
+        assert!(SessionAdapter::new(&state).is_err());
+        f.remote.lock().unwrap().session["model"]["variant"] = invalid;
+        assert!(adapter.agent().is_err());
+    }
+    f.remote.lock().unwrap().session["model"]["variant"] = Value::Null;
     for status in [
         json!({"type":"busy"}),
         json!({"type":"retry"}),
