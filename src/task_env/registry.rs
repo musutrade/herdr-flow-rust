@@ -231,6 +231,7 @@ fn lock_registry() -> Result<std::fs::File> {
 /// is already owned.
 pub fn try_lock_task(task_id: &str) -> Result<Option<std::fs::File>> {
     validate_task_id(task_id)?;
+    let _registry_lock = lock_registry()?;
     let path = lock_dir()?.join(format!("{task_id}.lock"));
     let file = OpenOptions::new()
         .create(true)
@@ -601,4 +602,12 @@ impl EnvironmentRegistry {
             .get(task_id)
             .map(|entry| entry.state_file.clone())
     }
+}
+
+// The caller still owns the task lock. Acquisition opens and tries the lock
+// under this same registry lock, so nobody can retain an unlinked lock inode.
+pub(super) fn finish_cleanup(task_id: &str) -> Result<()> {
+    let _lock = lock_registry()?;
+    util::remove_file_if_exists(&lock_dir()?.join(format!("{task_id}.lock")))?;
+    util::remove_file_if_exists(&cleanup_state_path(task_id)?)
 }

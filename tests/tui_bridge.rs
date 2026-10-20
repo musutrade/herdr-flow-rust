@@ -1141,11 +1141,37 @@ fn real_byte_proxy_reports_ready_exit_and_reviews() {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        drop(stream);
+        // Wait for the proxy to drain both EOFs before ending the fake native
+        // process. This tests connection cleanup independently of child exit.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let closed = fs::read_to_string(native_root.join("state/tui.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|marker| marker["error"] == "native WebSocket connection closed");
+            if closed {
+                break;
+            }
+            assert!(Instant::now() < deadline, "proxy did not drain both EOFs");
+            thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(native_root.join("native-finished"), b"consumed").expect("native completion");
         received
     });
 
     let binary = root.join("native");
-    fs::write(&binary, "#!/bin/sh\nsleep 3\n").expect("fake native");
+    // Exit after the wire exchange, not after an arbitrary sleep that may
+    // expire before instrumented proxy threads get scheduled. Retain a bound
+    // and a nonzero exit if the exchange never finishes.
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nn=0\nwhile [ ! -f '{}/native-finished' ]; do\n  n=$((n+1))\n  [ \"$n\" -lt 500 ] || exit 2\n  sleep 0.01\ndone\n",
+            root.display()
+        ),
+    )
+    .expect("fake native");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).expect("mode");
     let mut bridge = ProxyBridge::new(
         &state,

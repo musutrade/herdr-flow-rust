@@ -17,8 +17,10 @@ pub use boundary::{
     is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets, validate_path,
     DeliveryTarget, ResourceBoundary,
 };
-pub use cleanup::PendingDirectory;
-pub use cleanup::{cleanup_failed_environment, CleanupState, Quarantine, MAX_ATTEMPTS};
+pub use cleanup::{
+    cleanup_failed_environment, resume_delivery_cleanup, CleanupState, Quarantine, MAX_ATTEMPTS,
+};
+pub use cleanup::{quiesce_environment, PendingDirectory};
 pub use env::{
     discover_repository, marked_processes, process_has_marker, process_is_alive,
     process_record_is_alive, process_start_time, recover_interrupted, restore, validate_ancestors,

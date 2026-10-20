@@ -123,6 +123,9 @@ pub struct TaskEnvironment {
     pub temp_identity: Option<RootIdentity>,
     pub delivery_targets: Vec<DeliveryTarget>,
     pub state: EnvironmentState,
+    /// Temporary delivery/cleanup journal; removed with the environment.
+    #[serde(default)]
+    pub delivery: serde_json::Value,
     pub created_at: f64,
     pub updated_at: f64,
     pub worktree_registrations: Vec<WorktreeRegistration>,
@@ -905,7 +908,7 @@ fn ensure_distinct(workspace_root: &Path, temp_root: &Path) -> Result<()> {
 
 fn ensure_state_absent(task_id: &str) -> Result<PathBuf> {
     let state_file = registry::environment_state_path(task_id)?;
-    if state_file.exists() {
+    if state_file.exists() || registry::cleanup_state_path(task_id)?.exists() {
         return Err(FlowError::progress(format!(
             "environment for task {task_id} already exists; destroy or recover it first"
         )));
@@ -930,6 +933,7 @@ fn build_environment(
         temp_identity: None,
         delivery_targets,
         state: EnvironmentState::Creating,
+        delivery: serde_json::Value::Null,
         created_at: now,
         updated_at: now,
         worktree_registrations: Vec::new(),

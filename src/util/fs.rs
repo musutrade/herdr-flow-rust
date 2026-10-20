@@ -496,6 +496,21 @@ pub fn remove_file_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove one private-state entry through a pinned, no-symlink directory.
+/// Missing sidecar directories are normal during interrupted cleanup.
+pub fn remove_state_file(root: &Path, name: &str) -> Result<()> {
+    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+        return Err(FlowError::io("state filename must be a basename"));
+    }
+    if !root.try_exists()? {
+        return Ok(());
+    }
+    let directory = secure::directory(root, false)?;
+    remove_file_if_exists(&secure::anchor(&directory).join(name))?;
+    directory.sync_all()?;
+    Ok(())
+}
+
 fn ignore_not_found(error: std::io::Error) -> std::io::Result<()> {
     if error.kind() == std::io::ErrorKind::NotFound {
         return Ok(());
