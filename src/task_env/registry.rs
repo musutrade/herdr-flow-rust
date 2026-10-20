@@ -173,6 +173,23 @@ fn lock_dir() -> Result<PathBuf> {
     subdir("locks")
 }
 
+/// Reject a path that overlaps the control-state root.
+///
+/// The control root holds the documents that authorize cleanup. A task root
+/// inside it (or containing it) would let a confined task rewrite its own
+/// authorization, so the relationship is refused in both directions.
+pub fn validate_outside_control(path: &Path) -> Result<()> {
+    let control = state_root()?;
+    if util::overlap(path, &control) {
+        return Err(FlowError::progress(format!(
+            "{} overlaps the task-environment control root {}",
+            path.display(),
+            control.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Document path for one environment. Never collides with internal files.
 pub fn environment_state_path(task_id: &str) -> Result<PathBuf> {
     validate_task_id(task_id)?;

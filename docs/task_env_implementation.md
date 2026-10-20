@@ -32,7 +32,8 @@ Three facts make deletion safe:
    (`WRITE_FILE`, `TRUNCATE`, `MAKE_*`, `REMOVE_*`, `REFER`). The task therefore
    cannot rewrite its environment document to retarget cleanup at external
    assets, cannot truncate state files, and cannot rename or remove the roots
-   themselves. If Landlock is unavailable the spawn fails closed.
+   themselves. Landlock ABI 3 (which added `TRUNCATE`) is a hard requirement:
+   older kernels fail the spawn instead of running with a weaker ruleset.
 4. **Process marker.** Every process the environment starts carries
    `HERDR_TASK_ENV_INSTANCE=<instance_id>` in its environment. The marker is
    inherited across `fork`/`exec`, survives `setsid()`, and stays readable at
@@ -73,16 +74,18 @@ with internal files. Documents are written with `util::atomic_write_json`.
 1. take the per-task lock (one owner per task id);
 2. validate the id and resolve all paths;
 3. reject delivery targets that overlap a root, and roots that overlap;
-4. reject an existing non-empty, non-directory or symlinked root — the
+4. reject roots that overlap the control-state root in either direction
+   (create, restore and cleanup all enforce this);
+5. reject an existing non-empty, non-directory or symlinked root — the
    environment only destroys what it created;
-5. write the environment document (`creating`) **before** any index entry or
+6. write the environment document (`creating`) **before** any index entry or
    directory, so a crash is always observable;
-6. claim the roots in the index under `registry.lock` (unique ownership and
+7. claim the roots in the index under `registry.lock` (unique ownership and
    `HERDR_TASK_ENV_LIMIT`, default 32);
-7. create the roots (their parents must already exist) and record `(dev, ino)`;
-8. mark the document `active`.
+8. create the roots (their parents must already exist) and record `(dev, ino)`;
+9. mark the document `active`.
 
-Any failure between 5 and 8 removes the document, the claim and the partial
+Any failure between 6 and 9 removes the document, the claim and the partial
 directories, so an interrupted create leaves nothing unmanaged.
 
 `restore_environment(task_id)` re-acquires the per-task lock and returns the
@@ -158,7 +161,7 @@ primitives and does not treat a bare destroy as business success.
 
 ## Tests
 
-`tests/task_env_tests.rs` (42 tests) covers the round trip, delivery survival,
+`tests/task_env_tests.rs` (44 tests) covers the round trip, delivery survival,
 both overlap directions, symlink alias rejection, pre-existing assets, shared
 empty root rejection, protected permissions with symlink and hard link, swapped
 root and swapped file symlinks, forged `gitdir`, real `git worktree` cleanup,
@@ -173,7 +176,8 @@ cross-environment orphan isolation, mismatched process identity, multi-root
 claim merging, renamed-root slot retention, plan-only recovery, every
 quarantine crash phase, quarantine replacement preservation, a task process
 being denied rename/remove/write access outside its roots, and a task being
-denied rewriting its own environment document.
+denied rewriting its own environment document, control-root overlap rejection
+on create/restore, and cleanup rejection of a legacy overlapping document.
 
 ## Security contract
 
@@ -183,9 +187,11 @@ untrusted.
 Guaranteed:
 
 * a task process cannot write, truncate, create, rename, link or remove
-  anything outside its disposable roots (Landlock, fail closed if unavailable).
-  This includes `envs/`, `plans/`, `registry.json` and `locks/`, so a task
-  cannot retarget cleanup at external assets or erase its own authorization;
+  anything outside its disposable roots (Landlock, fail closed if the kernel
+  lacks ABI 3). This includes `envs/`, `plans/`, `registry.json` and `locks/`,
+  so a task cannot retarget cleanup at external assets or erase its own
+  authorization. The API refuses roots that overlap the control-state root, in
+  both directions, on create, restore and cleanup;
 * cleanup never touches a delivery target or any path outside the recorded
   roots, and never follows a symlink;
 * every destructive filesystem step re-verifies the recorded `(device, inode)`;

@@ -111,6 +111,9 @@ impl CleanupState {
         let mut roots = Vec::new();
         let mut pending_root_removals = Vec::new();
         for (path, identity) in env.roots() {
+            // Never act on a configuration where a root overlaps the control
+            // documents that authorize this very cleanup.
+            registry::validate_outside_control(&path)?;
             for target in &env.delivery_targets {
                 if util::overlap(&path, &target.path) {
                     return Err(FlowError::progress(format!(

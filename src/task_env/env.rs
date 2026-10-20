@@ -543,7 +543,16 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
     if abi < 1 {
         return Err(std::io::Error::last_os_error());
     }
-    let mut handled = LANDLOCK_ACCESS_FS_WRITE_FILE
+    // TRUNCATE is a separate right introduced in ABI 3 and is required to keep
+    // the control documents unmodifiable; an older kernel must fail closed
+    // instead of silently running with a weaker ruleset.
+    if abi < 3 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("Landlock ABI 3 (TRUNCATE) required, kernel reports {abi}"),
+        ));
+    }
+    let handled = LANDLOCK_ACCESS_FS_WRITE_FILE
         | LANDLOCK_ACCESS_FS_REMOVE_FILE
         | LANDLOCK_ACCESS_FS_REMOVE_DIR
         | LANDLOCK_ACCESS_FS_MAKE_CHAR
@@ -552,13 +561,9 @@ fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
         | LANDLOCK_ACCESS_FS_MAKE_SOCK
         | LANDLOCK_ACCESS_FS_MAKE_FIFO
         | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-        | LANDLOCK_ACCESS_FS_MAKE_SYM;
-    if abi >= 2 {
-        handled |= LANDLOCK_ACCESS_FS_REFER;
-    }
-    if abi >= 3 {
-        handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
-    }
+        | LANDLOCK_ACCESS_FS_MAKE_SYM
+        | LANDLOCK_ACCESS_FS_REFER
+        | LANDLOCK_ACCESS_FS_TRUNCATE;
 
     let attr = LandlockRulesetAttr {
         handled_access_fs: handled,
@@ -760,6 +765,8 @@ pub fn create(
             temp_root.display()
         )));
     }
+    registry::validate_outside_control(&workspace_root)?;
+    registry::validate_outside_control(&temp_root)?;
 
     require_vacant(&workspace_root)?;
     require_vacant(&temp_root)?;
@@ -869,6 +876,8 @@ pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     let mut env: TaskEnvironment = serde_json::from_str(&text).map_err(|error| {
         FlowError::progress(format!("cannot parse {}: {error}", state_file.display()))
     })?;
+    registry::validate_outside_control(&env.workspace_root)?;
+    registry::validate_outside_control(&env.temp_root)?;
     env.state_file = state_file;
     env.file_handles = new_handle_slot();
     env.ownership_lock = new_lock_slot();

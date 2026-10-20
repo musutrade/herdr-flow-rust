@@ -1017,6 +1017,58 @@ fn replacement_before_quarantine_is_left_exactly_where_it_was() {
 }
 
 #[test]
+fn control_state_directory_cannot_be_an_allowed_root() {
+    let harness = Harness::new();
+    let control = state_root().unwrap();
+
+    harness.prepare("control-root");
+    let result = create_environment(
+        "control-root",
+        &control.join("envs"),
+        vec![],
+        &harness.temp("control-root"),
+    );
+    assert!(result.is_err(), "accepted the state directory as a root");
+
+    harness.prepare("control-temp");
+    let workspace = harness.workspace("control-temp");
+    let result = create_environment("control-temp", &workspace, vec![], &control.join("locks"));
+    assert!(result.is_err(), "accepted a state subdirectory as temp");
+    assert!(!workspace.exists());
+
+    // The inverse direction is refused too: a root that contains the control
+    // directory would also make the state writable by the task.
+    harness.prepare("control-parent");
+    let result = create_environment(
+        "control-parent",
+        harness.path(),
+        vec![],
+        &harness.temp("control-parent"),
+    );
+    assert!(
+        result.is_err(),
+        "accepted a root containing the state directory"
+    );
+}
+
+#[test]
+fn restore_rejects_a_document_whose_root_overlaps_control() {
+    let harness = Harness::new();
+    let env = harness.create("control-doc");
+    let text = fs::read_to_string(env.state_file()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["workspace_root"] = serde_json::json!(state_root().unwrap().join("envs"));
+    fs::write(
+        env.state_file(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    drop(env);
+
+    assert!(restore_environment("control-doc").is_err());
+}
+
+#[test]
 fn task_process_cannot_rewrite_entries_outside_its_roots() {
     let harness = Harness::new();
     let env = harness.create("landlock");
