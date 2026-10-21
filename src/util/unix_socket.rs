@@ -61,13 +61,16 @@ mod tests {
         let dir = crate::util::fs::test_tempdir();
         let path = dir.path().join("broker.sock");
         let listener = UnixListener::bind(&path).unwrap();
+        // SAFETY: listener owns a live listening socket; listen only updates its backlog.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
         let start = std::time::Instant::now();
         let mut pending = Vec::new();
         let mut refused = false;
-        for _ in 0..1024 {
+        for _ in 0..4 {
             match connect(&path) {
                 Ok(stream) => pending.push(stream),
-                Err(_) => {
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
                     refused = true;
                     break;
                 }
