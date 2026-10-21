@@ -256,3 +256,38 @@ Git executor. The selected configuration file remained byte-for-byte unchanged
 under the external runner. The formal ref and version B content survived finish;
 the unrelated asset retained its bytes and device/inode identity. This one run
 does not establish twenty completed tasks, repair/restart or Codex equivalence.
+
+## Native failed review, repair and fresh acceptance
+
+The opt-in `installed_real_opencode_failed_review_is_repaired_and_delivered_by_external_driver`
+scenario uses the same native coordinator session for four notifications: development `review`, failed acceptance `accept-first`,
+development `repair-native`, and fresh acceptance `accept-final`. The driver only
+registers work under the queue lock and runs native workers; every ACK, verdict
+application and continuation remains native-coordinator work.
+
+`accept-first` records a real grounded failure and an immutable verdict. The
+driver then registers the recorded repair continuation with the failed gaps'
+activity/ids/evidence, using the incomplete candidate as input. The coordinator
+reads the actual bounded per-development release receipt; no static release
+status is supplied. The repair worker produces and
+commits B; the coordinator applies that development output. The driver selects B
+and registers `accept-final` on a separate reviewer snapshot. The fresh reviewer
+must resolve the exact prior gap with `activity`, `gap`, `evidence` and
+`explanation`; the coordinator applies the real passed verdict. The old A artifact
+and failed verdict remain historical, while B becomes the current candidate and
+approved artifact. Four exact events/deliveries and coordinator command records
+are checked; no driver ticks, ACKs or applies.
+
+After final approval, the queue watcher is stopped/reaped and the external Local
+Git delivery/finish path runs. The formal target and unrelated user asset must be
+unchanged through failure, repair and final acceptance, then exactly B is the
+confirmed formal ref/receipt with the user asset preserved. Finish removes owned
+roots/registry/state/queue and reaps processes. This remains a disposable fixture
+proof, not customer publication, repair/restart breadth or twenty-task acceptance.
+
+Final local repair live2 passed in 267.08s, including applied release evidence
+matching each actual stopped/reaped worker receipt and its session, all gap
+records/resolutions, and unchanged failed report bytes. Live1 passed in 196.22s
+before the release-evidence assertions were added; final evidence uses live2.
+The selected global configuration bytes were unchanged under both external
+runners. No product isolation or permission policy was changed.
