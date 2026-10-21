@@ -151,8 +151,22 @@ fn validate_removal(plan: &J) -> Result<()> {
             let id = value.as_str().ok_or_else(|| {
                 FlowError::progress(format!("removal.{key} entry must be a string"))
             })?;
-            safe_id(id)?;
+            ensure_named(id, key)?;
+            // Only waits name a sidecar file; tasks and events are JSON keys and
+            // may legitimately contain spaces or non-ASCII characters.
+            if key == "waits" {
+                safe_id(id)?;
+            }
         }
+    }
+    Ok(())
+}
+
+fn ensure_named(id: &str, key: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(FlowError::progress(format!(
+            "removal.{key} entry must not be empty"
+        )));
     }
     Ok(())
 }
@@ -224,5 +238,33 @@ fn prune(state: &mut J, plan: &J) {
     let active = state["active"].as_str().unwrap_or("");
     if state["deliveries"][active].is_null() {
         state["active"] = J::Null;
+    }
+}
+
+#[cfg(test)]
+mod removal_validation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn removal_plan_allows_non_path_task_and_event_keys() {
+        let plan = json!({
+            "tasks": ["活动 一"],
+            "waits": ["wait-safe"],
+            "events": ["事件 一"]
+        });
+        assert!(validate_removal(&plan).is_ok());
+    }
+
+    #[test]
+    fn removal_plan_still_rejects_unsafe_wait_ids_and_empty_entries() {
+        for plan in [
+            json!({"tasks": [], "waits": ["../escape"], "events": []}),
+            json!({"tasks": [], "waits": ["."], "events": []}),
+            json!({"tasks": [""], "waits": [], "events": []}),
+            json!({"tasks": [], "waits": [], "events": [""]}),
+        ] {
+            assert!(validate_removal(&plan).is_err(), "{plan}");
+        }
     }
 }
