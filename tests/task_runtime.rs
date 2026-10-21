@@ -635,3 +635,6 @@ fn production_foreground_watchers_are_owned_and_reclaimed() {
     assert!(!is_registered(&env.task_id).unwrap());
     assert_eq!(occupied_slots().unwrap(), 0);
 }
+
+#[path = "common/receiver_live.rs"]
+mod receiver_live;

@@ -81,3 +81,25 @@ API. The HTTP peer is still synthetic; this regression proves neither native
 model execution nor model-generated readiness/ACK. The real receiver test must
 use these production watcher processes with a fresh native session and retain
 native approval behavior.
+
+## Opt-in native receiver receipt check
+
+`tests/common/receiver_live.rs::installed_real_opencode_receiver_readiness_and_ack`
+uses `session::create_fresh` and production foreground watchers. It requires
+`HERDR_LIVE_OPENCODE_BINARY`, `HERDR_LIVE_OPENCODE_MODEL` (a JSON model object),
+and `HERDR_LIVE_OPENCODE_CONFIG` (an explicitly selected config file). Run only
+this ignored test with a worktree-local target. The driver creates the signal,
+then reads state; it never calls queue `tick` or `acknowledge`. The native
+receiver must execute the notification's ACK command, then readiness. Readiness
+is intentionally false while a delivery is awaiting ACK, so reversing that
+order would deadlock the check. The test also requires completed shell tool
+records in the exact native session and a completed native submission.
+
+The initial local real run was blocked by an OpenCode `external_directory`
+approval for the task-owned queue/guard outside cwd. It did not ACK and is not a
+passing native acceptance result. Native permissions are inherited from the
+selected configuration; the test does not click approvals or change global
+configuration. Bounded local failure diagnostics are retained separately from
+the disposable environment, excluding the selected config/auth files. Passing
+this one receipt test would still not prove twenty real tasks, independent
+review/repair, customer delivery or the complete external-cache inventory.
