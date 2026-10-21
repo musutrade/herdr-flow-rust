@@ -82,7 +82,7 @@ signal. Timeout, fair pipe servicing and owned-group cleanup remain in effect.
 This budget covers captured commands, not detached command logs or native RPC
 streams, which have separate lifecycle/protocol contracts.
 
-## Verifier identity review (#45, in progress; initial baseline #51)
+## Verifier identity review (#45; initial baseline #51)
 
 The current deployment contract makes the operator-managed verifier, its
 configuration, dependencies and authoritative service trust roots. An absolute
@@ -91,7 +91,7 @@ argv and a working directory of `/` alone do not enforce this contract.
 | Principal | Required boundary | Baseline evidence |
 | --- | --- | --- |
 | Operator controlling verifier installation | Trusted to install and upgrade code and configuration | Deployment responsibility; no installer implemented here |
-| Candidate task with a separate UID | Cannot write verifier, configuration, dependencies or ancestor directories | Filesystem permissions must be checked; current gate validation checks argv shape only |
+| Candidate task with a separate UID | Cannot write verifier, configuration, dependencies or ancestor directories | Filesystem permissions must be checked; baseline gate validation checked argv shape only |
 | Candidate task sharing the operator UID | Must be constrained by an external sandbox or equivalent boundary | File ownership alone cannot isolate mutually hostile processes sharing this UID |
 | Receipt storage writer | Stored results cannot independently authorize publication | Receipt fields are checked against operation, binding, App, check name and expiry; publication queries the verifier again and requires exact equality with the stored receipt |
 
@@ -101,11 +101,12 @@ verifier response. This establishes an invocation-context defect, not a claim
 that a deployed service was compromised. The clean environment below addresses
 this input path.
 
-Before choosing an enforcement mechanism, isolated regressions must cover file
-and ancestor replacement, symlinks, the validation-to-execution race, inherited
-environment, legitimate upgrades and receipt mutation/replay. Checking a path
+The review scope includes file and ancestor replacement, symlinks, the
+validation-to-execution race, inherited environment, legitimate upgrades and
+receipt mutation/replay. Checking a path
 once and subsequently executing that path is insufficient to bind identity.
-These review notes do not claim #45 acceptance or a deployed trust boundary.
+Acceptance must use the implemented checks and evidence below; these baseline
+notes alone do not establish a deployed trust boundary.
 
 ### Confirmed consumer checks
 
@@ -205,4 +206,53 @@ protected by the operator deployment boundary. An isolated probe confirmed that
 a mode-0666 script explicitly passed to `/bin/sh` is not covered by executable
 identity checks. Prefer a directly configured protected script for descriptor
 pinning. This probe's private temporary ancestor does not demonstrate access by
-a different UID. #45 remains open for final deployment-contract review.
+a different UID. Deployment requirements are detailed below.
+
+### Configuration ownership and deployment acceptance
+
+The gate argv/policy/App/check configuration enters through operator-supplied
+`batch-init` input (`lane::init_gate`) and is persisted in the lane in queue
+state. The CLI spec file is ordinary input, not an authenticated configuration
+format: the operator must control its source and contents before invoking the
+command. Do not initialize a lane from candidate-supplied policy or verifier
+configuration. There is no separate installer or trusted-account provisioning
+service in this repository.
+
+Batch mutations use `queue::task_action_loaded` → `queue::load_queue` →
+`read_state_json`. That path opens directories by descriptor without following
+symlinks, checks ancestor ownership and write modes, and requires an owned regular
+queue file without group/other write permission, opened with O_NOFOLLOW. New
+state directories/files use 0700/0600. This protects the persisted configuration
+from a different UID under those filesystem assumptions. The configuration
+regressions exercise the actual batch action entry with writable files and a
+redirected queue symlink, preserving original bytes on refusal. Deliberate
+replacement by the trusted owner remains allowed.
+
+| Input or principal | Enforced here | Required deployment protection |
+| --- | --- | --- |
+| Operator, root, invoking account | Owner/mode validation and atomic upgrade semantics | Trusted to choose/install code, argv, configuration and service roots |
+| Different UID candidate | Unsafe installation paths and writable/redirected queue state rejected | No privilege to change trusted owner, mounts or filesystem policy |
+| Same UID candidate/task subprocess | No independent principal separation | External sandbox/account boundary must prevent changes to operator state and installations; unrestricted shared-UID tasks are not a supported hostile-task deployment |
+| Direct client script and shebang chain | Bounded parsing; every layer checked and pinned through exec | No in-place edits by trusted owner during calls; use atomic upgrades |
+| Interpreter argv, dispatchers, ELF loaders, imports | Clean initial environment and fixed system PATH only | Protect all selected scripts, libraries, runtime configurations and dispatch targets; these are trusted installed code, not data validated by argv heuristics |
+| Stored receipt or candidate-provided JSON | Fresh verifier query, full binding checks, expiry and exact saved/current equality before publication | Authoritative client independently queries its protected service; never echo a request as proof |
+
+The explicit writable-script-argument observation demonstrates why protecting
+only the interpreter binary is insufficient for deployment. It does not show a
+breach of a correctly protected installation. A protected direct script gets
+descriptor pinning; a general interpreter command must obtain the same protection
+for its script/dependencies from installation controls. Merely adding a signature
+whose key is readable by the same trusted-account attacker would not improve
+this boundary. No new receipt signature is required by the current direct,
+trusted-client stdio boundary plus fresh publication query. A deployment adding
+an untrusted transport/store between client and authoritative service must supply
+its own authenticated service protocol and protected rotation mechanism.
+
+Acceptance evidence is split by boundary: `gate_identity` and executable unit
+tests cover writable installations, symlinks and atomic upgrades;
+`gate_context` covers caller environment injection; `gate_dependencies` and
+invocation unit tests cover unsafe and replaced interpreter chains;
+`gate_configuration` and `p2_boundaries` cover persisted configuration protection;
+`gate_receipt` and publication tests cover mutation/expiry/wrong binding/replay.
+These are isolated local regressions, not proof of an installed production gate
+or the real-model workflow acceptance tracked separately in #38.
