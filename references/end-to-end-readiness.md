@@ -225,3 +225,34 @@ intentionally rejects extra watcher events. Final local live3 passed in 105.81s;
 live1 blocked after the developer searched sibling coordinator instructions and
 was retained, while live2 passed before the final review assertions were added.
 No permission widening was used to resolve live1.
+
+## Accepted native result to external Local Git delivery
+
+The opt-in delivery scenario builds on the final real developer/reviewer/coordinator
+acceptance run. Its environment task id is the queue parent (`project`), and its
+formal Git target is registered at environment creation. A bare target is seeded
+at the source repository's base commit before native work; a separate user asset
+remains outside both disposable roots.
+
+The native coordinator owns both ACK/task-apply notifications and the approval
+continuation. It does not execute delivery and cannot write the formal target
+because its write boundary remains its runtime root and cwd. After the acceptance
+application, the queue watcher is stopped and reaped. A trusted unmarked driver
+then owns the environment and invokes `delivery::prepare`, `delivery::execute`,
+and `delivery::finish` with `local::Local`. Preparation does not change the target;
+execution must produce the exact accepted commit at `refs/heads/main` with an exact
+receipt; finish removes the owned roots, registry/state and queue task while
+preserving the target and unrelated user asset. The test does not call
+`destroy_environment` after finish.
+
+This is a narrow external-driver/existing-API boundary proof. It does not claim
+that a native coordinator can execute customer delivery, that a driver can retain
+environment ownership while a CLI restores it, or that the fixture covers
+repair/restart, twenty tasks, Codex equivalence or a complete outside-root
+inventory. Failure evidence and prior live/scenario failures are retained.
+
+Final local delivery live1 passed in 95.52s with the actual native roles and Local
+Git executor. The selected configuration file remained byte-for-byte unchanged
+under the external runner. The formal ref and version B content survived finish;
+the unrelated asset retained its bytes and device/inode identity. This one run
+does not establish twenty completed tasks, repair/restart or Codex equivalence.
