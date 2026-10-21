@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -31,7 +31,7 @@ pub struct CommandOptions {
     /// Remove inherited GIT_* variables before applying explicit env entries.
     pub remove_git_env: bool,
     pub stdin: Option<Vec<u8>>,
-    /// Execute this already-open file instead of resolving argv[0] again.
+    /// Execute this already-open file instead of resolving `argv[0]` again.
     pub executable_file: Option<std::sync::Arc<File>>,
     /// Keep these files open in the child for descriptor-path script arguments.
     pub inherited_files: Vec<std::sync::Arc<File>>,
@@ -85,6 +85,16 @@ impl CommandOutput {
 /// kills the owned process group using the same cleanup as a timeout.
 /// A timeout is reported as `TimeoutExpired`. A non-zero exit is returned to
 /// the caller as data; policy about failures belongs to each boundary.
+///
+/// This Linux implementation owns the spawned child and its new process group.
+/// The embedding application must not reap this child independently or configure
+/// SIGCHLD auto-reaping: cleanup reserves its PID using waitid(WNOWAIT) until
+/// group termination. Descendants that leave this group require a separate
+/// task-environment cleanup boundary. This function acquires no application
+/// state lock and does not make an invocation idempotent; an error after spawn
+/// can follow external side effects, so callers must reconcile before retrying.
+/// Empty argv is rejected before spawn. An unrepresentable timeout can panic
+/// when adding it to Instant; callers should supply bounded operational limits.
 pub fn run_command(argv: &[String], options: &CommandOptions) -> Result<CommandOutput> {
     require_argv(argv)?;
     let deadline = Instant::now() + options.timeout;
@@ -126,7 +136,7 @@ fn executable_command(program: &str, options: &CommandOptions) -> Command {
         .collect();
     let mut command = Command::new(format!("/proc/self/fd/{fd}"));
     command.arg0(program);
-    // SAFETY: the child only performs fcntl on the descriptor kept alive by
+    // SAFETY: the child only performs fcntl on descriptors kept alive by
     // options through spawn. Keeping it across exec also supports shebang
     // interpreters reopening /proc/self/fd/N; the parent retains CLOEXEC.
     unsafe {
@@ -575,20 +585,23 @@ pub fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn set_cloexec(fd: RawFd, enabled: bool) {
-    // SAFETY: fcntl receives scalar descriptor/flag arguments and does not take
-    // ownership. Invalid descriptors are rejected by the kernel.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags >= 0 {
-            let updated = if enabled {
-                flags | libc::FD_CLOEXEC
-            } else {
-                flags & !libc::FD_CLOEXEC
-            };
-            libc::fcntl(fd, libc::F_SETFD, updated);
-        }
+fn set_cloexec(fd: RawFd, enabled: bool) -> std::io::Result<()> {
+    // SAFETY: fd is borrowed; F_GETFD takes no pointer and transfers no owner.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    let updated = if enabled {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    // SAFETY: F_SETFD takes only scalar flags. The caller keeps fd open; no
+    // allocation or locks occur, including when called after fork.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, updated) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub struct BackgroundChild {
@@ -606,30 +619,33 @@ impl BackgroundChild {
 }
 
 /// Spawn a detached helper that writes one readiness JSON object to fd 3.
+///
+/// Linux: creates a new session, appends stdout/stderr to `log_path`, and
+/// passes `--ready-fd 3` to the helper. The caller must supply a compatible
+/// helper and an operator-controlled log path; this is not a shell interface.
+/// Empty argv returns `Usage` before creating logs or pipes. Other errors may
+/// leave diagnostic log files. A readiness error terminates and waits for the
+/// direct child; it does not attest to cleanup of arbitrary descendants.
+/// On success the caller owns the child and must arrange reaping (for example
+/// with [`BackgroundChild::reap`]); readiness JSON is a protocol response, not
+/// independent proof that the helper is healthy. This operation is not idempotent.
 pub fn spawn_with_ready(
     argv: &[String],
     log_path: &Path,
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<BackgroundChild> {
+    require_argv(argv)?;
     ensure_log_parent(log_path)?;
     let (log, log_err) = open_log_pair(log_path)?;
     let (read_fd, write_fd) = readiness_pipe()?;
-    set_cloexec(read_fd, true);
-    set_cloexec(write_fd, true);
-    let mut command = ready_command(argv, log, log_err, cwd, write_fd);
-    let mut child = spawn_ready_child(&mut command, read_fd, write_fd)?;
-    // SAFETY: the parent still owns this pipe end; the spawned child has its own
-    // inherited descriptor table. Close the parent's writer exactly once.
-    unsafe {
-        libc::close(write_fd);
-    }
-    let ready = read_ready(read_fd, timeout);
-    // SAFETY: read_ready only borrows the parent's reader; it is no longer used
-    // after this single close, including on error.
-    unsafe {
-        libc::close(read_fd);
-    }
+    let mut command = ready_command(argv, log, log_err, cwd, write_fd.as_raw_fd());
+    let mut child = command
+        .spawn()
+        .map_err(|error| FlowError::io(format!("cannot start background helper: {error}")))?;
+    drop(write_fd);
+    let ready = read_ready(read_fd.as_raw_fd(), timeout);
+    drop(read_fd);
     let ready = ready.inspect_err(|_| {
         terminate_child(&mut child);
     })?;
@@ -663,17 +679,20 @@ fn open_log_file(log_path: &Path) -> Result<fs::File> {
         .map_err(|error| FlowError::io(format!("cannot open log: {error}")))
 }
 
-fn readiness_pipe() -> Result<(RawFd, RawFd)> {
+fn readiness_pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as RawFd; 2];
     // SAFETY: fds provides two writable c_int slots for the entire call. Only a
-    // successful pipe call transfers the two new descriptors to the caller.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    // successful pipe2 call transfers two distinct descriptors to us. CLOEXEC
+    // is atomic with creation, so concurrent exec cannot inherit a pipe end.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(FlowError::io(format!(
             "cannot create readiness pipe: {}",
             std::io::Error::last_os_error()
         )));
     }
-    Ok((fds[0], fds[1]))
+    // SAFETY: successful pipe2 returned two fresh owned descriptors. Each is
+    // transferred exactly once; OwnedFd closes both on every later error path.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 fn ready_command(
@@ -702,7 +721,7 @@ fn ready_command(
             if libc::dup2(write_fd, 3) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            set_cloexec(3, false);
+            set_cloexec(3, false)?;
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -710,18 +729,6 @@ fn ready_command(
         });
     }
     command
-}
-
-fn spawn_ready_child(command: &mut Command, read_fd: RawFd, write_fd: RawFd) -> Result<Child> {
-    command.spawn().map_err(|error| {
-        // SAFETY: spawn failed before these owned parent pipe ends were handed
-        // back to spawn_with_ready. This is their sole error-path cleanup.
-        unsafe {
-            libc::close(read_fd);
-            libc::close(write_fd);
-        }
-        FlowError::io(format!("cannot start background helper: {error}"))
-    })
 }
 
 fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
@@ -771,7 +778,15 @@ fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
 
 /// Spawn a detached process without a readiness handshake (advisor workers,
 /// queue command wrappers).
+///
+/// Unix-only: creates a new session and appends both output streams to the
+/// operator-controlled log path. Empty argv is rejected before filesystem
+/// changes. Success transfers child ownership to the caller, which must handle
+/// termination and reaping; dropping `Child` does neither. Spawn success does
+/// not prove application readiness. Repeating a successful call starts another
+/// process, and errors may leave diagnostic log files.
 pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> Result<Child> {
+    require_argv(argv)?;
     if let Some(parent) = log_path.parent() {
         crate::util::fs::ensure_private_dir(parent, true)?;
     }
@@ -807,7 +822,13 @@ pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> R
 }
 
 /// Spawn the native TUI with inherited terminal I/O.
+///
+/// Empty argv returns `Usage`. The process inherits the caller's environment,
+/// terminal and process-group context; this helper does not isolate it or wait
+/// for readiness. The caller owns the returned child and is responsible for
+/// termination/reaping. Repeating the call starts another process.
 pub fn spawn_inherit(argv: &[String], cwd: Option<&Path>) -> Result<Child> {
+    require_argv(argv)?;
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     if let Some(cwd) = cwd {
@@ -985,16 +1006,30 @@ mod tests {
     #[test]
     fn cloexec_flag_can_be_set_and_cleared() {
         let (read_fd, write_fd) = pipe();
-        set_cloexec(read_fd, true);
+        set_cloexec(read_fd, true).unwrap();
         // SAFETY: the test keeps read_fd open; F_GETFD takes no pointer or owner.
         let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
         assert!(flags & libc::FD_CLOEXEC != 0);
-        set_cloexec(read_fd, false);
+        set_cloexec(read_fd, false).unwrap();
         // SAFETY: read_fd remains owned and open until the closes below.
         let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
         assert!(flags & libc::FD_CLOEXEC == 0);
         close(read_fd);
         close(write_fd);
+    }
+
+    #[test]
+    fn readiness_pipe_starts_cloexec_and_invalid_flags_fail() {
+        let (reader, writer) = readiness_pipe().unwrap();
+        for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+            // SAFETY: both owners remain live; F_GETFD only reads scalar flags.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        }
+        assert_eq!(
+            set_cloexec(-1, false).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 
     #[test]

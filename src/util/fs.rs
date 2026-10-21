@@ -151,6 +151,15 @@ pub fn codex_home() -> PathBuf {
 
 /// Atomic replacement in an anchored directory, without following symlinks.
 /// The file is private, fsynced before rename, and its directory is fsynced after.
+///
+/// The caller must hold its state lock when serializing read/modify/write
+/// operations; this helper does not acquire one or prevent competing trusted
+/// writers. Missing parent directories may be created. Symlink/owner/mode
+/// checks protect the anchored path under the trusted-owner model.
+/// An error after rename (for example directory fsync failure) can mean the new
+/// content is already visible. Inspect/reconcile durable state before retrying
+/// a larger operation; an error does not promise rollback. Rewriting identical
+/// bytes is allowed, but replaces inode/metadata and is not a no-op.
 pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<()> {
     let name = path
         .file_name()
