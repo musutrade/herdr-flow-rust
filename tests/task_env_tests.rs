@@ -1300,3 +1300,50 @@ fn destroy_is_idempotent() {
     destroy_environment(&env).unwrap();
     destroy_environment(&env).unwrap();
 }
+
+#[test]
+fn restored_metadata_does_not_close_a_new_paths_descriptor() {
+    let harness = Harness::new();
+    let mut env = harness.create("restored-handles");
+    let old = env.workspace_root.join("old.txt");
+    let new = env.workspace_root.join("new.txt");
+    fs::write(&old, "old").unwrap();
+    fs::write(&new, "new").unwrap();
+    env.register_file(&old).unwrap();
+    drop(env);
+    let mut restored = restore_environment("restored-handles").unwrap();
+    assert_eq!(restored.open_handle_count(), 0);
+    restored.register_file(&new).unwrap();
+    assert_eq!(restored.open_handle_count(), 1);
+    restored.unregister_file(&old).unwrap();
+    let retained = restored.open_handle_count();
+    restored.unregister_file(&new).unwrap();
+    assert_eq!(restored.open_handle_count(), 0);
+    destroy_environment(&restored).unwrap();
+    assert_eq!(
+        retained, 1,
+        "removing metadata-only old path closed the new path's fd"
+    );
+}
+
+#[test]
+fn released_metadata_does_not_hide_a_new_paths_descriptor() {
+    let harness = Harness::new();
+    let mut env = harness.create("released-handles");
+    let old = env.workspace_root.join("old.txt");
+    let new = env.workspace_root.join("new.txt");
+    fs::write(&old, "old").unwrap();
+    fs::write(&new, "new").unwrap();
+    env.register_file(&old).unwrap();
+    env.release_file_handles();
+    env.register_file(&new).unwrap();
+    env.unregister_file(&new).unwrap();
+    let retained = env.open_handle_count();
+    env.unregister_file(&old).unwrap();
+    env.unregister_file(&new).unwrap();
+    destroy_environment(&env).unwrap();
+    assert_eq!(
+        retained, 0,
+        "new path's descriptor survived its unregistration"
+    );
+}

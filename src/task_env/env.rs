@@ -9,6 +9,7 @@
 //! * a per-task exclusive lock held for the lifetime of the handle, so two
 //!   handles cannot own the same environment and release each other's slot.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -134,14 +135,14 @@ pub struct TaskEnvironment {
     pub state_file: PathBuf,
     /// Descriptors owned by this handle (not durable).
     #[serde(skip, default = "new_handle_slot")]
-    file_handles: Arc<Mutex<Vec<File>>>,
+    file_handles: Arc<Mutex<BTreeMap<PathBuf, File>>>,
     /// Per-task ownership lock (not durable).
     #[serde(skip, default = "new_lock_slot")]
     ownership_lock: Arc<Mutex<Option<File>>>,
 }
 
-fn new_handle_slot() -> Arc<Mutex<Vec<File>>> {
-    Arc::new(Mutex::new(Vec::new()))
+fn new_handle_slot() -> Arc<Mutex<BTreeMap<PathBuf, File>>> {
+    Arc::new(Mutex::new(BTreeMap::new()))
 }
 
 fn new_lock_slot() -> Arc<Mutex<Option<File>>> {
@@ -356,7 +357,7 @@ impl TaskEnvironment {
         self.file_handles
             .lock()
             .expect("file handle slot poisoned")
-            .push(handle);
+            .insert(resolved.clone(), handle);
         self.open_files.push(resolved);
         self.persist()
     }
@@ -398,15 +399,18 @@ impl TaskEnvironment {
         self.persist()
     }
 
+    /// Remove one path's cleanup registration and drop only its locally owned fd.
+    /// Metadata restored without a live fd cannot close another path's handle.
+    /// The file itself is not unlinked. Repeated removal is harmless; persistence
+    /// failure does not undo the in-memory removal or reopen the descriptor.
+    /// Caller must retain task ownership; a poisoned descriptor mutex panics.
     pub fn unregister_file(&mut self, path: &Path) -> Result<()> {
         let resolved = util::resolve_path(path);
-        if let Some(position) = self.open_files.iter().position(|item| item == &resolved) {
-            self.open_files.remove(position);
-            let mut handles = self.file_handles.lock().expect("file handle slot poisoned");
-            if position < handles.len() {
-                handles.remove(position);
-            }
-        }
+        self.open_files.retain(|item| item != &resolved);
+        self.file_handles
+            .lock()
+            .expect("file handle slot poisoned")
+            .remove(&resolved);
         self.persist()
     }
 
