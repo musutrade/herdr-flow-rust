@@ -241,16 +241,27 @@ deliveries; each task permits 128 operations and keeps the latest 256 transition
 index entries, disclosing discarded index entries via `older_transitions`.
 Unresolved results, operations, original acceptance, authorization and writer
 ownership are kept separately. Do not automatically discard unresolved evidence
-at a capacity limit. Complete/cancel and reconcile the queue, then archive it
-outside the checkout and start a new bounded task contract.
+at a capacity limit. Reconcile the existing task and its uncertain operations;
+do not create a replacement queue to reset limits or hide unresolved work.
+Cancellation alone does not prove delivery or authorize deletion of unknown
+resources. After confirmed delivery, use the [delivery lifecycle](delivery.md)
+to remove only the completed task's owned state and release its slot. Preserve
+unrelated tasks in a shared queue. Do not archive completed task queues or copy
+their temporary evidence into the formal output.
 
-Record the exact live receiver, result event, ACK, application and takeover times
-from the queue/delivery/operation records. Retain a compact evidence index and
-the declared completion conditions. Full transcripts, private paths and command
-logs stay outside GitHub. The Rust test suite exercises state-level apply/stall
-transitions and timestamps, but not process crash/restart, real-clock watcher
-ticks or live notification; the actual subprocess wrapper is only partially
-covered. Live active-arrival and rotation acceptance must be recorded separately.
+While a task is active or unresolved, record the exact live receiver, result
+event, ACK, application and takeover times in its disposable queue/delivery/
+operation records, alongside the completion conditions. These records support
+recovery; they are not permanent completion archives. Full transcripts, private
+paths and command logs stay outside GitHub. Separate repository development/CI
+failure evidence retained for review does not make task-owned runtime evidence
+permanent.
+
+Protocol tests cover state transitions, recovery and production watcher process
+lifetime, with synthetic peers where documented. They do not establish actual
+native receipt or the twenty-task acceptance requirement. Consult the
+[end-to-end evidence matrix](end-to-end-readiness.md) for the remaining live
+checks; record live arrival and rotation evidence separately while unresolved.
 
 ### 损坏的持久化字段
 

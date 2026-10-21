@@ -40,6 +40,17 @@ tasks cannot migrate this way. The old record is retained under `legacy` for
 runtime reconciliation, but no candidate, evidence or approval is promoted.
 Migration never resets an external sending/submitted operation for retry.
 
+The `migrate` action changes queue records only. Retaining an old path, session
+identifier, authorization reference or undelivered artifact under `legacy` does
+not register it with a task environment or grant permission to delete it. Keep
+undelivered artifacts available until their actual identity and delivery status
+are reconciled. Associate only resources whose existing task ownership can be
+verified through the environment's registration/recovery contracts; do not infer
+ownership from a path name, scan a home directory for matching files, or adopt
+unknown user resources. If ownership cannot be established, leave that resource
+untouched and record the concrete unresolved association. Old evidence and
+worker completion remain historical input, never a new acceptance verdict.
+
 ## Register the requirement and a real artifact
 
 A parent requires original requirement references, confirmed change references,
