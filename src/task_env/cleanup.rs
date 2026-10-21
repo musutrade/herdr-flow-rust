@@ -23,6 +23,8 @@
 //! through [`cleanup_failed_environment`], and items whose resources are
 //! already gone count as complete so a crash mid-retry can finish.
 
+mod signals;
+
 use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -239,6 +241,11 @@ fn plan_exists(task_id: &str) -> bool {
 ///
 /// The plan is built from the durable document, not from the caller's handle,
 /// so a stale handle cannot omit resources registered later.
+/// On Linux, signals require pidfd_open/pidfd_send_signal support and a known
+/// process start time. Missing authority or syscall errors fail closed and keep
+/// the cleanup plan/slot for retry; there is no numeric-PID signal fallback.
+/// Already exited signal targets are idempotently complete. This function may
+/// stop/kill owned processes before a later cleanup error; it is not a rollback.
 pub fn destroy(env: &TaskEnvironment) -> Result<()> {
     registry::validate_task_id(&env.task_id)?;
     let transient_lock = acquire_destroy_lock(env)?;
@@ -547,27 +554,21 @@ fn terminate_records(targets: &mut Vec<ProcessRecord>) -> Result<()> {
     if targets.is_empty() {
         return Ok(());
     }
-    freeze_targets(targets);
-    kill_targets(targets);
+    freeze_targets(targets)?;
+    kill_targets(targets)?;
     wait_for_targets(targets)
 }
 
-fn freeze_targets(targets: &[ProcessRecord]) {
-    for record in targets {
-        // SAFETY: pids are positive scalars; a dead pid is a no-op.
-        unsafe {
-            libc::kill(record.pid, libc::SIGSTOP);
-        }
-    }
+fn freeze_targets(targets: &[ProcessRecord]) -> std::io::Result<()> {
+    targets
+        .iter()
+        .try_for_each(|record| signals::signal(record, libc::SIGSTOP))
 }
 
-fn kill_targets(targets: &[ProcessRecord]) {
-    for record in targets {
-        // SAFETY: pids are positive scalars; a dead pid is a no-op.
-        unsafe {
-            libc::kill(record.pid, libc::SIGKILL);
-        }
-    }
+fn kill_targets(targets: &[ProcessRecord]) -> std::io::Result<()> {
+    targets
+        .iter()
+        .try_for_each(|record| signals::signal(record, libc::SIGKILL))
 }
 
 fn wait_for_targets(targets: &[ProcessRecord]) -> Result<()> {
@@ -1067,4 +1068,42 @@ pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
     }
     env.release_file_handles();
     Ok(())
+}
+
+#[cfg(test)]
+mod signal_identity_tests {
+    use super::*;
+
+    #[test]
+    fn signal_stage_rejects_stale_process_identity() {
+        // Model an identity becoming stale after the earlier discovery/filter
+        // stage. Only a child owned by this test is ever signalled.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let start = super::super::env::process_start_time(pid).unwrap();
+        let stale = ProcessRecord {
+            pid,
+            start_time: Some(start.wrapping_add(1)),
+        };
+        assert!(!process_record_is_alive(&stale));
+        kill_targets(&[stale]).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(
+            !exited,
+            "signal stage killed a process with a mismatched start time"
+        );
+    }
 }
