@@ -75,6 +75,14 @@ impl SessionAdapter {
         Ok(session)
     }
 
+    fn ensure_empty_history(&self) -> Result<()> {
+        let rows = self.api.get(&self.route("/message"))?;
+        ensure(
+            rows.as_array().is_some_and(|rows| rows.is_empty()),
+            "new OpenCode session contains prior conversation",
+        )
+    }
+
     fn native_status(&self) -> Result<String> {
         let statuses = self.api.get("/session/status")?;
         ensure(
@@ -449,6 +457,263 @@ pub fn register(root: &Path, spec: &J) -> Result<J> {
     SessionAdapter::new(&state)?.verify_binding()?;
     crate::guard::save(&root, &mut state)?;
     Ok(state)
+}
+
+/// Create one fresh native receiver session and persist its guard registration.
+///
+/// This is the narrow coordinator bootstrap path: it checks the server/version
+/// and model before creating, writes a durable creation journal before the one
+/// `POST /session`, verifies the returned identity/directory/model and empty
+/// history, then saves the guard document. A failed or ambiguous response keeps
+/// the journal and refuses another creation; use [`recover_fresh`] only when
+/// the journal records a completed session. It never retries the POST.
+pub fn create_fresh(root: &Path, spec: &J) -> Result<J> {
+    let (root, cwd) = registration_paths(root, spec)?;
+    let endpoint = required(spec, "endpoint")?;
+    let pre_state = json!({"endpoint": endpoint, "cwd": cwd});
+    let api: Box<dyn Api> = Box::new(HttpApi::from_state(&pre_state)?);
+    create_fresh_with_api(&root, spec, api)
+}
+
+/// Test seam for [`create_fresh`]; the API is still limited to the fixed
+/// health/session/message routes used by the adapter.
+pub fn create_fresh_with_api(root: &Path, spec: &J, api: Box<dyn Api>) -> Result<J> {
+    let creation = receiver_creation(root, spec)?;
+    let _lock = crate::guard::locked(&creation.root)?;
+    ensure_creation_absent(&creation.root)?;
+    verify_receiver_health(api.as_ref())?;
+    let mut journal = receiver_journal(&creation);
+    write_creation_journal(&creation.root, &journal)?;
+    let session = create_receiver_session(&creation, &mut journal, api.as_ref())?;
+    let state = receiver_state(&creation, &session)?;
+    finish_receiver_creation(&creation, &mut journal, state, api)
+}
+
+/// Re-open a receiver guard recorded by an interrupted [`create_fresh`].
+/// Only a `created` journal can be rebound; an uncertain creation is refused.
+pub fn recover_fresh(root: &Path) -> Result<J> {
+    let root = util::resolve_path(root);
+    let journal = util::read_state_json(&root, "creation.json")?;
+    let endpoint = required(&journal, "endpoint")?;
+    let cwd = required(&journal, "cwd")?;
+    let api: Box<dyn Api> = Box::new(HttpApi::from_state(&json!({
+        "endpoint": endpoint,
+        "cwd": cwd
+    }))?);
+    recover_fresh_with_api(&root, api)
+}
+
+/// Test seam for [`recover_fresh`]; never performs a session POST.
+pub fn recover_fresh_with_api(root: &Path, api: Box<dyn Api>) -> Result<J> {
+    let root = util::resolve_path(root);
+    let _lock = crate::guard::locked(&root)?;
+    let journal = util::read_state_json(&root, "creation.json")?;
+    ensure(
+        model::string(&journal, "phase").as_deref() == Some("created"),
+        "receiver creation outcome unknown; inspect the dedicated server, do not replay",
+    )?;
+    if root.join("state.json").exists() {
+        recover_registered(&root, &journal, api)
+    } else {
+        let cwd = PathBuf::from(required(&journal, "cwd")?);
+        recover_unregistered(&root, &journal, &cwd, api)
+    }
+}
+
+fn recover_registered(root: &Path, journal: &J, api: Box<dyn Api>) -> Result<J> {
+    let state = util::read_state_json(root, "state.json")?;
+    verify_recovered_match(journal, &state)?;
+    SessionAdapter::with_api(&state, api)?.verify_binding()?;
+    Ok(state)
+}
+
+fn recover_unregistered(root: &Path, journal: &J, cwd: &Path, api: Box<dyn Api>) -> Result<J> {
+    let state = receiver_state_from_journal(root, journal, cwd)?;
+    let adapter = SessionAdapter::with_api(&state, api)?;
+    adapter.verify_binding()?;
+    adapter.ensure_empty_history()?;
+    let mut state = state;
+    crate::guard::save(root, &mut state)?;
+    Ok(state)
+}
+
+struct ReceiverCreation {
+    root: PathBuf,
+    cwd: PathBuf,
+    endpoint: String,
+    model: J,
+    title: String,
+}
+
+fn receiver_creation(root: &Path, spec: &J) -> Result<ReceiverCreation> {
+    let (root, cwd) = registration_paths(root, spec)?;
+    let endpoint = required(spec, "endpoint")?;
+    super::http::validate_endpoint(&endpoint)?;
+    let model = model::get(spec, "model")
+        .cloned()
+        .ok_or_else(|| FlowError::guard("OpenCode receiver requires model"))?;
+    validate_binding_fields(&json!({
+        "state_dir": root,
+        "cwd": cwd,
+        "model": model
+    }))?;
+    let title = model::string(spec, "title").unwrap_or_else(|| "Coordinator receiver".into());
+    ensure(
+        !title.trim().is_empty() && title.len() <= 200,
+        "OpenCode receiver title must be 1..200 bytes",
+    )?;
+    Ok(ReceiverCreation {
+        root,
+        cwd,
+        endpoint,
+        model,
+        title,
+    })
+}
+
+fn ensure_creation_absent(root: &Path) -> Result<()> {
+    ensure(
+        !root.join("state.json").exists(),
+        "OpenCode receiver registration already exists",
+    )?;
+    ensure(
+        !root.join("creation.json").exists(),
+        "receiver creation already attempted; reconcile without replay",
+    )
+}
+
+fn verify_receiver_health(api: &dyn Api) -> Result<()> {
+    let health = api.get("/global/health")?;
+    ensure(
+        health["healthy"] == true && health["version"] == VERSION,
+        "OpenCode server must be healthy and exactly 1.19.3; 2.0 integration is deferred",
+    )
+}
+
+fn receiver_journal(creation: &ReceiverCreation) -> J {
+    json!({
+        "phase": "creating",
+        "adapter": "opencode",
+        "endpoint": creation.endpoint,
+        "cwd": creation.cwd,
+        "model": creation.model,
+        "title": creation.title,
+        "created_at": util::now()
+    })
+}
+
+fn write_creation_journal(root: &Path, journal: &J) -> Result<()> {
+    util::atomic_write_json(&root.join("creation.json"), journal)
+}
+
+fn create_receiver_session(
+    creation: &ReceiverCreation,
+    journal: &mut J,
+    api: &dyn Api,
+) -> Result<String> {
+    let body = json!({"title": creation.title, "model": creation.model});
+    let created = match api.post("/session", &body) {
+        Ok(created) => created,
+        Err(error) => {
+            journal["phase"] = json!("uncertain");
+            journal["error"] = json!(bounded_error(&error));
+            write_creation_journal(&creation.root, journal)?;
+            return Err(creation_uncertain(&error));
+        }
+    };
+    let session = match required(&created, "id").and_then(|session| {
+        validate_session(&session)?;
+        Ok(session)
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            journal["phase"] = json!("created_unverified");
+            journal["error"] = json!(bounded_error(&error));
+            write_creation_journal(&creation.root, journal)?;
+            return Err(error);
+        }
+    };
+    journal["phase"] = json!("created_unverified");
+    journal["session"] = json!(session);
+    write_creation_journal(&creation.root, journal)?;
+    Ok(session)
+}
+
+fn receiver_state(creation: &ReceiverCreation, session: &str) -> Result<J> {
+    Ok(json!({
+        "version": 2,
+        "adapter": "opencode",
+        "state_dir": creation.root,
+        "cwd": creation.cwd,
+        "model": creation.model,
+        "approval_policy": "untrusted",
+        "auto_rotate": false,
+        "server_version": VERSION,
+        "endpoint": creation.endpoint,
+        "phase": "monitoring",
+        "session": session,
+        "level": "unknown",
+        "usage": Value::Null
+    }))
+}
+
+fn finish_receiver_creation(
+    creation: &ReceiverCreation,
+    journal: &mut J,
+    state: J,
+    api: Box<dyn Api>,
+) -> Result<J> {
+    let adapter = SessionAdapter::with_api(&state, api)?;
+    if let Err(error) = adapter
+        .verify_binding()
+        .and_then(|_| adapter.ensure_empty_history())
+    {
+        journal["error"] = json!(bounded_error(&error));
+        write_creation_journal(&creation.root, journal)?;
+        return Err(error);
+    }
+    journal["phase"] = json!("created");
+    write_creation_journal(&creation.root, journal)?;
+    let mut state = state;
+    crate::guard::save(&creation.root, &mut state)?;
+    Ok(state)
+}
+
+fn receiver_state_from_journal(root: &Path, journal: &J, cwd: &Path) -> Result<J> {
+    let endpoint = required(journal, "endpoint")?;
+    let model = model::get(journal, "model")
+        .cloned()
+        .ok_or_else(|| FlowError::guard("receiver journal requires model"))?;
+    let creation = ReceiverCreation {
+        root: root.to_path_buf(),
+        cwd: cwd.to_path_buf(),
+        endpoint,
+        model,
+        title: "Coordinator receiver".into(),
+    };
+    receiver_state(&creation, &required(journal, "session")?)
+}
+
+fn verify_recovered_match(journal: &J, state: &J) -> Result<()> {
+    ensure(
+        state["adapter"] == "opencode"
+            && state["session"] == journal["session"]
+            && state["endpoint"] == journal["endpoint"]
+            && state["cwd"] == journal["cwd"]
+            && state["model"] == journal["model"],
+        "receiver registration changed after creation",
+    )
+}
+
+fn creation_uncertain(error: &FlowError) -> FlowError {
+    FlowError::guard(format!(
+        "receiver session creation outcome is uncertain: {}; inspect the dedicated server, do not retry",
+        bounded_error(error)
+    ))
+}
+
+fn bounded_error(error: &FlowError) -> String {
+    error.message.chars().take(500).collect()
 }
 
 fn registration_paths(root: &Path, spec: &J) -> Result<(PathBuf, PathBuf)> {
