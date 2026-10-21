@@ -1,6 +1,7 @@
 //! Bounded, test-only metadata inventory for task-owned and outside resources.
 //!
-//! This collector never mutates or deletes observed resources. It records
+//! This collector does not create, write, chmod, rename or delete observed
+//! resources. Reads may update access times; atime stability is not asserted. It records
 //! paths/metadata, process identities, queue keys/counts and bounded disk
 //! observations. It does not report file contents, config or auth. Shared queue
 //! JSON is parsed only for ownership keys/counts, not copied into evidence.
@@ -682,6 +683,12 @@ fn worktree_observation(worktrees: &[WorktreeRegistration], errors: &mut Vec<Str
                 .repo
                 .as_ref()
                 .map(|repo| path_observation(repo, "worktree_repo", errors));
+            if worktree.repo.is_none() {
+                errors.push(format!(
+                    "worktree {} has no repository identity",
+                    worktree.path.display()
+                ));
+            }
             if let Some(repo) = worktree.repo.as_ref() {
                 if !repo.exists() {
                     errors.push(format!(
@@ -867,4 +874,34 @@ fn free_bytes(path: &Path) -> Result<u64, String> {
     // SAFETY: statvfs initialized stat on success.
     let stat = unsafe { stat.assume_init() };
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+#[test]
+fn path_class_resolves_aliases_and_refuses_missing_targets() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let owned = temp.path().join("owned");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&owned).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let user = outside.join("user");
+    fs::write(&user, "fixture").unwrap();
+    symlink(&outside, owned.join("escape")).unwrap();
+    let allowed = vec![fs::canonicalize(&owned).unwrap()];
+    assert_eq!(
+        path_class(&owned.join("escape/user"), &allowed, &[]),
+        "outside_unknown"
+    );
+    assert_eq!(
+        path_class(
+            &owned.join("escape/user"),
+            &allowed,
+            &[fs::canonicalize(&user).unwrap()]
+        ),
+        "excluded"
+    );
+    assert_eq!(
+        path_class(&owned.join("missing"), &allowed, &[]),
+        "unresolved"
+    );
 }

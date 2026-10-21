@@ -841,3 +841,51 @@ fn collector_does_not_create_missing_registry_base_or_queue() {
             .as_str()
             .is_some_and(|error| error.contains("queue read"))));
 }
+
+#[test]
+fn collector_preserves_existing_control_modes_and_reports_missing_repo_identity() {
+    let temp = temp();
+    let base = temp.path().join("base");
+    let queue = temp.path().join("queue");
+    let control = temp.path().join("control");
+    let envs = control.join("envs");
+    let plans = control.join("plans");
+    for path in [&base, &queue, &control, &envs, &plans] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let payload = br#"{"tasks":{},"waits":{},"events":{},"deliveries":{}}"#;
+    fs::write(queue.join("queue.json"), payload).unwrap();
+    let worktree = WorktreeRegistration {
+        path: base.join("missing"),
+        repo: None,
+    };
+    let report = collect(&InventorySpec {
+        base: &base,
+        queue: &queue,
+        registry_root: &control,
+        envs_dir: &envs,
+        plans_dir: &plans,
+        task_id: "owned",
+        instance_id: "none",
+        workspace_root: &base.join("workspace"),
+        temp_root: &base.join("temp"),
+        runtime_roots: &[],
+        worktrees: &[worktree],
+        open_files: &[],
+        excluded: &[],
+    });
+    for path in [&base, &queue, &control, &envs, &plans] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+    assert_eq!(fs::read(queue.join("queue.json")).unwrap(), payload);
+    assert!(!control.join("registry.json").exists());
+    assert!(report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error.as_str().unwrap().contains("no repository identity")));
+}
