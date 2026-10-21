@@ -812,13 +812,15 @@ fn run_native_receiver(
         external_supervisor_restart(
             env,
             &q,
-            &formal_target,
-            &user_asset,
-            artifact,
-            delivery_expected.as_ref().unwrap(),
-            user_identity.unwrap(),
             &mut server,
             &mut guard_child,
+            RestartSpec {
+                target: &formal_target,
+                user_asset: &user_asset,
+                artifact,
+                expected: delivery_expected.as_ref().unwrap(),
+                user_identity: user_identity.unwrap(),
+            },
         );
         return;
     }
@@ -892,9 +894,11 @@ fn confirm_delivery(
     spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
     let intent = delivery::prepare(env, q, &spec, &delivery::local::Local).unwrap();
     assert_eq!(intent["artifact"]["id"], json!(artifact_id));
+    let intent_id = intent["id"].clone();
     assert_target_untouched(target, user_asset, user_identity, expected);
     let confirmed = delivery::execute(env, &delivery::local::Local).unwrap();
     assert_eq!(confirmed["phase"], "confirmed");
+    assert_eq!(confirmed["id"], intent_id);
     assert_eq!(
         confirmed["receipt"]["repository"],
         json!(target.display().to_string())
@@ -913,42 +917,101 @@ fn confirm_delivery(
 }
 
 fn cli_output(args: &[&str]) -> std::process::Output {
-    use std::io::Read;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    use std::io::{Read, Seek, SeekFrom};
+    fn read_bounded(file: &mut std::fs::File) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = file.take(1024 * 1024).read_to_end(&mut bytes);
+        bytes
+    }
+    let mut stdout_file = tempfile::tempfile().unwrap();
+    let mut stderr_file = tempfile::tempfile().unwrap();
+    let mut child = CliChild {
+        child: Some(
+            std::process::Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+                .args(args)
+                .stdout(std::process::Stdio::from(stdout_file.try_clone().unwrap()))
+                .stderr(std::process::Stdio::from(stderr_file.try_clone().unwrap()))
+                .spawn()
+                .unwrap(),
+        ),
+    };
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            child
-                .stdout
-                .take()
-                .unwrap()
-                .read_to_end(&mut stdout)
-                .unwrap();
-            child
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_end(&mut stderr)
-                .unwrap();
+        let status = child.child.as_mut().unwrap().try_wait().unwrap();
+        if let Some(status) = status {
+            let _ = child.child.take();
             return std::process::Output {
                 status,
-                stdout,
-                stderr,
+                stdout: read_bounded(&mut stdout_file),
+                stderr: read_bounded(&mut stderr_file),
             };
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("delivery CLI timed out");
+            if let Some(mut process) = child.child.take() {
+                let _ = process.kill();
+                let _ = process.wait();
+            }
+            panic!(
+                "delivery CLI timed out; stdout={:?}; stderr={:?}",
+                String::from_utf8_lossy(&read_bounded(&mut stdout_file)),
+                String::from_utf8_lossy(&read_bounded(&mut stderr_file))
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct CliChild {
+    child: Option<std::process::Child>,
+}
+impl Drop for CliChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn wait_bounded(child: &mut std::process::Child, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                reap_after_kill(child, label);
+                panic!("{label} did not exit within 15s");
+            }
+            Err(error) => {
+                reap_after_kill(child, label);
+                panic!("{label} wait failed: {error}");
+            }
+        }
+    }
+}
+
+fn reap_after_kill(child: &mut std::process::Child, label: &str) {
+    let _ = child.kill();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                eprintln!("{label} could not be reaped within 5s after kill");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{label} reap failed: {error}");
+                return;
+            }
+        }
     }
 }
 
@@ -970,15 +1033,13 @@ impl<'a> ChildReaper<'a> {
             return;
         }
         self.armed = false;
-        let _ = self.server.kill();
-        let _ = self.server.wait();
-        let _ = self.guard.kill();
-        let _ = self.guard.wait();
+        reap_after_kill(self.server, "native server");
+        reap_after_kill(self.guard, "guard watcher");
     }
     fn wait(mut self) {
-        let _ = self.server.wait();
-        let _ = self.guard.wait();
         self.armed = false;
+        wait_bounded(self.server, "native server");
+        wait_bounded(self.guard, "guard watcher");
     }
 }
 impl Drop for ChildReaper<'_> {
@@ -987,20 +1048,32 @@ impl Drop for ChildReaper<'_> {
     }
 }
 
-fn external_supervisor_restart(
-    env: super::OwnedEnvironment,
-    q: &Path,
-    target: &Path,
-    user_asset: &Path,
-    artifact: &J,
-    expected: &str,
+struct RestartSpec<'a> {
+    target: &'a Path,
+    user_asset: &'a Path,
+    artifact: &'a J,
+    expected: &'a str,
     user_identity: (u64, u64),
+}
+
+fn external_supervisor_restart(
+    mut env: super::OwnedEnvironment,
+    q: &Path,
     server: &mut std::process::Child,
     guard_child: &mut std::process::Child,
+    spec: RestartSpec<'_>,
 ) {
+    let RestartSpec {
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+    } = spec;
     let workspace = env.workspace_root.clone();
     let temporary = env.temp_root.clone();
     let state_file = env.state_file().to_path_buf();
+    let mut reaper = ChildReaper::new(server, guard_child);
     let confirmed = confirm_delivery(
         &mut env,
         q,
@@ -1014,7 +1087,6 @@ fn external_supervisor_restart(
     let intent_id = confirmed["id"].clone();
     let receipt = confirmed["receipt"].clone();
     let mut custody = env.into_handoff();
-    let mut reaper = ChildReaper::new(server, guard_child);
 
     let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
     if !reconcile.status.success() {
@@ -1027,6 +1099,7 @@ fn external_supervisor_restart(
     }
     let reconciled: J = serde_json::from_slice(&reconcile.stdout)
         .unwrap_or_else(|error| panic!("reconcile output invalid: {error}"));
+    assert_eq!(reconciled["phase"], "confirmed");
     assert_eq!(reconciled["id"], intent_id);
     assert_eq!(reconciled["receipt"], receipt);
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
@@ -1048,14 +1121,8 @@ fn external_supervisor_restart(
     assert!(!cleanup_state_path("project").unwrap().exists());
     assert_eq!(occupied_slots().unwrap(), 0);
     assert!(!q.exists());
-    assert_eq!(
-        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
-        artifact_id
-    );
-    assert_eq!(
-        fs::read_to_string(user_asset).unwrap(),
-        "unrelated user asset"
-    );
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+    assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
     custody.disarm();
 }
 

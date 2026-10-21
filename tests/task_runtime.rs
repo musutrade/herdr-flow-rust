@@ -59,33 +59,53 @@ impl HandoffGuard {
             return;
         }
         self.armed = false;
-        if !is_registered(&self.task_id).unwrap_or(false) {
-            return;
-        }
-        let mut env = match restore_environment(&self.task_id) {
-            Ok(env) => env,
+        let registered = match is_registered(&self.task_id) {
+            Ok(registered) => registered,
             Err(error) => {
-                eprintln!("handoff cleanup could not restore environment: {error}");
-                return;
+                eprintln!("handoff cleanup registry read failed: {error}");
+                false
             }
         };
-        let phase = env.delivery["phase"].as_str().unwrap_or_default();
-        if phase == "confirmed" || phase == "cleaning" {
-            if let Err(error) = delivery::finish(&mut env) {
-                eprintln!("handoff cleanup finish failed: {error}");
+        let plan_before = match cleanup_state_path(&self.task_id) {
+            Ok(path) => path.exists(),
+            Err(error) => {
+                eprintln!("handoff cleanup plan path failed: {error}");
+                false
+            }
+        };
+        if registered {
+            match restore_environment(&self.task_id) {
+                Ok(mut env) => {
+                    let phase = env.delivery["phase"].as_str().unwrap_or_default();
+                    if phase == "confirmed" || phase == "cleaning" {
+                        if let Err(error) = delivery::finish(&mut env) {
+                            // Finish owns the confirmed/cleaning cleanup plan.
+                            // Do not erase its journal or roots with a blind destroy.
+                            eprintln!(
+                                "handoff cleanup finish failed; preserving state/plan: {error}"
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "handoff cleanup preserving non-confirmed phase {phase:?}; no valid delivery finish"
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!("handoff cleanup could not restore environment: {error}");
+                }
             }
         }
-        if is_registered(&self.task_id).unwrap_or(false) {
-            if let Err(error) = destroy_environment(&env) {
-                eprintln!("handoff cleanup destroy failed: {error}");
+        let plan_after = match cleanup_state_path(&self.task_id) {
+            Ok(path) => path.exists(),
+            Err(error) => {
+                eprintln!("handoff cleanup plan recheck failed: {error}");
+                plan_before
             }
-        }
-        if cleanup_state_path(&self.task_id)
-            .map(|path| path.exists())
-            .unwrap_or(false)
-        {
+        };
+        if plan_after {
             if let Err(error) = resume_delivery_cleanup(&self.task_id) {
-                eprintln!("handoff cleanup plan resume failed: {error}");
+                eprintln!("handoff cleanup plan resume failed; retained: {error}");
             }
         }
     }
@@ -198,6 +218,40 @@ fn setup_in_queue(
     }
     queue::save(q, &mut state).unwrap();
     (q.to_path_buf(), cwd)
+}
+
+#[test]
+fn handoff_guard_resumes_a_plan_after_registry_removal() {
+    let temp = temp();
+    let env = environment(temp.path());
+    let workspace = env.workspace_root.clone();
+    let temporary = env.temp_root.clone();
+    let plan = json!({
+        "task_id":env.task_id,
+        "instance_id":env.instance_id,
+        "delivery_confirmed":true,
+        "roots":[],
+        "pending_processes":[],
+        "pending_worktrees":[],
+        "pending_files":[],
+        "pending_root_removals":[],
+        "quarantine":null,
+        "started_at":0.0,
+        "updated_at":0.0,
+        "attempts":0,
+        "last_error":null
+    });
+    let plan_path = cleanup_state_path(&env.task_id).unwrap();
+    herdr_flow::util::atomic_write_json(&plan_path, &plan).unwrap();
+    unregister_environment(&env.task_id, &env.instance_id).unwrap();
+    fs::remove_file(env.state_file()).unwrap();
+    let mut guard = env.into_handoff();
+    guard.cleanup();
+    assert!(!plan_path.exists());
+    assert!(!is_registered("runtime-test").unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    let _ = fs::remove_dir_all(workspace);
+    let _ = fs::remove_dir_all(temporary);
 }
 
 #[test]
