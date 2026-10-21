@@ -284,7 +284,8 @@ fn run_native_receiver(
     }
     if apply_repair {
         instruction_text = format!(
-            "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session."
+            "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; if absent wait bounded15seconds for the driver to stop/reap and publish it, then require matching collector session and stopped/reaped status. Do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session.",
+            developer_release=developer_release.display(), repair_release=repair_release.display()
         );
     }
     fs::write(&instructions, instruction_text).unwrap();
@@ -494,6 +495,14 @@ fn run_native_receiver(
         let state = queue::load_queue(&q).unwrap();
         assert!(state["tasks"]["project"]["approved"].is_null());
         assert_eq!(state["tasks"]["review"]["pending"], json!([]));
+        if apply_repair {
+            let receipt = util::read_json(&developer_release).unwrap();
+            assert_eq!(receipt["session"], result["session"]);
+            assert_eq!(
+                state["tasks"]["review"]["last_release"]["evidence"],
+                receipt["status"]
+            );
+        }
         let output = &result["output"];
         let expected_review = if apply_repair {
             "version INCOMPLETE"
@@ -571,6 +580,10 @@ fn run_native_receiver(
             let failed_report =
                 failed_state["tasks"]["accept-first"]["verdict"]["envelope"]["report"].clone();
             let failed_verdict = failed_state["tasks"]["accept-first"]["verdict"].clone();
+            let failed_report_path = env
+                .workspace_root
+                .join("reviewer-checkout/.herdr-verdict.json");
+            let failed_report_bytes = fs::read(&failed_report_path).unwrap();
             let failed_gaps = failed_report["gaps"].as_array().unwrap().clone();
             assert!(!failed_gaps.is_empty(), "failed acceptance has no gaps");
             assert_eq!(failed_state["tasks"]["accept-first"]["phase"], "blocked");
@@ -578,9 +591,20 @@ fn run_native_receiver(
                 failed_state["tasks"]["accept-first"]["lineage"]["input"],
                 development_artifact["id"]
             );
+            assert_eq!(
+                failed_state["tasks"]["project"]["open_gaps"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                failed_gaps.len()
+            );
             for gap in &failed_gaps {
                 let gap_id = gap["id"].as_str().unwrap();
                 let gap_key = json!(["accept-first", gap_id]).to_string();
+                assert_eq!(
+                    failed_state["tasks"]["project"]["open_gaps"][&gap_key]["detail"],
+                    *gap
+                );
                 assert_eq!(
                     failed_state["tasks"]["project"]["open_gaps"][gap_key.as_str()]["activity"],
                     "accept-first"
@@ -599,7 +623,6 @@ fn run_native_receiver(
                 &registered,
                 development_artifact,
                 repair_root.as_ref().unwrap(),
-                &repair_release,
                 &failed_report,
             );
             if apply_delivery {
@@ -641,6 +664,7 @@ fn run_native_receiver(
                     delivery_expected.as_ref().unwrap(),
                 );
             }
+            assert_eq!(fs::read(&failed_report_path).unwrap(), failed_report_bytes);
             let final_report =
                 final_state["tasks"]["accept-final"]["verdict"]["envelope"]["report"].clone();
             assert_eq!(
@@ -1086,7 +1110,6 @@ fn native_repair_stage(
     coordinator: &J,
     old_artifact: &J,
     repair_root: &Path,
-    release: &Path,
     failed_report: &J,
 ) -> (J, J) {
     let gaps = failed_report["gaps"].as_array().unwrap();
@@ -1122,7 +1145,7 @@ fn native_repair_stage(
     );
     assert_ne!(repair["session"], coordinator["session"]);
     util::atomic_write_json(
-        release,
+        &q.parent().unwrap().join("repair-native-release.json"),
         &json!({
             "session":repair["session"],
             "runtime":repair_root,
@@ -1131,6 +1154,13 @@ fn native_repair_stage(
     )
     .unwrap();
     let state = wait_for_stage(q, guard, coordinator, "repair-native");
+    let receipt = util::read_json(&q.parent().unwrap().join("repair-native-release.json")).unwrap();
+    assert_eq!(receipt["session"], repair["session"]);
+    assert_eq!(receipt["session"], collected["session"]);
+    assert_eq!(
+        state["tasks"]["repair-native"]["last_release"]["evidence"],
+        receipt["status"]
+    );
     assert_stage_shape(
         &state,
         &["review", "accept-first", "repair-native"],
