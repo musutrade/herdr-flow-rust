@@ -129,3 +129,29 @@ This does not make /proc discovery atomic: start-time values have clock-tick
 precision, and marker/parent discovery uses separate reads. Those ownership
 observation limits still need separate review; no universal process identity
 proof or completed #46 audit is claimed.
+
+### TUI signal handoff and reaping
+
+The signal handler no longer reads a global numeric child PID or calls kill. It
+only stores the pending signal in a lock-free AtomicI32. The bridge owner checks
+its Child and forwards the original signal from normal control flow before the
+existing graceful-stop timeout. A reaped Child is skipped; a non-reaped exit
+reserves the PID until the exclusive owner waits. This requires no external
+waiter and no SIGCHLD auto-reap (SIG_IGN/SA_NOCLDWAIT), now stated on run().
+Process-wide signal dispositions also require a single bridge and no concurrent
+replacement. Forwarding happens at an event-loop boundary, not immediately in
+the handler; per-poll timeouts, repeated interrupted-connect retries and
+filesystem work are documented without claiming a hard overall deadline.
+
+The prior signal handoff regression delivered directly to a test child in the
+handler. The revised test observes a pending request without delivery, verifies
+owner-forwarded SIGHUP, and confirms a reaped Child is ignored. It does not claim
+an actual PID wraparound was reproduced. The new normal-flow kill site borrows
+exclusive Child lifecycle authority and passes only scalar arguments.
+
+The five sigaction setup/restore unsafe sites use fully initialized Linux C
+records, live sigset storage and saved dispositions. The C handler has the
+required one-integer ABI and now uses only a lock-free atomic store. Restoring
+saved handlers is best effort; concurrent signal-disposition mutation is outside
+the documented API contract. Remaining TUI FD and /proc discovery reviews are
+still pending; #46 remains open.

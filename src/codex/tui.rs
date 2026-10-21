@@ -1631,18 +1631,10 @@ fn reject_binary_frame(opcode: u8) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
-static CHILD_PID: AtomicI32 = AtomicI32::new(0);
-
+// The handler owns no process identity. The bridge's exclusive Child owner
+// forwards the request after checking whether it has already reaped the child.
 extern "C" fn forward_signal(signum: libc::c_int) {
     STOP_SIGNAL.store(signum, Ordering::SeqCst);
-    let pid = CHILD_PID.load(Ordering::SeqCst);
-    if pid > 0 {
-        // SAFETY: kill takes scalar arguments and is async-signal-safe. The
-        // handler uses only lock-free atomics and kill, without allocation.
-        unsafe {
-            libc::kill(pid, signum);
-        }
-    }
 }
 
 type PreviousSignals = Vec<(libc::c_int, libc::sigaction)>;
@@ -2360,7 +2352,6 @@ impl ProxyBridge {
             .spawn()
             .map_err(|error| FlowError::io(format!("cannot launch native TUI: {error}")))?;
         let pid = child.id();
-        CHILD_PID.store(pid as i32, Ordering::SeqCst);
         self.child = Some(child);
         let real_binary = util::resolve_path(Path::new(&binary));
         self.marker_update(object_fields(json!({
@@ -2375,10 +2366,7 @@ impl ProxyBridge {
             return false;
         };
         match child.try_wait() {
-            Ok(Some(_)) => {
-                CHILD_PID.store(0, Ordering::SeqCst);
-                false
-            }
+            Ok(Some(_)) => false,
             Ok(None) => true,
             Err(_) => false,
         }
@@ -2727,7 +2715,6 @@ impl ProxyBridge {
             return Ok(());
         };
         stop_child_process(child)?;
-        CHILD_PID.store(0, Ordering::SeqCst);
         Ok(())
     }
 
@@ -2748,7 +2735,9 @@ impl ProxyBridge {
     }
 
     fn graceful_stop(&mut self) -> Result<()> {
+        let signal = STOP_SIGNAL.load(Ordering::SeqCst);
         let child = self.child_or_error()?;
+        signal_owned_child(child, signal)?;
         stop_until_deadline(child)
     }
 
@@ -2769,7 +2758,6 @@ impl ProxyBridge {
     }
 
     fn finish_status(&mut self, status: ExitStatus) -> Result<i32> {
-        CHILD_PID.store(0, Ordering::SeqCst);
         let code = child_exit_code(status);
         self.record_exit(code)
     }
@@ -2821,9 +2809,17 @@ impl ProxyBridge {
 
     /// Run to completion and return the child exit status (128 + signal for
     /// signal-terminated children, as the original entry point did).
+    ///
+    /// Owns process-wide SIGTERM/SIGHUP/SIGINT dispositions until restoration;
+    /// run only one bridge and do not concurrently change these dispositions.
+    /// This bridge must exclusively reap its Child: no external waiters,
+    /// SIGCHLD=SIG_IGN or SA_NOCLDWAIT. The signal handler only records a request;
+    /// the owner forwards it at the next loop boundary (poll is bounded at
+    /// 100ms, each upstream connect poll at 2s), then allows 5s before kill.
+    /// Filesystem work and repeated interrupted-connect retries can delay that
+    /// boundary; this is not a hard deadline.
     pub fn run(&mut self) -> i32 {
         STOP_SIGNAL.store(0, Ordering::SeqCst);
-        CHILD_PID.store(0, Ordering::SeqCst);
         let mut previous: PreviousSignals = Vec::new();
         let outcome = self.run_inner(&mut previous);
         let mut code = match outcome {
@@ -3003,6 +2999,24 @@ fn shutdown_endpoint(endpoint: &mut Endpoint) -> Result<()> {
         .socket
         .shutdown(std::net::Shutdown::Write)
         .map_err(|error| FlowError::io(format!("cannot shut down proxy endpoint: {error}")))
+}
+
+/// The caller exclusively owns waiting/reaping this Child. A non-reaped exit
+/// keeps its PID reserved, so the check-to-signal interval cannot target reuse.
+fn signal_owned_child(child: &mut Child, signal: i32) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    // SAFETY: scalar signal and positive PID of our unreaped Child; no memory
+    // arguments. Requires no external waiter, SIGCHLD=SIG_IGN or SA_NOCLDWAIT.
+    let result = unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
 }
 
 fn stop_child_process(child: &mut Child) -> Result<()> {
@@ -3409,4 +3423,45 @@ pub fn cli(args: &[String]) -> i32 {
         options.thread.as_deref(),
     );
     bridge.run()
+}
+
+#[cfg(test)]
+mod signal_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn handler_defers_delivery_to_child_owner() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        forward_signal(libc::SIGTERM);
+        std::thread::sleep(Duration::from_millis(50));
+        let still_running = child.try_wait().unwrap().is_none();
+        let pending = STOP_SIGNAL.swap(0, Ordering::SeqCst);
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert_eq!(pending, libc::SIGTERM);
+        assert!(still_running, "handler signalled the numeric PID directly");
+        // The owner still forwards the original signal, then treats a reaped
+        // Child as complete without sending anything to its former PID.
+        let root = tempfile::tempdir().unwrap();
+        let mut bridge = ProxyBridge::new(
+            root.path(),
+            root.path().join("unused.sock"),
+            "unused",
+            "/",
+            "signal-test",
+            None,
+        );
+        bridge.child = Some(Command::new("sleep").arg("30").spawn().unwrap());
+        forward_signal(libc::SIGHUP);
+        let outcome = bridge.wait_child();
+        STOP_SIGNAL.store(0, Ordering::SeqCst);
+        let live = bridge.child.as_mut().unwrap();
+        if outcome.is_err() {
+            let _ = live.kill();
+        }
+        let status = live.wait().unwrap();
+        assert_eq!(outcome.unwrap(), 128 + libc::SIGHUP);
+        assert_eq!(status.signal(), Some(libc::SIGHUP));
+        signal_owned_child(live, libc::SIGTERM).unwrap();
+    }
 }
