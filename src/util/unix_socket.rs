@@ -58,6 +58,19 @@ mod tests {
     use std::os::unix::net::UnixListener;
     #[test]
     fn saturated_listener_fails_promptly_and_stale_socket_is_refused() {
+        const CHILD: &str = "HERDR_SOCKET_BACKLOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // A concurrent fork can temporarily inherit a CLOEXEC listener
+            // until exec, keeping it alive after this thread drops its copy.
+            // Run this close/refusal assertion without sibling spawning tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "util::unix_socket::tests::saturated_listener_fails_promptly_and_stale_socket_is_refused", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
         let dir = crate::util::fs::test_tempdir();
         let path = dir.path().join("broker.sock");
         let listener = UnixListener::bind(&path).unwrap();
