@@ -95,10 +95,11 @@ argv and a working directory of `/` alone do not enforce this contract.
 | Candidate task sharing the operator UID | Must be constrained by an external sandbox or equivalent boundary | File ownership alone cannot isolate mutually hostile processes sharing this UID |
 | Receipt storage writer | Stored results cannot independently authorize publication | Receipt fields are checked against operation, binding, App, check name and expiry; publication queries the verifier again and requires exact equality with the stored receipt |
 
-Source review also finds that verifier execution inherits the caller environment
-through the default `CommandOptions`. Interpreter search paths, loader settings
-and runtime dependencies therefore belong in the execution trust review. This is
-a source finding, not yet a demonstrated cross-principal exploit.
+The baseline inherited the caller environment through default `CommandOptions`.
+An isolated regression demonstrated that `BASH_ENV` could replace a trusted Bash
+verifier response. This establishes an invocation-context defect, not a claim
+that a deployed service was compromised. The clean environment below addresses
+this input path.
 
 Before choosing an enforcement mechanism, isolated regressions must cover file
 and ancestor replacement, symlinks, the validation-to-execution race, inherited
@@ -141,7 +142,7 @@ pathname, so wrappers must use absolute installation paths for dependencies
 rather than locating adjacent files from `$0` or `__file__`.
 
 This first enforcement step does not authenticate arbitrary interpreter
-arguments, imported modules, dynamic libraries or inherited environment.
+arguments, imported modules or dynamic libraries.
 Those remain operator-controlled trust inputs and require the deployment review
 above. It does not isolate hostile processes sharing the invoking UID and does
 not by itself complete #45. The rejection regression demonstrates that a
@@ -159,3 +160,21 @@ baseline. Regression cases also cover changed input-binding fields, wrong
 operation/App/check identity, expiry (including the exact boundary), invalid
 coverage/validity flags and replay against a new operation. They do not claim
 access to or compromise of a deployed authoritative service.
+
+### Verifier execution environment
+
+Verifier subprocesses start with a cleared environment containing only
+`PATH=/usr/bin:/bin` and `LANG=C`, and run from `/`. Caller startup scripts,
+loader variables, interpreter search paths, HOME configuration and service tokens
+are not inherited. This applies to every verifier action, including inspect.
+System executables and their dependencies remain operator-managed trust roots.
+
+Deployments that previously relied on inherited credentials, proxy settings or
+user configuration must move their configuration into a protected verifier
+installation or credential service, accessed by explicit paths. A protected
+wrapper can supply its own deliberate settings. Do not place secrets in queue
+JSON or verifier arguments. There is no caller-environment passthrough option.
+The client fails closed if required deployment configuration is unavailable.
+This environment boundary does not authenticate scripts passed as interpreter
+arguments, imported dependencies or their installation configuration, and does
+not provide isolation from a hostile process with the same UID.
