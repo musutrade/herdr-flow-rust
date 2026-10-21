@@ -178,3 +178,31 @@ The client fails closed if required deployment configuration is unavailable.
 This environment boundary does not authenticate scripts passed as interpreter
 arguments, imported dependencies or their installation configuration, and does
 not provide isolation from a hostile process with the same UID.
+
+### Pinned shebang interpreter chains
+
+Direct script clients now have each shebang interpreter opened and checked with
+same owner, mode and ancestor rules as the initial executable. Every script and
+the final interpreter remain open until spawn. Invocation passes descriptor
+paths for the scripts and executes the final interpreter descriptor, so atomic
+replacement of any checked script or interpreter cannot redirect that call.
+Fresh calls see operator upgrades. The parent retains CLOEXEC on every file;
+only the child keeps the descriptors it needs across exec.
+
+At most four script layers are accepted. Each shebang must have an absolute
+interpreter and a UTF-8, NUL-free line ending within the first 256 bytes. The
+optional shebang argument remains one argument, including embedded spaces.
+Relative, missing, unsafe, malformed and recursive/excessive chains fail closed.
+These deliberately narrow script-format requirements may reject scripts that
+some kernels accept. Use a conventional short absolute shebang when installing
+clients. Script `$0` and interpreter script arguments remain descriptor paths.
+
+This check follows kernel shebang edges; it does not infer dependencies from
+arbitrary argv or program behavior. For example, `/bin/sh /path/client.sh`,
+`sh -c CODE`, an env dispatcher, a Python import or an ELF loader can execute
+additional code. Those inputs, configuration and installed dependencies must be
+protected by the operator deployment boundary. An isolated probe confirmed that
+a mode-0666 script explicitly passed to `/bin/sh` is not covered by executable
+identity checks. Prefer a directly configured protected script for descriptor
+pinning. This probe's private temporary ancestor does not demonstrate access by
+a different UID. #45 remains open for final deployment-contract review.
