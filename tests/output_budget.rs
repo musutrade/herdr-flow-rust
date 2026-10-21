@@ -48,23 +48,75 @@ fn oversized_single_and_dual_streams_fail_promptly() {
     }
 }
 
+// The child publishes its own identity before the producer can exceed the budget.
+// Check that identity after capture, rather than assuming the parent gets CPU
+// before a delayed child writes a marker. Zombies have exited even if init has
+// not reaped them yet.
+fn process_identity(stat: &str) -> (&str, &str, &str) {
+    let (pid, _) = stat.split_once(' ').unwrap();
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    let fields: Vec<_> = fields.split_whitespace().collect();
+    (pid, fields[19], fields[0])
+}
+
+fn same_process_running(record: &str) -> bool {
+    let (pid, ticks, _) = process_identity(record);
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(current) => {
+            let (_, current_ticks, state) = process_identity(&current);
+            ticks == current_ticks && !matches!(state, "Z" | "X")
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            false
+        }
+        Err(error) => panic!("cannot inspect fixture process {pid}: {error}"),
+    }
+}
+
 #[test]
 fn output_limit_reclaims_group_and_preserves_unrelated_process() {
-    let directory = tempfile::tempdir().unwrap();
-    let marker = directory.path().join("survived");
-    let mut unrelated = Command::new("sleep").arg("10").spawn().unwrap();
-    let script = format!(
-        "(sleep 0.3; printf survived > {}) & yes output",
-        herdr_flow::util::shell_quote(marker.to_str().unwrap())
-    );
-    let result = capture(&script, 1024);
-    std::thread::sleep(Duration::from_millis(450));
-    let alive = unrelated.try_wait().unwrap().is_none();
-    let _ = unrelated.kill();
-    unrelated.wait().unwrap();
-    assert_eq!(result.unwrap_err().kind, ErrorKind::OutputLimit);
-    assert!(!marker.exists());
-    assert!(alive);
+    // Delayed producer reproduces the old marker test's false failure without
+    // relying on CPU load. The descendant remains alive until group cleanup.
+    for producer_delay in ["0", "0.5"] {
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("child.stat");
+        let temporary = directory.path().join("child.stat.tmp");
+        let quote = herdr_flow::util::shell_quote;
+        let child = format!(
+            "cat /proc/$$/stat > {} && mv {} {}; exec sleep 10",
+            quote(temporary.to_str().unwrap()),
+            quote(temporary.to_str().unwrap()),
+            quote(ready.to_str().unwrap()),
+        );
+        let script = format!(
+            "sh -c {} & while [ ! -s {} ]; do sleep 0.01; done; sleep {}; yes output",
+            quote(&child),
+            quote(ready.to_str().unwrap()),
+            producer_delay,
+        );
+        let mut unrelated = Command::new("sleep").arg("10").spawn().unwrap();
+        let unrelated_record =
+            std::fs::read_to_string(format!("/proc/{}/stat", unrelated.id())).unwrap();
+        let result = capture(&script, 1024);
+        let alive =
+            unrelated.try_wait().unwrap().is_none() && same_process_running(&unrelated_record);
+        let _ = unrelated.kill();
+        unrelated.wait().unwrap();
+        assert_eq!(result.unwrap_err().kind, ErrorKind::OutputLimit);
+        assert!(alive, "unrelated process was killed");
+        let record = std::fs::read_to_string(&ready).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while same_process_running(&record) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !same_process_running(&record),
+            "owned descendant survived cleanup"
+        );
+    }
 }
 
 #[test]
