@@ -93,7 +93,9 @@ then reads state; it never calls queue `tick` or `acknowledge`. The native
 receiver must execute the notification's ACK command, then readiness. Readiness
 is intentionally false while a delivery is awaiting ACK, so reversing that
 order would deadlock the check. The test also requires completed shell tool
-records in the exact native session and a completed native submission.
+records in the exact native session and a completed native submission. This
+fixture creates exactly one signal/delivery and selects it by exact session;
+multi-delivery acceptance would need an explicit event/delivery selection.
 
 The initial local real run was blocked by an OpenCode `external_directory`
 approval for the task-owned queue/guard outside cwd. It did not ACK and is not a
@@ -103,9 +105,10 @@ selected configuration by default. An operator can explicitly authorize
 configuration then allows only the generated runtime root and its descendants
 through `permission.external_directory`. Other permission rules remain intact;
 scalar permission policies are rejected rather than silently rewritten. The
-selected config file and global policy are not modified, and the test never
-clicks approval prompts. Both queue and guard reside inside the runtime root,
-because native launch permits writes only there and in cwd. Placing them in a
+Rust test reads the selected config file but never writes it; each external live
+runner additionally compares the selected file bytes before and after the run.
+The test never clicks approval prompts. Both queue and guard reside inside the
+runtime root because native launch permits writes only there and in cwd. Placing them in a
 sibling temporary directory is outside that kernel-enforced boundary even when
 OpenCode's directory approval permits access. Bounded local failure diagnostics are retained separately from
 the disposable environment, excluding the selected config/auth files. Passing
@@ -139,8 +142,9 @@ After explicit operator authorization of the scoped runtime-directory permission
 the native receipt check passed locally on OpenCode 1.19.3. It observed real
 completed ACK/readiness shell calls in the exact session, matched the persistent
 delivery receipt and readiness identity, then reaped the server/watchers and
-checked absent owned roots and zero occupied slots. The selected global config
-was checked byte-for-byte unchanged. This is one receipt check, not twenty real
+checked absent owned roots and zero occupied slots. The external live runners
+checked the selected file's bytes before and after; the Rust test only validates
+the disposable copied configuration. This is one receipt check, not twenty real
 tasks or independent acceptance/customer delivery.
 
 The earlier runs remain failure evidence: one driver supplied the wrong model
@@ -149,3 +153,5 @@ and one observed a real ACK but timed out on a transient top-level queue status.
 The final assertion uses the delivery's persistent phase/session plus readiness's
 matching receipt; a watcher advancing to `waiting_for_events` cannot erase the
 receipt. This corrects the test without weakening production confinement.
+Writable queue/guard are disposable coordinator-owned test state; production
+isolation policy is unchanged.
