@@ -190,3 +190,38 @@ The final local OpenCode 1.19.3 run passed this single scenario in 45.26 seconds
 including server/watcher reaping, absent owned roots and zero occupied slots.
 The external runner also verified the selected configuration file was unchanged
 byte-for-byte. Earlier failed runs are not counted as successful scenarios.
+
+## Native independent acceptance application
+
+The opt-in `installed_real_opencode_independent_acceptance_is_applied_by_native_receiver`
+regression extends the real developer application scenario with a separate native
+reviewer snapshot/session. The driver selects the collected candidate and registers
+acceptance under the queue lock, releases it, and launches/collects the reviewer.
+The same native coordinator receives two production notifications and executes
+ACK, task-apply and readiness for each. The driver never ticks, acknowledges or
+applies either result. The reviewer writes the actual `.herdr-verdict.json`; the
+coordinator names its immutable registered verdict and chooses the continuation
+from its conclusion. A non-passing report cannot satisfy this passing scenario.
+
+Assertions bind both events and deliveries, all three sessions, candidate,
+collector report chain, immutable reviewer envelope, approval round/verdict and
+planned continuation. Development alone leaves approval null. The second-stage
+check requires exactly two acknowledged/applied events and two exact-session
+deliveries, an empty acceptance pending list and real native tool invocations.
+Teardown removes owned roots and reaps watchers/server with zero occupied slots.
+The selected configuration file is checked unchanged by the external live runner;
+only disposable configuration copies receive the existing scoped permission opt-in.
+
+This is an acceptance-to-delivery **continuation**, not an executed customer
+delivery. It does not establish repair/restart, twenty completed real tasks,
+Codex-native equivalence or a complete inventory of resources outside task roots.
+#38 and #32 remain open. Native directory approval blocks remain evidence of a
+blocked run; the fixture does not press approval keys or widen permissions to
+let a worker read a different role's instructions.
+
+The first-stage single-delivery check is valid because acceptance is registered
+only after development application completes. The final exact-two-events check
+intentionally rejects extra watcher events. Final local live3 passed in 105.81s;
+live1 blocked after the developer searched sibling coordinator instructions and
+was retained, while live2 passed before the final review assertions were added.
+No permission widening was used to resolve live1.
