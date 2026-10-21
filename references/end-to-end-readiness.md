@@ -331,3 +331,54 @@ owned roots/registry/queue/slots before fixture teardown. The selected OpenCode
 config bytes were unchanged. Stable coverage and Rust 1.85 all-target tests each
 passed 473 tests with 11 ignored; the absolute CRAP threshold of 10 had no
 violations. These results do not close #38 or #32.
+
+## Bounded resource inventory collector
+
+`tests/common/resource_inventory.rs` is a test-only, metadata-only collector for a
+stable campaign base. It observes task identity, owned/runtime roots, registry,
+environment state and cleanup plans, slots, registered worktrees/open files,
+marked process pid/start/cwd/fd targets, shared-queue ownership counts, explicit
+exclusions, scoped base file/byte/allocated-block counts and a noisy filesystem
+free-byte observation. It reads queue structure to classify ownership, but does
+not capture file payloads, configuration, auth or credentials. It does not create,
+write, chmod, rename or delete observed resources; reads may update access times,
+so atime stability is outside this assertion. Registry/env/plan roots are supplied explicitly and read
+with non-creating metadata/JSON access; missing directories are not created or
+chmodded. Queue observations distinguish owned, unrelated, mixed and unknown
+entries, and malformed or missing references are errors/unknown, not unrelated.
+Base absence and missing explicit worktree repositories are reported errors.
+
+The synthetic two-round test in `tests/resource_inventory.rs` reuses one campaign
+base and shared queue, creates a real marked child with an outside open fd,
+registers a real Git worktree and open file, and excludes exact formal/user/config
+paths. It checks nonempty observations before cleanup, empty owned roots/processes/
+worktrees/open files and zero slots afterwards, retained unrelated queue entries,
+and a stable base between rounds. Unknown outside FD/cwd paths observed on the
+sampled marked processes are reported, never removed. Base usage is a lexical,
+no-follow inventory: symlink targets (including a symlinked base) are not traversed
+or inventoried unless separately supplied. Symlink counts are not proof that their
+targets are empty. This is collector validation only: `/proc` samples can miss short-lived or
+unlinked files, known-root observations do not prove absence of global caches, and
+filesystem free bytes are not a leak proof. No live model or twenty-round claim is
+made by this batch.
+
+The fixture resets its synthetic queue records explicitly; that reset is not
+production lifecycle cleanup. It compares normalized shared queue contents and
+retains the pre-cleanup runtime/open-file/worktree paths for post-cleanup checks.
+The inventory subtree's usage is compared separately from the external fixture
+repository and registry; this does not establish whole-campaign disk stability.
+Queue and worktree key lists expose totals and truncation. Process discovery uses
+`marked_processes`, whose internal read errors are not surfaced, so a zero count
+is not proof of complete process discovery. Git enumeration currently uses
+`Command::output` without a timeout or output-byte limit against the explicitly
+selected fixture repository; the collector is not a general bounded subprocess
+runner. These limits must be addressed or accounted for before live campaigns.
+
+Local collector verification on 2026-10-21 passed six focused tests, including
+mixed/unknown queue ownership, key truncation, missing control roots, existing
+permission preservation, symlink alias classification and the two-round fixture.
+Stable coverage and Rust 1.85 all-target tests each passed 479 tests with 11
+ignored; the absolute CRAP threshold of 10 had no violations. An initial fixture
+compile error was corrected, and an earlier gate run was stopped for observer
+side-effect corrections; these are not live-task completion evidence. No model
+run was performed for this collector-only batch, and #38/#32 remain open.
