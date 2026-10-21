@@ -606,12 +606,23 @@ impl BackgroundChild {
 }
 
 /// Spawn a detached helper that writes one readiness JSON object to fd 3.
+///
+/// Unix-only: creates a new session, appends stdout/stderr to `log_path`, and
+/// passes `--ready-fd 3` to the helper. The caller must supply a compatible
+/// helper and an operator-controlled log path; this is not a shell interface.
+/// Empty argv returns `Usage` before creating logs or pipes. Other errors may
+/// leave diagnostic log files. A readiness error terminates and waits for the
+/// direct child; it does not attest to cleanup of arbitrary descendants.
+/// On success the caller owns the child and must arrange reaping (for example
+/// with [`BackgroundChild::reap`]); readiness JSON is a protocol response, not
+/// independent proof that the helper is healthy. This operation is not idempotent.
 pub fn spawn_with_ready(
     argv: &[String],
     log_path: &Path,
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<BackgroundChild> {
+    require_argv(argv)?;
     ensure_log_parent(log_path)?;
     let (log, log_err) = open_log_pair(log_path)?;
     let (read_fd, write_fd) = readiness_pipe()?;
@@ -771,7 +782,15 @@ fn read_ready(fd: RawFd, timeout: Duration) -> Result<J> {
 
 /// Spawn a detached process without a readiness handshake (advisor workers,
 /// queue command wrappers).
+///
+/// Unix-only: creates a new session and appends both output streams to the
+/// operator-controlled log path. Empty argv is rejected before filesystem
+/// changes. Success transfers child ownership to the caller, which must handle
+/// termination and reaping; dropping `Child` does neither. Spawn success does
+/// not prove application readiness. Repeating a successful call starts another
+/// process, and errors may leave diagnostic log files.
 pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> Result<Child> {
+    require_argv(argv)?;
     if let Some(parent) = log_path.parent() {
         crate::util::fs::ensure_private_dir(parent, true)?;
     }
@@ -807,7 +826,13 @@ pub fn spawn_detached(argv: &[String], log_path: &Path, cwd: Option<&Path>) -> R
 }
 
 /// Spawn the native TUI with inherited terminal I/O.
+///
+/// Empty argv returns `Usage`. The process inherits the caller's environment,
+/// terminal and process-group context; this helper does not isolate it or wait
+/// for readiness. The caller owns the returned child and is responsible for
+/// termination/reaping. Repeating the call starts another process.
 pub fn spawn_inherit(argv: &[String], cwd: Option<&Path>) -> Result<Child> {
+    require_argv(argv)?;
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     if let Some(cwd) = cwd {
