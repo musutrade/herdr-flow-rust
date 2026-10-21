@@ -87,15 +87,22 @@ Additional source blocks reviewed:
 | `task_env/registry.rs` (1) | geteuid compares owner without pointer arguments. This call's memory safety does not make the surrounding registry mutation a transaction; callers still need registry locks. |
 | `util/process.rs`: directory open and readiness write/close | CString outlives open and success transfers one raw fd; directory exec inheritance fixed above. Readiness writes borrow the remaining serialized slice for its exact length, then close the transferred raw fd once; watch_service and CI notifier take their Option before calling. Raw API requires a dedicated fd and is best-effort, not an acknowledgment. |
 
-### Newly identified post-fork concern (not resolved by this batch)
+### Landlock preparation before fork
 
-The callbacks installed by `TaskEnvironment::process_command`, runtime server
-setup and delivery writer setup call `confine_renames_to` after fork. That helper
-opens paths through Rust OpenOptions, and its unsupported-ABI error uses
-formatting/owned error construction. Delivery's `same_parent` error also uses
-an owned error. These paths do not satisfy the existing claim that the callback
-only makes syscalls without allocations. No production deadlock is claimed as
-reproduced. Preparation must move before fork, leaving only prepared-descriptor
-confinement syscalls and allocation-free OS errors in the child. Do not mark
-these pre_exec sites reviewed-safe until that change and targeted validation
-are complete. #46 remains open.
+The task environment, native runtime and delivery writer now prepare paths and
+Landlock rules in the parent. `PreparedConfinement` transfers the fresh ruleset
+fd into a File once, closes it on preparation errors or Command drop, and lends
+it to the child callback. The callback uses only setsid/process-control,
+PR_SET_NO_NEW_PRIVS and landlock_restrict_self syscalls with scalar errno errors.
+Delivery supervisor disappearance reports ECHILD without an owned error string.
+Preparation does not restrict the parent. Command construction requires existing
+roots; TaskEnvironment defers preparation errors to spawn for API compatibility.
+
+An isolated allocator sentinel reproduces the previous post-fork allocation with
+long root paths (exit 99); the prepared implementation passes. The same regression
+checks Command reuse, unchanged parent NoNewPrivs, owner release after drop and
+failed preparation, and allocation-free propagation of ENOENT. A disappearing
+root is renamed back before cleanup to preserve its registered inode identity.
+Existing task environment, delivery and runtime boundary tests also pass.
+This is not a claim of a reproduced production deadlock or a completed inventory:
+#46 remains open pending the remaining unsafe and API reviews.

@@ -167,19 +167,26 @@ fn launch_command(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<Comman
     crate::task_env::validate_path(env, &cwd)?;
     ensure(cwd.is_dir(), "runtime cwd is missing")?;
     let mut cmd = server_command(env, root, &cwd, &binary, spec)?;
-    let roots = vec![root.to_path_buf(), cwd.clone()];
-    // SAFETY: the existing Landlock helper performs only confinement syscalls.
-    if spec["adapter"] != "codex" {
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(move || crate::task_env::confine_renames_to(&roots));
-        }
-    }
+    confine_server(&mut cmd, root, &cwd, spec)?;
     let adapter = required(spec, "adapter")?;
     configure_server(&mut cmd, root, spec, &adapter)?;
     cmd.current_dir(cwd);
     Ok(cmd)
 }
+fn confine_server(cmd: &mut Command, root: &Path, cwd: &Path, spec: &J) -> Result<()> {
+    let roots = vec![root.to_path_buf(), cwd.to_path_buf()];
+    if spec["adapter"] != "codex" {
+        let policy = crate::task_env::PreparedConfinement::new(&roots)?;
+        // SAFETY: preparation opens paths and builds rules before fork. The
+        // callback only borrows its ruleset and performs confinement syscalls.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(move || policy.apply());
+        }
+    }
+    Ok(())
+}
+
 fn register_child(env: &mut TaskEnvironment, child: &mut Child) -> Result<()> {
     if let Err(error) = env.register_process(child.id() as i32) {
         let _ = child.kill();

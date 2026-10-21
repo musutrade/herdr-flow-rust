@@ -133,18 +133,23 @@ fn git_writer(intent: &J) -> Result<std::process::Command> {
         .env("TMPDIR", field(intent, "temp_root")?)
         .process_group(0);
     let roots = writer_roots(intent)?;
+    let policy = crate::task_env::PreparedConfinement::new(&roots)?;
     let parent = std::process::id() as i32;
-    // SAFETY: process-control and the existing confinement helper after fork.
+    // SAFETY: paths and ruleset are prepared before fork. The callback only
+    // performs process-control/confinement syscalls and uses scalar OS errors.
     // A supervisor dying before exec must not leave an unmarked writer.
     unsafe {
-        command.pre_exec(move || protect_writer(parent, &roots));
+        command.pre_exec(move || protect_writer(parent, &policy));
     }
     Ok(command)
 }
-fn protect_writer(parent: i32, roots: &[std::path::PathBuf]) -> std::io::Result<()> {
+fn protect_writer(
+    parent: i32,
+    policy: &crate::task_env::PreparedConfinement,
+) -> std::io::Result<()> {
     arm_death_signal()
         .and_then(|()| same_parent(parent))
-        .and_then(|()| crate::task_env::confine_renames_to(roots))
+        .and_then(|()| policy.apply())
 }
 fn arm_death_signal() -> std::io::Result<()> {
     // SAFETY: prctl takes only integer arguments for PR_SET_PDEATHSIG.
@@ -156,7 +161,7 @@ fn arm_death_signal() -> std::io::Result<()> {
 fn same_parent(parent: i32) -> std::io::Result<()> {
     // SAFETY: getppid has no caller preconditions.
     if unsafe { libc::getppid() } != parent {
-        return Err(std::io::Error::other("delivery supervisor exited"));
+        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
     }
     Ok(())
 }
