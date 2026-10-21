@@ -33,6 +33,8 @@ pub struct CommandOptions {
     pub stdin: Option<Vec<u8>>,
     /// Execute this already-open file instead of resolving argv[0] again.
     pub executable_file: Option<std::sync::Arc<File>>,
+    /// Keep these files open in the child for descriptor-path script arguments.
+    pub inherited_files: Vec<std::sync::Arc<File>>,
     /// Maximum captured bytes per stream. Exceeding either limit fails the command.
     pub stdout_limit: usize,
     pub stderr_limit: usize,
@@ -48,6 +50,7 @@ impl Default for CommandOptions {
             remove_git_env: false,
             stdin: None,
             executable_file: None,
+            inherited_files: Vec::new(),
             stdout_limit: 16 * 1024 * 1024,
             stderr_limit: 16 * 1024 * 1024,
         }
@@ -118,6 +121,9 @@ fn executable_command(program: &str, options: &CommandOptions) -> Command {
         return Command::new(program);
     };
     let fd = file.as_raw_fd();
+    let descriptors: Vec<_> = std::iter::once(fd)
+        .chain(options.inherited_files.iter().map(|file| file.as_raw_fd()))
+        .collect();
     let mut command = Command::new(format!("/proc/self/fd/{fd}"));
     command.arg0(program);
     // SAFETY: the child only performs fcntl on the descriptor kept alive by
@@ -125,8 +131,10 @@ fn executable_command(program: &str, options: &CommandOptions) -> Command {
     // interpreters reopening /proc/self/fd/N; the parent retains CLOEXEC.
     unsafe {
         command.pre_exec(move || {
-            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
+            for descriptor in &descriptors {
+                if libc::fcntl(*descriptor, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
