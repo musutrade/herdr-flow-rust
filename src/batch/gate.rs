@@ -15,6 +15,7 @@ use crate::logging;
 use crate::model::{self, J};
 use crate::progress;
 use crate::util;
+mod executable;
 
 pub fn validate(config: Option<&J>) -> Result<J> {
     let config = config
@@ -201,7 +202,11 @@ pub fn call(config: &J, request: &J) -> Result<J> {
 }
 
 fn call_run(argv: &[String], stdin: Vec<u8>) -> Result<J> {
-    let options = call_options(stdin);
+    let mut options = call_options(stdin);
+    let program = argv
+        .first()
+        .ok_or_else(|| FlowError::progress("missing gate verifier executable"))?;
+    options.executable_file = Some(executable::open(Path::new(program))?);
     let output = util::process::run_command(argv, &options).map_err(|error| {
         FlowError::progress(format!(
             "trusted gate verification unavailable; preserve the existing operation: {error}"

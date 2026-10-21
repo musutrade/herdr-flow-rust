@@ -81,3 +81,70 @@ may wrap it in their existing failure category. This is not an automatic retry
 signal. Timeout, fair pipe servicing and owned-group cleanup remain in effect.
 This budget covers captured commands, not detached command logs or native RPC
 streams, which have separate lifecycle/protocol contracts.
+
+## Verifier identity review (#45, in progress; initial baseline #51)
+
+The current deployment contract makes the operator-managed verifier, its
+configuration, dependencies and authoritative service trust roots. An absolute
+argv and a working directory of `/` alone do not enforce this contract.
+
+| Principal | Required boundary | Baseline evidence |
+| --- | --- | --- |
+| Operator controlling verifier installation | Trusted to install and upgrade code and configuration | Deployment responsibility; no installer implemented here |
+| Candidate task with a separate UID | Cannot write verifier, configuration, dependencies or ancestor directories | Filesystem permissions must be checked; current gate validation checks argv shape only |
+| Candidate task sharing the operator UID | Must be constrained by an external sandbox or equivalent boundary | File ownership alone cannot isolate mutually hostile processes sharing this UID |
+| Receipt storage writer | Stored results cannot independently authorize publication | Receipt fields are checked against operation, binding, App, check name and expiry; publication queries the verifier again and requires exact equality with the stored receipt |
+
+Source review also finds that verifier execution inherits the caller environment
+through the default `CommandOptions`. Interpreter search paths, loader settings
+and runtime dependencies therefore belong in the execution trust review. This is
+a source finding, not yet a demonstrated cross-principal exploit.
+
+Before choosing an enforcement mechanism, isolated regressions must cover file
+and ancestor replacement, symlinks, the validation-to-execution race, inherited
+environment, legitimate upgrades and receipt mutation/replay. Checking a path
+once and subsequently executing that path is insufficient to bind identity.
+These review notes do not claim #45 acceptance or a deployed trust boundary.
+
+### Confirmed consumer checks
+
+`batch::validation::publication_receipt` invokes `gate::query` again before
+publication. `publication_receipt_ok` requires both `decision == allow` and exact
+JSON equality with the saved receipt. `gate::receipt_ok` checks version,
+operation, full input binding, valid/coverage flags, App ID, check name, decision
+and finite future expiry. Thus changing only a saved receipt does not by itself
+provide a matching new trusted response. A compromised verifier/configuration
+can still defeat those checks; authenticating a response with a key available to
+the same attacker would not repair that boundary.
+
+The existing member-checkout rejection resolves verifier argv paths relative to
+the candidate checkout. It does not establish filesystem ownership, dependency
+integrity or execution-time file identity. Those checks remain separate from
+receipt validation and must preserve deliberate operator upgrades.
+
+### Executable descriptor enforcement
+
+Each invocation now checks the configured executable path and its canonical
+path. Entries must be owned by root or the invoking user; ordinary files and
+directories must not be group/other writable. Trusted-owner sticky directories
+(such as `/tmp`) may contain private installations. Symlinks are allowed only
+through these owner/path checks, and the resolved target must be a regular
+executable with no group/other write permission.
+
+The checked executable is opened without following a final symlink, checked
+again through its descriptor, and executed through `/proc/self/fd`. Replacing the
+pathname after this open cannot select a different executable for that call.
+An operator upgrade must use atomic replacement: an existing call retains the
+old file and the next call validates and opens the new file. In-place mutation
+by the trusted owner is outside this guarantee. Scripts receive a descriptor
+pathname, so wrappers must use absolute installation paths for dependencies
+rather than locating adjacent files from `$0` or `__file__`.
+
+This first enforcement step does not authenticate arbitrary interpreter
+arguments, imported modules, dynamic libraries or inherited environment.
+Those remain operator-controlled trust inputs and require the deployment review
+above. It does not isolate hostile processes sharing the invoking UID and does
+not by itself complete #45. The rejection regression demonstrates that a
+world-writable executable was run on the baseline and is rejected before code
+execution with this enforcement; descriptor tests cover scripts, trusted
+symlinks and atomic upgrades.
