@@ -89,6 +89,7 @@ fn remove_shared(env: &mut TaskEnvironment, root: &Path) -> Result<()> {
     let mut state = crate::queue::load_queue(root)?;
     validate_foreign_tasks(env, root, &state)?;
     prepare_removal(env, &state)?;
+    validate_removal(&env.delivery["removal"])?;
     remove_sidecars(root, &env.delivery["removal"], &mut state)?;
     prune(&mut state, &env.delivery["removal"]);
     clear_receiver(root, &state)?;
@@ -141,6 +142,34 @@ fn prepare_removal(env: &mut TaskEnvironment, state: &J) -> Result<()> {
     env.delivery["removal"] = json!({"tasks":tasks,"waits":waits,"events":events});
     env.persist()
 }
+fn validate_removal(plan: &J) -> Result<()> {
+    for key in ["tasks", "waits", "events"] {
+        let values = plan[key]
+            .as_array()
+            .ok_or_else(|| FlowError::progress(format!("removal.{key} must be an array")))?;
+        for value in values {
+            let id = value.as_str().ok_or_else(|| {
+                FlowError::progress(format!("removal.{key} entry must be a string"))
+            })?;
+            ensure_named(id, key)?;
+            // Only waits name a sidecar file; tasks and events are JSON keys and
+            // may legitimately contain spaces or non-ASCII characters.
+            if key == "waits" {
+                safe_id(id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_named(id: &str, key: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(FlowError::progress(format!(
+            "removal.{key} entry must not be empty"
+        )));
+    }
+    Ok(())
+}
 fn contains(plan: &J, key: &str, id: &J) -> bool {
     plan[key].as_array().is_some_and(|a| a.contains(id))
 }
@@ -156,8 +185,13 @@ fn safe_id(id: &str) -> Result<()> {
     )
 }
 fn remove_sidecars(root: &Path, plan: &J, state: &mut J) -> Result<()> {
-    for id in plan["waits"].as_array().unwrap() {
-        let id = id.as_str().unwrap();
+    let waits = plan["waits"]
+        .as_array()
+        .ok_or_else(|| FlowError::progress("removal.waits must be an array"))?;
+    for id in waits {
+        let id = id
+            .as_str()
+            .ok_or_else(|| FlowError::progress("removal.waits entry must be a string"))?;
         safe_id(id)?;
         util::remove_state_file(&root.join("results"), &format!("{id}.json"))?;
     }
@@ -204,5 +238,33 @@ fn prune(state: &mut J, plan: &J) {
     let active = state["active"].as_str().unwrap_or("");
     if state["deliveries"][active].is_null() {
         state["active"] = J::Null;
+    }
+}
+
+#[cfg(test)]
+mod removal_validation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn removal_plan_allows_non_path_task_and_event_keys() {
+        let plan = json!({
+            "tasks": ["活动 一"],
+            "waits": ["wait-safe"],
+            "events": ["事件 一"]
+        });
+        assert!(validate_removal(&plan).is_ok());
+    }
+
+    #[test]
+    fn removal_plan_still_rejects_unsafe_wait_ids_and_empty_entries() {
+        for plan in [
+            json!({"tasks": [], "waits": ["../escape"], "events": []}),
+            json!({"tasks": [], "waits": ["."], "events": []}),
+            json!({"tasks": [""], "waits": [], "events": []}),
+            json!({"tasks": [], "waits": [], "events": [""]}),
+        ] {
+            assert!(validate_removal(&plan).is_err(), "{plan}");
+        }
     }
 }

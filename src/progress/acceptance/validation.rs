@@ -180,16 +180,29 @@ pub(super) fn completion_evidence(report: &J) -> Result<J> {
     Ok(evidence)
 }
 
+fn open_gaps(parent: &J) -> Result<serde_json::Map<String, J>> {
+    // Version 2 parents created before the first verdict omitted this field.
+    let Some(value) = parent.get("open_gaps") else {
+        return Ok(serde_json::Map::new());
+    };
+    let gaps = value
+        .as_object()
+        .ok_or_else(|| progress_error("open_gaps must be an object"))?;
+    for gap in gaps.values() {
+        field(gap, "activity").map_err(|_| progress_error("open_gaps entry requires activity"))?;
+        field(gap, "gap").map_err(|_| progress_error("open_gaps entry requires gap"))?;
+    }
+    Ok(gaps.clone())
+}
+
 fn validate_open_gaps(parent: &J, value: &J) -> Result<()> {
-    if let Some(gaps) = parent["open_gaps"].as_object() {
-        for gap in gaps.values() {
-            ensure(
-                rows(value, "resolutions")?
-                    .iter()
-                    .any(|r| r["activity"] == gap["activity"] && r["gap"] == gap["gap"]),
-                "pass must resolve previous gaps with evidence",
-            )?;
-        }
+    for gap in open_gaps(parent)?.values() {
+        ensure(
+            rows(value, "resolutions")?
+                .iter()
+                .any(|r| r["activity"] == gap["activity"] && r["gap"] == gap["gap"]),
+            "pass must resolve previous gaps with evidence",
+        )?;
     }
     Ok(())
 }
@@ -198,19 +211,20 @@ pub(super) fn record_gaps(parent: &mut J, child: &J) -> Result<()> {
     if report.is_null() {
         return Ok(());
     }
-    if parent["open_gaps"].is_null() {
-        parent["open_gaps"] = json!({});
-    }
+    let mut gaps = open_gaps(parent)?;
     for resolution in rows(report, "resolutions")? {
         let key = json!([field(resolution, "activity")?, field(resolution, "gap")?]).to_string();
-        parent["open_gaps"].as_object_mut().unwrap().remove(&key);
+        gaps.remove(&key);
     }
     for gap in rows(report, "gaps")? {
         let activity = field(child, "task")?;
         let id = field(gap, "id")?;
-        parent["open_gaps"][json!([activity, id]).to_string()] =
-            json!({"activity":activity,"gap":id,"detail":gap});
+        gaps.insert(
+            json!([activity, id]).to_string(),
+            json!({"activity":activity,"gap":id,"detail":gap}),
+        );
     }
+    parent["open_gaps"] = J::Object(gaps);
     Ok(())
 }
 

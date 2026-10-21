@@ -251,3 +251,27 @@ logs stay outside GitHub. The Rust test suite exercises state-level apply/stall
 transitions and timestamps, but not process crash/restart, real-clock watcher
 ticks or live notification; the actual subprocess wrapper is only partially
 covered. Live active-arrival and rotation acceptance must be recorded separately.
+
+### 损坏的持久化字段
+
+需求修订和活动创建在复制状态上校验当前 requirement、authorization 对象及
+每个授权条目，再继承授权。缺失、null、数组或标量不会被当成空授权；合法
+空对象仍须满足原有“提供授权及来源”的要求。错误包含字段路径，失败不保存
+部分需求修订，也不注册部分活动。修复原字段后可以重试本地状态转换。
+
+验收的 `open_gaps` 和 `verdicts` 若已存在，必须是对象；`open_gaps` 中的条目
+还须包含 activity 和 gap。旧版首次验收前未创建这些字段，字段缺失仍表示
+尚无记录；显式 null 或错误类型视为损坏。有效空对象可正常使用。验收应用
+在暂存副本上执行，字段校验失败不消费结果、不设置交付批准、不丢失既有缺口。
+
+交付后的恢复清理先完整校验 `removal.tasks`、`removal.waits`、`removal.events`
+数组及所有字符串身份，再删除共享侧文件和条目。未生成计划时的缺失/null
+仍按已确认交付的任务关联生成计划；已保存计划中的缺失/null/错误类型拒绝
+继续。失败保留 cleaning 状态、任务槽位和交付事实。修复后恢复清理，不再
+执行交付。此处的字段校验不替代任务归属和交付身份校验。
+
+这些错误由队列/交付 CLI 以非零退出和字段诊断报告；调用方须保留待处理任务，
+不能把错误默认成完成或重发不确定的外部操作。对应 CLI 子进程回归位于
+`tests/lineage.rs`、`tests/acceptance.rs`、`tests/delivery.rs`；设置
+`HERDR_TEST_RELEASE_BIN` 为本 checkout 的 release 二进制绝对路径，可用相同
+回归验证 `panic=abort` 下的退出码与持久化状态。

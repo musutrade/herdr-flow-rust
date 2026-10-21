@@ -98,6 +98,8 @@ fn load_parent(s: &J, spec: &J) -> Result<J> {
     )?;
     ensure(is_parent(&t), "requires a version 2 requirement task")?;
     ensure(task_running(&t), "requirement task is paused or cancelled")?;
+    object(&t["requirements"], "requirements")?;
+    object(req(&t), "current requirement")?;
     Ok(t)
 }
 
@@ -166,7 +168,7 @@ fn revise(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let mut t = load_parent(s, spec)?;
     let revision = model::int(&t, "requirement_revision").unwrap_or(0) + 1;
     ensure(revision <= 128, "requirement revision capacity reached")?;
-    let inherited = inherited_revision(&t, spec);
+    let inherited = inherited_revision(&t, spec)?;
     let next = requirement(&inherited, revision)?;
     t["requirements"][revision.to_string()] = next;
     t["requirement_revision"] = json!(revision);
@@ -174,24 +176,16 @@ fn revise(s: &mut J, spec: &J, now: f64) -> Result<J> {
     Ok(save_parent(s, t, now, "requirements_revised"))
 }
 
-fn inherited_revision(t: &J, spec: &J) -> J {
+fn inherited_revision(t: &J, spec: &J) -> Result<J> {
+    object(spec, "revision specification")?;
     let mut next = spec.clone();
     if next.get("authorization").is_none() {
-        next["authorization"] = json!(req(t)["authorization"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(id, value)| {
-                let mut item = value.clone();
-                item["id"] = json!(id);
-                item
-            })
-            .collect::<Vec<_>>());
+        next["authorization"] = json!(inherited_permissions(t)?);
     }
     if next.get("acceptance").is_none() {
         next["acceptance"] = req(t)["criteria"].clone();
     }
-    next
+    Ok(next)
 }
 
 fn artifact(s: &mut J, spec: &J, now: f64, adapter: &dyn ArtifactAdapter) -> Result<J> {
@@ -266,7 +260,7 @@ fn activity_role(spec: &J) -> Result<String> {
 
 fn register_activity(s: &mut J, spec: &J, mut parent: J, wait: J, link: J, now: f64) -> Result<J> {
     let name = field(spec, "activity")?;
-    let child_spec = activity_spec(spec, &parent, &name);
+    let child_spec = activity_spec(spec, &parent, &name)?;
     let wait = crate::queue::register_wait(s, &wait, now)?;
     let mut child_spec = child_spec;
     child_spec["wait"] = wait["id"].clone();
@@ -302,23 +296,27 @@ fn activity_link(t: &J, spec: &J, role: &str, input: &J) -> Result<J> {
     )
 }
 
-fn activity_spec(spec: &J, t: &J, name: &str) -> J {
+fn activity_spec(spec: &J, t: &J, name: &str) -> Result<J> {
+    object(spec, "activity specification")?;
     let mut child = spec.clone();
     child["task"] = json!(name);
     child["goal"] = req(t)["goal"].clone();
     child["acceptance"] = req(t)["criteria"].clone();
-    let permissions: Vec<J> = req(t)["authorization"]
-        .as_object()
-        .unwrap()
+    child["authorization"] = json!(inherited_permissions(t)?);
+    Ok(child)
+}
+
+fn inherited_permissions(t: &J) -> Result<Vec<J>> {
+    let permissions = object(&req(t)["authorization"], "requirement.authorization")?;
+    permissions
         .iter()
         .map(|(id, value)| {
+            object(value, "requirement.authorization entry")?;
             let mut permission = value.clone();
             permission["id"] = json!(id);
-            permission
+            Ok(permission)
         })
-        .collect();
-    child["authorization"] = json!(permissions);
-    child
+        .collect()
 }
 
 fn activity_wait(spec: &J, name: &str, artifact: &J, link: &J) -> Result<J> {

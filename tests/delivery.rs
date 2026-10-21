@@ -610,3 +610,49 @@ fn git_hooks_cannot_leak_task_files_outside_owned_roots_and_target() {
     delivery::finish(&mut f.env).unwrap();
     f.clean();
 }
+
+#[test]
+fn malformed_removal_plan_preserves_shared_entries_and_recovers_without_redelivery() {
+    let mut f = Fixture::new(false);
+    f.prepare();
+    delivery::execute(&mut f.env, &delivery::local::Local).unwrap();
+    let before = queue::load_queue(&f.queue).unwrap();
+    for plan in [
+        json!({}),
+        json!({"tasks":[], "waits":null, "events":[]}),
+        json!({"tasks":[], "waits":false, "events":[]}),
+        json!({"tasks":[], "waits":["review", null], "events":[]}),
+        json!({"tasks":[], "waits":["review"], "events":false}),
+    ] {
+        f.env.delivery["removal"] = plan;
+        f.env.persist().unwrap();
+        let error = delivery::finish(&mut f.env).unwrap_err();
+        assert!(error.message.contains("removal."), "{error}");
+        assert!(f.queue.join("results/review.json").exists());
+        assert_eq!(queue::load_queue(&f.queue).unwrap(), before);
+        assert!(occupied_slots().unwrap() > 0);
+        assert_eq!(f.env.delivery["phase"], "cleaning");
+        assert!(delivery::execute(&mut f.env, &delivery::local::Local).is_err());
+        f.env.release_ownership();
+        let binary = std::env::var_os("HERDR_TEST_RELEASE_BIN")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_herdr-flow").into());
+        let output = Command::new(binary)
+            .args(["delivery", "finish", "--task", "job"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("removal."),
+            "{output:?}"
+        );
+        assert!(f.queue.join("results/review.json").exists());
+        assert_eq!(queue::load_queue(&f.queue).unwrap(), before);
+        f.env = restore_environment("job").unwrap();
+    }
+    f.env.delivery["removal"] = J::Null;
+    f.env.persist().unwrap();
+    f.env.release_ownership();
+    f.env = restore_environment("job").unwrap();
+    delivery::finish(&mut f.env).unwrap();
+    f.clean();
+}
