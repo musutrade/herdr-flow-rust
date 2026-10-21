@@ -113,30 +113,70 @@ fn native_receipt_uses_durable_delivery_identity_after_watcher_moves_on() {
 #[test]
 #[ignore = "requires selected OpenCode 1.19.3 config/model and native shell permission"]
 fn installed_real_opencode_receiver_readiness_and_ack() {
+    run_native_receiver(false);
+}
+
+#[test]
+#[ignore = "requires selected native model: real developer result and coordinator ACK/application"]
+fn installed_real_opencode_developer_result_is_applied_by_native_receiver() {
+    run_native_receiver(true);
+}
+
+fn run_native_receiver(apply_development: bool) {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
     let mut env = environment(temp.path());
     let cwd = env.workspace_root.join("receiver");
     fs::create_dir(&cwd).unwrap();
     let root = task_runtime::prepare(&env, "real-receiver").unwrap();
+    let worker_root = apply_development.then(|| task_runtime::prepare(&env, "review").unwrap());
+    let artifact_roots: Vec<_> = if apply_development {
+        ["source", "acceptance"]
+            .iter()
+            .map(|name| {
+                let path = env.workspace_root.join(name);
+                common::create_dir_all(&path).unwrap();
+                path
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Native launch restricts writes to this runtime root and cwd. Coordinator
     // state must live inside that boundary, not in a sibling of the runtime.
     let q = root.join("queue");
     let guard = root.join("guard");
-    let _failure_evidence = FailureEvidence(vec![
+    let mut evidence_paths = vec![
         root.join("server.log"),
         guard.join("foreground.log"),
         q.join("foreground.log"),
         q.join("queue.json"),
         q.join("readiness.json"),
         guard.join("submission.json"),
-    ]);
+    ];
+    if let Some(worker_root) = &worker_root {
+        evidence_paths.extend([
+            worker_root.join("server.log"),
+            worker_root.join("submission.json"),
+        ]);
+    }
+    let _failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
     // Only an explicit operator opt-in may widen the disposable copy's directory
     // permission. All other native approvals still block this bounded test.
     if std::env::var("HERDR_LIVE_ALLOW_OWNED_EXTERNAL_DIR").as_deref() == Ok("1") {
         allow_owned_external_directory(&mut config, &root);
+        if let Some(worker_root) = &worker_root {
+            // The coordinator reads the real collector report, but native kernel
+            // confinement still prevents writes to this sibling worker runtime.
+            allow_owned_external_directory(&mut config, worker_root);
+        }
+        for artifact_root in &artifact_roots {
+            // Read-only to this coordinator at the kernel layer; these are
+            // exact disposable test checkouts, never operator repositories.
+            allow_owned_external_directory(&mut config, artifact_root);
+        }
     }
     let instructions = cwd.join("receiver-instructions.md");
     let binary = util::shell_quote(env!("CARGO_BIN_EXE_herdr-flow"));
@@ -144,6 +184,12 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
     fs::write(&instructions, format!(
         "This is an authorized disposable receiver integration test. Do not delegate or create sessions. Upon receiving the queue notification, use its exact OPENCODE_SESSION_ID to execute the exact ACK command in that notification first. If it succeeds, run {binary} queue readiness --state-dir {queue_path} and require active_wakeup=true. An unacknowledged active delivery intentionally makes readiness false; do not treat that as permission to edit state. Retry only lock-busy errors for at most 15 seconds. Do not fabricate JSON or edit queue/watch files. ACK means receipt only. Then finish your turn. No other task work is authorized."
     )).unwrap();
+    if apply_development {
+        fs::write(&instructions, format!(
+            "Authorized disposable coordinator test. Do not delegate or create sessions. Exactly one real development result for task review will arrive. Read the notification and exact bound collector evidence. Use the exact OPENCODE_SESSION_ID from the notification for every herdr-flow command. First execute its exact queue ack command. Then read current queue.json, task review state_version and pending event ID; read the actual collector report referenced by the event's evidence/result, using its output object unchanged. Write an application JSON in cwd with task=review, current state_version, exact event, output from that collector, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence pointing to {release}, next_action={{kind:complete}}. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE. Do not edit queue, guard, reports, or tracked artifacts directly; do not fabricate output or verdicts. Development completion must leave project.approved null. Finally run {binary} queue readiness --state-dir {queue_path}, require active_wakeup=true, and finish. Retry only lock-busy errors for at most15seconds. The driver stops and reaps the developer immediately after production collection; before applying read its factual release receipt at {release}. If this receipt is not present yet, wait up to15seconds for that local file; do not infer release or fabricate it. This is not independent acceptance or delivery. Do not inspect herdr-flow source, operator repositories, or any paths outside the supplied disposable roots. The task-apply schema and command above are complete; write only your application JSON in cwd. No repository search is authorized.",
+            release=root.join("developer-release.json").display()
+        )).unwrap();
+    }
     let items = config
         .as_object_mut()
         .unwrap()
@@ -211,22 +257,40 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
             Err(e) => panic!("enable: {e}"),
         }
     }
-    queue::add(
-        &q,
-        &json!({"id":"receiver-proof","task":"receiver-proof","epoch":1,
+    let development_cwd = apply_development.then(|| setup_in_queue(&env, "development", &q).1);
+    let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+    let development_result = if let Some(development_cwd) = development_cwd {
+        git(&development_cwd, &["config", "user.name", "Native fixture"]);
+        git(
+            &development_cwd,
+            &["config", "user.email", "native@example.invalid"],
+        );
+        let (worker, result) = acceptance_live::native(&mut env, &q, &development_cwd, "review",
+            "Complete the authorized development assignment: change file to exactly version B and commit locally. Do not write an acceptance verdict. Stay within this checkout.");
+        assert_ne!(worker["session"], registered["session"]);
+        util::atomic_write_json(&root.join("developer-release.json"),
+            &json!({"session":worker["session"],"runtime":worker_root,"status":"server stopped and reaped after terminal collection"})).unwrap();
+        Some(result)
+    } else {
+        let _queue_lock = queue::locked(&q, true).unwrap();
+        queue::add(
+            &q,
+            &json!({"id":"receiver-proof","task":"receiver-proof","epoch":1,
         "owner":"test-driver","reason":"verify native receipt","condition":"ACK only",
         "kind":"signal","timeout_seconds":240}),
-    )
-    .unwrap();
-    queue::signal(
-        &q,
-        "receiver-proof",
-        "complete",
-        "Disposable notification; not task acceptance",
-        None,
-    )
-    .unwrap();
-    let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+        )
+        .unwrap();
+        queue::signal(
+            &q,
+            "receiver-proof",
+            "complete",
+            "Disposable notification; not task acceptance",
+            None,
+        )
+        .unwrap();
+        None
+    };
+
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Ok(submission) = util::read_json(&guard.join("submission.json")) {
@@ -245,7 +309,9 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
                     && readiness["last_confirmed_receipt"]["session"] == registered["session"]
                 {
                     if let Ok(submission) = util::read_json(&guard.join("submission.json")) {
-                        if submission["phase"] == "complete" {
+                        let applied =
+                            !apply_development || state["tasks"]["review"]["phase"] == "completed";
+                        if submission["phase"] == "complete" && applied {
                             break;
                         }
                     }
@@ -269,7 +335,11 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
         .limit(8 * 1024 * 1024)
         .read_json()
         .unwrap();
-    for action in ["queue ack", "queue readiness"] {
+    let mut required_actions = vec!["queue ack", "queue readiness"];
+    if apply_development {
+        required_actions.push("queue task-apply");
+    }
+    for action in required_actions {
         let observed = rows
             .as_array()
             .unwrap()
@@ -290,6 +360,50 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
             observed,
             "native session lacks a completed shell invocation of {action}"
         );
+    }
+    if let Some(result) = development_result {
+        let state = queue::load_queue(&q).unwrap();
+        assert!(state["tasks"]["project"]["approved"].is_null());
+        assert_eq!(state["tasks"]["review"]["pending"], json!([]));
+        let output = &result["output"];
+        assert_eq!(
+            git(
+                Path::new(output["location"].as_str().unwrap()),
+                &["show", &format!("{}:file", output["id"].as_str().unwrap())]
+            ),
+            "version B"
+        );
+        assert_eq!(
+            state["tasks"]["project"]["artifacts"][output["id"].as_str().unwrap()]["object"],
+            *output
+        );
+        let events = state["events"].as_object().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one real developer result expected"
+        );
+        let (event_id, event) = events.iter().next().unwrap();
+        assert_eq!(event["wait"], "review");
+        assert_eq!(event["binding"], result["context"]["binding"]);
+        assert_eq!(event["outcome"], result["outcome"]);
+        assert_eq!(event["evidence"], json!(q.join("results/review.json")));
+        let signal = util::read_json(Path::new(event["evidence"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            signal["evidence"],
+            json!(worker_root
+                .as_ref()
+                .unwrap()
+                .join("submissions")
+                .join(format!("{}.json", result["message_id"].as_str().unwrap())))
+        );
+        let report = util::read_json(Path::new(signal["evidence"].as_str().unwrap())).unwrap();
+        assert_eq!(report["output"], *output);
+        assert_eq!(report["session"], result["session"]);
+        assert_eq!(event["acknowledged"], true);
+        assert_eq!(event["applied"], true);
+        let delivery = acknowledged_delivery(&state, session_id).unwrap();
+        assert_eq!(state["deliveries"][delivery]["events"], json!([event_id]));
     }
     destroy_environment(&env).unwrap();
     for child in [&mut server, &mut guard_child, &mut queue_child] {

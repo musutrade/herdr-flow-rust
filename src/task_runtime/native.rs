@@ -458,10 +458,38 @@ fn dispatch_opencode(root: &Path, journal: &J, state: &J) -> Result<J> {
     )?;
     let path = root.join("input.json");
     util::atomic_write_json(&path, &journal["packet"])?;
-    crate::opencode::session::dispatch(
-        root,
-        &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path}),
-    )
+    // Keep this runtime's guard lock while retrying only pre-submission lock
+    // contention. The adapter durably writes submission.json before its POST;
+    // once that file exists, even a StateBusy error must never trigger a resend.
+    retry_unsent(root, std::time::Duration::from_secs(15), || {
+        crate::opencode::session::dispatch(
+            root,
+            &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path}),
+        )
+    })
+}
+
+fn retry_unsent(
+    root: &Path,
+    timeout: std::time::Duration,
+    mut send: impl FnMut() -> Result<J>,
+) -> Result<J> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match send() {
+            Err(error) if unsent_contention(root, &error, deadline) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn unsent_contention(root: &Path, error: &FlowError, deadline: std::time::Instant) -> bool {
+    error.kind == crate::error::ErrorKind::StateBusy
+        && std::time::Instant::now() < deadline
+        && matches!(std::fs::symlink_metadata(root.join("submission.json")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J> {
@@ -689,6 +717,59 @@ fn healthy_opencode(api: &dyn Api) -> Result<J> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dispatch_retries_only_before_the_submission_journal() {
+        use crate::error::ErrorKind;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dispatch.json"), "sending").unwrap();
+        let mut calls = 0;
+        let value = retry_unsent(dir.path(), Duration::from_secs(1), || {
+            calls += 1;
+            if calls == 1 {
+                return Err(FlowError::new(ErrorKind::StateBusy, "queue busy"));
+            }
+            std::fs::write(dir.path().join("submission.json"), "sending").unwrap();
+            Ok(json!({"sent":true}))
+        })
+        .unwrap();
+        assert_eq!(value["sent"], true);
+        assert_eq!(calls, 2);
+        assert_eq!(
+            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
+            b"sending"
+        );
+        calls = 0;
+        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
+            calls += 1;
+            Err(FlowError::new(
+                ErrorKind::StateBusy,
+                "busy after possible send",
+            ))
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+        std::fs::remove_file(dir.path().join("submission.json")).unwrap();
+        calls = 0;
+        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
+            calls += 1;
+            Err(FlowError::io("transport outcome unknown"))
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+        calls = 0;
+        assert!(retry_unsent(dir.path(), Duration::ZERO, || {
+            calls += 1;
+            Err(FlowError::new(ErrorKind::StateBusy, "queue busy"))
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+        assert_eq!(
+            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
+            b"sending"
+        );
+    }
+
     use super::*;
     #[test]
     fn native_development_claims_one_writer_and_recovers_only_that_identity() {

@@ -58,8 +58,17 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(result.stdout).unwrap().trim().into()
 }
 fn setup(env: &TaskEnvironment, role: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let q = env.temp_root.join("queue");
+    queue::init(&q, None, 30).unwrap();
+    setup_in_queue(env, role, &q)
+}
+fn setup_in_queue(
+    env: &TaskEnvironment,
+    role: &str,
+    q: &Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = env.workspace_root.join("source");
-    fs::create_dir(&source).unwrap();
+    common::create_dir_all(&source).unwrap();
     git(&source, &["init", "-q"]);
     git(&source, &["config", "user.name", "Test"]);
     git(&source, &["config", "user.email", "test@example.invalid"]);
@@ -77,12 +86,15 @@ fn setup(env: &TaskEnvironment, role: &str) -> (std::path::PathBuf, std::path::P
             cwd.to_str().unwrap(),
         ],
     );
-    let q = env.temp_root.join("queue");
-    queue::init(&q, None, 30).unwrap();
-    let mut state = queue::load_queue(&q).unwrap();
+    let now = herdr_flow::util::now();
+    let mut state = queue::load_queue(q).unwrap();
     progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"verify file",
         "basis":{"original":[if role=="development" {"change file to version B and commit locally"} else {"file must contain version A"}],"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
-        "authorization":[{"id":"verify","action":"review","source":"user"}]}),1.0).unwrap();
+        "authorization":[{"id":"verify","action":"review","source":"user"}]}),now).unwrap();
+    if role == "development" {
+        state["tasks"]["project"]["requirements"]["1"]["authorization"]["develop"] =
+            json!({"action":"development","source":"explicit disposable native development test"});
+    }
     for spec in [
         json!({"kind":"artifact","artifact":{"id":sha,"adapter":"git","location":source}}),
         json!({"kind":"candidate","candidate":sha,"reason":"review"}),
@@ -92,10 +104,10 @@ fn setup(env: &TaskEnvironment, role: &str) -> (std::path::PathBuf, std::path::P
         let mut spec = spec;
         spec["task"] = json!("project");
         spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
-        progress::lineage::action(&mut state, &spec, 2.0).unwrap();
+        progress::lineage::action(&mut state, &spec, now).unwrap();
     }
-    queue::save(&q, &mut state).unwrap();
-    (q, cwd)
+    queue::save(q, &mut state).unwrap();
+    (q.to_path_buf(), cwd)
 }
 
 #[test]

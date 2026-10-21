@@ -204,3 +204,12 @@ account, matching the runtime deployment contract. Read-only storage can prevent
 both failure-status persistence and socket unlink; the test deliberately checks
 recovery after storage becomes writable instead of promising cleanup during the
 failure. These checks do not replace #38's live model workflow acceptance.
+
+OpenCode dispatch retries pre-submission `StateBusy` for a bounded interval while
+holding the runtime guard lock. It never deletes `dispatch.json`, and it stops
+retrying once `submission.json` exists (the adapter writes it before its POST).
+This at-most-once guarantee assumes exclusive use of the task-runtime sender:
+other callers must honor that runtime guard and must not send directly through
+the same session concurrently. The absence check alone is not an atomic claim
+against a sender that ignores this ownership contract. This is not same-UID
+isolation or a generalized guarantee for independent concurrent send APIs.
