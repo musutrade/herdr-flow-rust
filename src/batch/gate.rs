@@ -230,6 +230,13 @@ fn call_options(stdin: Vec<u8>) -> util::process::CommandOptions {
         stdin: Some(stdin),
         stdout_limit: 65_536,
         stderr_limit: 65_536,
+        clear_env: true,
+        env: [
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("LANG".into(), "C".into()),
+        ]
+        .into_iter()
+        .collect(),
         ..Default::default()
     }
 }
