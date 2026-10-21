@@ -844,6 +844,14 @@ pub fn current_exe() -> Result<PathBuf> {
         .map_err(|error| FlowError::io(format!("cannot locate current executable: {error}")))
 }
 
+/// Open a real directory without following a leaf symlink, with CLOEXEC.
+///
+/// Success transfers one owned raw descriptor to the caller. Convert it exactly
+/// once into an owning File/OwnedFd or close it once; borrowing the number does
+/// not transfer ownership. The descriptor is not inherited across exec.
+/// This checks directory type and the leaf symlink only; callers enforcing a
+/// trusted state path must separately validate ownership and ancestor policy.
+/// Errors return no owned descriptor and do not create filesystem entries.
 pub fn open_dir_fd(path: &Path) -> Result<RawFd> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -853,7 +861,7 @@ pub fn open_dir_fd(path: &Path) -> Result<RawFd> {
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
