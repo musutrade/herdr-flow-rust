@@ -303,10 +303,13 @@ fn native_fixture_worker() {
     let config: J = serde_json::from_slice(&fs::read(root.join("fixture.json")).unwrap()).unwrap();
     let http = std::net::TcpListener::bind(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
         .unwrap();
+    let port = http.local_addr().unwrap().port();
     let cwd = std::path::PathBuf::from(config["cwd"].as_str().unwrap());
     std::thread::spawn(move || runtime_http::serve(http, &cwd));
     let listener = UnixListener::bind(root.join("server.sock")).unwrap();
     fs::set_permissions(root.join("server.sock"), fs::Permissions::from_mode(0o600)).unwrap();
+    herdr_flow::util::atomic_write_json(&root.join("fixture-ready.json"), &json!({"port":port}))
+        .unwrap();
     let thread = json!({"id":"11111111-1111-1111-1111-111111111111","cwd":config["cwd"],"modelProvider":"openai","model":"fixture","turns":[]});
     let mut saved = thread;
     for stream in listener.incoming() {
@@ -372,6 +375,38 @@ fn fixture_binary(root: &Path, cwd: &Path, port: u16) -> std::path::PathBuf {
     binary
 }
 
+fn fixture_log(root: &Path) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(file) = fs::File::open(root.join("server.log")) {
+        let _ = file.take(4096).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn fixture_ready(root: &Path, child: &mut std::process::Child) -> u16 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = child.try_wait().unwrap();
+        assert!(
+            status.is_none(),
+            "fixture exited {status:?}: {}",
+            fixture_log(root)
+        );
+        if let Ok(ready) = herdr_flow::util::read_json(&root.join("fixture-ready.json")) {
+            let port = ready["port"].as_u64().unwrap();
+            assert!((1..=65535).contains(&port));
+            return port as u16;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture readiness timed out: {}",
+            fixture_log(root)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -380,22 +415,20 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         let mut env = environment(temp.path());
         let (q, cwd) = setup(&env, "acceptance");
         let root = task_runtime::prepare(&env, "review-a1").unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let binary = fixture_binary(&root, &cwd, port);
+        // Let the worker retain the listener selected by the kernel. Never
+        // release a reserved port and later ask another process to rebind it.
+        let binary = fixture_binary(&root, &cwd, 0);
         // Synthetic process exposes both protocols. Launch via the OpenCode path
         // so CI does not need user namespaces merely to exercise RPC fixtures.
-        let spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,"model":{"providerID":"openai","id":"fixture"}});
-        let mut child = task_runtime::launch(&mut env, &root, &spec).unwrap();
-        for _ in 0..100 {
-            if root.join("server.sock").exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // The synthetic binary ignores launch argv; replace the placeholder
+        // runtime port with the readiness handshake before any HTTP client.
+        let spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,"model":{"providerID":"openai","id":"fixture"}});
+        let mut child = task_runtime::launch(&mut env, &root, &spec)
+            .unwrap_or_else(|error| panic!("{error}; fixture log: {}", fixture_log(&root)));
+        let port = fixture_ready(&root, &mut child);
         let mut runtime = herdr_flow::util::read_json(&root.join("runtime.json")).unwrap();
         runtime["adapter"] = json!(adapter);
+        runtime["port"] = json!(port);
         herdr_flow::util::atomic_write_json(&root.join("runtime.json"), &runtime).unwrap();
         if adapter == "codex" {
             task_runtime::start_broker(
