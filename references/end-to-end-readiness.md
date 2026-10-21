@@ -250,3 +250,9 @@ that a native coordinator can execute customer delivery, that a driver can retai
 environment ownership while a CLI restores it, or that the fixture covers
 repair/restart, twenty tasks, Codex equivalence or a complete outside-root
 inventory. Failure evidence and prior live/scenario failures are retained.
+
+Final local delivery live1 passed in 95.52s with the actual native roles and Local
+Git executor. The selected configuration file remained byte-for-byte unchanged
+under the external runner. The formal ref and version B content survived finish;
+the unrelated asset retained its bytes and device/inode identity. This one run
+does not establish twenty completed tasks, repair/restart or Codex equivalence.

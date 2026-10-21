@@ -100,8 +100,12 @@ fn setup_in_queue(
     let mut state = queue::load_queue(q).unwrap();
     progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"verify file",
         "basis":{"original":[if role=="development" {"change file to version B and commit locally"} else {"file must contain version A"}],"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
-        "authorization":[{"id":"verify","action":"review","source":"user"},
-            {"id":"deliver","action":"delivery","source":"explicit disposable native delivery test"}]}),now).unwrap();
+        "authorization":[{"id":"verify","action":"review","source":"user"}]}),now).unwrap();
+    if let Some(target) = env.delivery_targets.first() {
+        state["tasks"]["project"]["requirements"]["1"]["authorization"]["deliver"] =
+            json!({"action":"delivery","source":"explicit disposable native delivery test"});
+        state["tasks"]["project"]["requirements"]["1"]["basis"]["endpoint"] = json!(target.path);
+    }
     if role == "development" {
         state["tasks"]["project"]["requirements"]["1"]["authorization"]["develop"] =
             json!({"action":"development","source":"explicit disposable native development test"});

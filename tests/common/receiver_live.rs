@@ -146,6 +146,11 @@ fn run_native_receiver(apply_development: bool, apply_acceptance: bool, apply_de
     if apply_delivery {
         fs::write(&user_asset, "unrelated user asset").unwrap();
     }
+    use std::os::unix::fs::MetadataExt;
+    let user_identity = apply_delivery.then(|| {
+        let m = fs::metadata(&user_asset).unwrap();
+        (m.dev(), m.ino())
+    });
     let mut env = if apply_delivery {
         environment_project(temp.path(), &formal_target)
     } else {
@@ -516,8 +521,8 @@ fn run_native_receiver(apply_development: bool, apply_acceptance: bool, apply_de
     if apply_delivery {
         // The native coordinator has finished both notifications. Stop the queue
         // watcher before the external driver takes the queue lock for delivery.
-        let _ = queue_child.kill();
-        let _ = queue_child.wait();
+        queue_child.kill().unwrap();
+        queue_child.wait().unwrap();
         let artifact = &development_result.as_ref().unwrap()["output"];
         external_driver_delivery(
             &mut env,
@@ -526,6 +531,7 @@ fn run_native_receiver(apply_development: bool, apply_acceptance: bool, apply_de
             &user_asset,
             artifact,
             delivery_expected.as_ref().unwrap(),
+            user_identity.unwrap(),
         );
         for child in [&mut server, &mut guard_child] {
             child.wait().unwrap();
@@ -550,7 +556,11 @@ fn external_driver_delivery(
     user_asset: &Path,
     artifact: &J,
     expected: &str,
+    user_identity: (u64, u64),
 ) {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
     let artifact_id = artifact["id"].as_str().unwrap();
     assert_eq!(
         git(target, &["rev-parse", "refs/heads/main"]).as_str(),
@@ -568,6 +578,10 @@ fn external_driver_delivery(
         "expected":expected,
         "authorization":"deliver"
     });
+    assert_eq!(
+        state["tasks"]["project"]["requirements"]["1"]["basis"]["endpoint"],
+        json!(target)
+    );
     spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
     let intent = delivery::prepare(env, q, &spec, &delivery::local::Local).unwrap();
     assert_eq!(intent["artifact"]["id"], json!(artifact_id));
@@ -599,10 +613,14 @@ fn external_driver_delivery(
     );
 
     delivery::finish(env).unwrap();
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
+    assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
     assert!(!env.workspace_root.exists());
     assert!(!env.temp_root.exists());
     assert!(!env.state_file().exists());
     assert!(!is_registered("project").unwrap());
+    assert!(!cleanup_state_path("project").unwrap().exists());
     assert_eq!(occupied_slots().unwrap(), 0);
     assert!(!q.exists());
     assert_eq!(
