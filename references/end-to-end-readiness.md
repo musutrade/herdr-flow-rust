@@ -299,9 +299,10 @@ the queue watcher before delivery. The trusted driver prepares and executes the
 Local Git delivery exactly once to `confirmed`, then transfers custody through a
 test-only handoff guard instead of dropping an environment that would be
 destroyed. The inner ownership lock is released; the guard suppresses normal
-destructive Drop only for the handoff window and can restore/finish or destroy an
-owned environment if the handoff fails. No unsafe operation or `mem::forget` is
-used.
+destructive Drop only for the handoff window and can restore/finish a confirmed
+environment or resume its cleanup plan if the handoff fails. Cleanup errors are
+reported; the guard does not erase state through a fallback destroy. No unsafe
+operation or `mem::forget` is used.
 
 Fresh unmarked CLI processes restore the environment and run delivery
 `reconcile`, then `finish`; neither process runs `execute` again. Confirmed
@@ -313,3 +314,20 @@ target and user asset. Server/guard children are quiesced by finish and reaped b
 the parent; child failures are killed/reaped before fallback restore/finish.
 This is a disposable local delivery restart proof, not a general crash-recovery
 guarantee, supervisor daemon, or twenty-task acceptance.
+
+The handoff guard starts after confirmation succeeds. An assertion failure during
+prepare/execute, before custody transfer, still uses the fixture's ordinary
+environment destruction; it does not prove delivery-specific recovery of a
+frozen queue or partial delivery journal. Native child waits require successful
+reaping, not a zero exit code: cleanup may terminate those processes. CLI
+reconcile/finish must both exit successfully. Cleanup diagnostics are bounded;
+the enclosing disposable fixture is not a durable recovery archive.
+
+Local verification on 2026-10-21 passed the opt-in confirmed restart scenario
+(1/1, 228.44s): four native notifications, actual failed review and repair,
+fresh passing review, one confirmed Local Git delivery, fresh CLI reconcile and
+finish, exact persisted intent/receipt, preserved target/user asset, and empty
+owned roots/registry/queue/slots before fixture teardown. The selected OpenCode
+config bytes were unchanged. Stable coverage and Rust 1.85 all-target tests each
+passed 473 tests with 11 ignored; the absolute CRAP threshold of 10 had no
+violations. These results do not close #38 or #32.

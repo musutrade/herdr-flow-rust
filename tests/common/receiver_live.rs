@@ -1037,9 +1037,9 @@ impl<'a> ChildReaper<'a> {
         reap_after_kill(self.guard, "guard watcher");
     }
     fn wait(mut self) {
-        self.armed = false;
         wait_bounded(self.server, "native server");
         wait_bounded(self.guard, "guard watcher");
+        self.armed = false;
     }
 }
 impl Drop for ChildReaper<'_> {
@@ -1073,6 +1073,7 @@ fn external_supervisor_restart(
     let workspace = env.workspace_root.clone();
     let temporary = env.temp_root.clone();
     let state_file = env.state_file().to_path_buf();
+    let mut custody;
     let mut reaper = ChildReaper::new(server, guard_child);
     let confirmed = confirm_delivery(
         &mut env,
@@ -1086,7 +1087,7 @@ fn external_supervisor_restart(
     let artifact_id = artifact["id"].as_str().unwrap();
     let intent_id = confirmed["id"].clone();
     let receipt = confirmed["receipt"].clone();
-    let mut custody = env.into_handoff();
+    custody = env.into_handoff();
 
     let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
     if !reconcile.status.success() {

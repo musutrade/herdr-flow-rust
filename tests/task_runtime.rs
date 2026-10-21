@@ -37,7 +37,7 @@ impl Drop for OwnedEnvironment {
 impl OwnedEnvironment {
     // Test-only custody transfer: release the inner lock, suppress this
     // wrapper's destructive Drop, and arm a guard that can finish a confirmed
-    // delivery (or destroy an owned environment) if the handoff fails.
+    // delivery or resume its cleanup plan if the handoff fails.
     fn into_handoff(mut self) -> HandoffGuard {
         self.cleanup_on_drop = false;
         let env = self.env.take().expect("live environment handle");
@@ -222,6 +222,7 @@ fn setup_in_queue(
 
 #[test]
 fn handoff_guard_resumes_a_plan_after_registry_removal() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
     let env = environment(temp.path());
     let workspace = env.workspace_root.clone();
