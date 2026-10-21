@@ -9,6 +9,14 @@ use std::{
     time::Duration,
 };
 
+/// Serve one task-owned broker until an error or external process termination.
+/// Root must contain valid runtime/journal state and the invoking process must
+/// carry its task instance marker. Acquires a nonblocking exclusive broker lock,
+/// recovers only attributable stale sockets, binds a socket and records ownership.
+/// No normal shutdown return is promised. Runtime/lock/socket identity changes
+/// fail closed; failures write best-effort status without masking the original
+/// error. Drop removes only the owned socket while retaining the lock through
+/// removal. Restart through the task runtime; do not blindly unlink replacements.
 pub fn serve(root: &Path) -> Result<()> {
     let owner = owner::Owner::acquire(root)?;
     let result = serve_owned(root, &owner);

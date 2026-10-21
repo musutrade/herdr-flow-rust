@@ -14,6 +14,11 @@ pub mod publication;
 
 /// Only a customer adapter may establish an external outcome, by inspecting the
 /// actual endpoint. A normal process exit or a coordinator's claim is not proof.
+/// Implementations must make preflight/observe non-submitting checks and report
+/// uncertainty as Unknown. Only execute may submit. An execute error may still
+/// mean the endpoint acted; observe must query external state before any retry.
+/// These semantic requirements are supplied by the trusted adapter, not enforced
+/// by the Rust type system.
 pub trait Executor {
     fn preflight(&self, intent: &J) -> Result<()>;
     fn execute(&self, intent: &J) -> Result<()>;
@@ -42,7 +47,12 @@ fn field(value: &J, key: &str) -> Result<String> {
 }
 
 /// Persist first, then freeze the parent under its queue lock. Retrying this
-/// preparation is safe; it never performs an external action.
+/// preparation is safe; it never calls Executor::execute.
+/// Requires an owned active environment and validated artifact/target/approval.
+/// Acquires the queue lock internally; callers must not hold that same lock.
+/// Journal and queue writes are separate: an error can leave intent persisted
+/// before the queue is frozen. Keep ownership and reconcile/retry preparation;
+/// do not infer submission from preparation. Executor preflight must be read-only.
 pub fn prepare(
     env: &mut TaskEnvironment,
     queue: &Path,
@@ -175,6 +185,12 @@ fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
 
 /// Save uncertainty before the one allowed submission. All retries must use
 /// reconcile, which performs only observation.
+/// Requires owned active state in phase prepared. Holds the queue lock through
+/// preflight, submission and observation; adapters must not reenter that lock.
+/// Persisting unknown precedes submission. Errors, including persistence errors,
+/// do not prove absence of an external effect; restore/reconcile the same intent
+/// rather than invoke execute again. Successful return can still report an
+/// unknown/failed/absent phase; inspect the returned journal.
 pub fn execute(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     validate_execution(env)?;
     let queue = field(&env.delivery, "queue")?;
@@ -216,6 +232,11 @@ fn ensure_owned(env: &TaskEnvironment) -> Result<()> {
     )
 }
 
+/// Query the adapter and persist the observed outcome without resubmitting.
+/// Requires an owned journal whose execution was attempted. Confirmed/cleaning
+/// phases return the existing journal without another query. Adapter observation
+/// errors become Unknown; persistence errors propagate after in-memory changes.
+/// Retain the journal and retry observation, never infer success from Ok alone.
 pub fn reconcile(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     ensure_owned(env)?;
     if env.delivery["phase"] == "confirmed" || env.delivery["phase"] == "cleaning" {
@@ -255,6 +276,9 @@ fn record_problem(env: &mut TaskEnvironment, phase: &str, reason: String) {
 }
 
 /// Explicit retry only after a fresh executor query proves no external effect.
+/// Requires owned absent state, observes again, persists prepared, then calls
+/// execute. This may submit a new external action and is not a generic error
+/// retry. Concurrent endpoint changes remain the trusted adapter's responsibility.
 pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     ensure_owned(env)?;
     ensure(
@@ -271,6 +295,11 @@ pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
 }
 
 /// Once confirmed, interruption can only resume destruction, never publication.
+/// Requires owned confirmed/cleaning state and an external lifecycle supervisor
+/// without the task marker. Persists cleaning, removes shared records and destroys
+/// disposable resources. An error can follow partial cleanup; retain plans/claims
+/// and resume cleanup instead of resubmitting. Success leaves no reusable task
+/// journal; this is not a repeatable publication call.
 pub fn finish(env: &mut TaskEnvironment) -> Result<()> {
     ensure_owned(env)?;
     ensure(
