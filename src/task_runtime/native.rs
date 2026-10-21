@@ -735,6 +735,10 @@ mod tests {
         .unwrap();
         assert_eq!(value["sent"], true);
         assert_eq!(calls, 2);
+        assert_eq!(
+            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
+            b"sending"
+        );
         calls = 0;
         assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
             calls += 1;
@@ -760,6 +764,10 @@ mod tests {
         })
         .is_err());
         assert_eq!(calls, 1);
+        assert_eq!(
+            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
+            b"sending"
+        );
     }
 
     use super::*;
