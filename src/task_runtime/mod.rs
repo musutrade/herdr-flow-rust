@@ -343,3 +343,42 @@ fn spawn_broker(root: &Path, mut cmd: Command) -> Result<Child> {
         .stderr(log)
         .spawn()?)
 }
+
+#[cfg(test)]
+mod broker_start_tests {
+    use super::*;
+    #[test]
+    fn readiness_requires_current_process_and_startup_failure_is_reported() {
+        let dir = crate::util::fs::test_tempdir();
+        let mut child = Command::new("true").spawn().unwrap();
+        assert!(await_broker(dir.path(), &mut child)
+            .unwrap_err()
+            .message
+            .contains("startup failed"));
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        util::atomic_write_json(&dir.path().join("broker-status.json"), &json!({
+            "pid":child.id(),"phase":"running","start_ticks":util::process::process_start_ticks(child.id())
+        })).unwrap();
+        let result = await_broker(dir.path(), &mut child);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        result.unwrap();
+    }
+    #[test]
+    fn stale_readiness_times_out_and_reaps_the_spawned_process() {
+        let dir = crate::util::fs::test_tempdir();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        util::atomic_write_json(
+            &dir.path().join("broker-status.json"),
+            &json!({
+                "pid":child.id(),"phase":"running","start_ticks":"0"
+            }),
+        )
+        .unwrap();
+        assert!(await_broker(dir.path(), &mut child)
+            .unwrap_err()
+            .message
+            .contains("deadline"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+}

@@ -13,12 +13,7 @@ pub(super) struct Owner {
 
 impl Owner {
     pub fn acquire(root: &Path) -> Result<Self> {
-        let runtime = util::read_state_json(root, "runtime.json")?;
-        let instance = required(&runtime, "instance")?;
-        ensure(
-            std::env::var(crate::task_env::MARKER_ENV).ok().as_deref() == Some(instance.as_str()),
-            "broker requires its task environment identity",
-        )?;
+        let instance = task_instance(root)?;
         let lock = util::FileLock::acquire(&root.join("broker.lock"), false)?
             .ok_or_else(|| FlowError::guard("broker owner is still active"))?;
         recover(root, &instance)?;
@@ -75,10 +70,18 @@ impl Drop for Owner {
     fn drop(&mut self) {
         let path = self.root.join("broker.sock");
         // Keep the exclusive lock through cleanup; never remove a replacement.
-        if socket_identity(&path).ok() == Some(self.socket) {
-            let _ = fs::remove_file(path);
-        }
+        let _ = remove_owned_socket(&path, self.socket);
     }
+}
+
+fn task_instance(root: &Path) -> Result<String> {
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    let instance = required(&runtime, "instance")?;
+    ensure(
+        std::env::var(crate::task_env::MARKER_ENV).ok().as_deref() == Some(instance.as_str()),
+        "broker requires its task environment identity",
+    )?;
+    Ok(instance)
 }
 
 fn socket_identity(path: &Path) -> Result<(u64, u64)> {
@@ -100,9 +103,12 @@ fn recover(root: &Path, instance: &str) -> Result<()> {
     let socket = socket_identity(&path)?;
     validate_previous_owner(root, instance, socket)?;
     require_no_listener(&path)?;
+    remove_owned_socket(&path, socket)
+}
+fn remove_owned_socket(path: &Path, socket: (u64, u64)) -> Result<()> {
     ensure(
-        socket_identity(&path)? == socket,
-        "broker socket changed during recovery",
+        socket_identity(path)? == socket,
+        "broker socket ownership changed before removal",
     )?;
     fs::remove_file(path)?;
     Ok(())
@@ -154,4 +160,35 @@ fn process_record(owner: &J) -> Result<(u64, String)> {
         "invalid broker owner start_ticks",
     )?;
     Ok((pid, start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn process_identity_distinguishes_live_reused_dead_and_invalid_records() {
+        let current = util::process::process_identity(std::process::id()).unwrap();
+        assert!(require_dead(&current)
+            .unwrap_err()
+            .message
+            .contains("still alive"));
+        let mut reused = current.clone();
+        reused["start_ticks"] = json!("0");
+        require_dead(&reused).unwrap();
+        for invalid in [
+            json!({}),
+            json!({"pid":0,"start_ticks":"1"}),
+            json!({"pid":1,"start_ticks":"bad"}),
+        ] {
+            assert!(require_dead(&invalid).is_err());
+        }
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let identity = util::process::process_identity(child.id()).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        require_dead(&identity).unwrap();
+    }
 }
