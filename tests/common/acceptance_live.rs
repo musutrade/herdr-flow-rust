@@ -1,7 +1,8 @@
 //! Real native role execution; coordinator/notification receiver is a test harness.
 use super::*;
 use herdr_flow::{herdr::receiver_factory, util};
-fn change(q: &Path, mut spec: J) -> J {
+pub(super) fn change(q: &Path, mut spec: J) -> J {
+    let _lock = queue::locked(q, true).unwrap();
     let mut s = queue::load_queue(q).unwrap();
     spec["task"] = json!("project");
     spec["state_version"] = s["tasks"]["project"]["state_version"].clone();
@@ -9,9 +10,9 @@ fn change(q: &Path, mut spec: J) -> J {
     queue::save(q, &mut s).unwrap();
     result
 }
-fn activity(name: &str, role: &str, input: &J) -> J {
+pub(super) fn activity(name: &str, role: &str, input: &J) -> J {
     json!({"activity":name,"role":role,"input":input,"session_epoch":1,
-        "result_wait":{"id":name,"kind":"signal","epoch":1,"assignment":name,"owner":role,"reason":"native role result","condition":"terminal report","timeout_seconds":300}})
+        "result_wait":{"id":name,"task":name,"kind":"signal","epoch":1,"assignment":name,"owner":role,"reason":"native role result","condition":"terminal report","timeout_seconds":600}})
 }
 fn port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -199,7 +200,11 @@ fn apply(q: &Path, name: &str, result: &J, next: &str) -> J {
     queue::save(q, &mut s).unwrap();
     s
 }
-fn clone_snapshot(env: &TaskEnvironment, artifact: &J, name: &str) -> std::path::PathBuf {
+pub(super) fn clone_snapshot(
+    env: &TaskEnvironment,
+    artifact: &J,
+    name: &str,
+) -> std::path::PathBuf {
     let cwd = env.workspace_root.join(name);
     git(
         &env.workspace_root,
