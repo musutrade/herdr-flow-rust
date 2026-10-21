@@ -301,3 +301,46 @@ fn existing_authorization_must_be_reviewed_before_requesting_clarification() {
     r["agreements_checked"] = json!(["request", "spec"]);
     assert!(submit(&mut s, "review", &r).is_err());
 }
+
+#[test]
+fn corrupt_gaps_reject_submission_and_application_without_partial_updates() {
+    for invalid in [J::Null, json!([]), json!(false), json!({"bad":null})] {
+        let (_dir, mut s, _) = fixture();
+        s["tasks"]["parent"]["open_gaps"] = invalid.clone();
+        let before = s.clone();
+        let error = submit(&mut s, "review", &report("passed")).unwrap_err();
+        assert!(error.message.contains("open_gaps"), "{error}");
+        assert_eq!(s, before);
+        s["tasks"]["parent"]["open_gaps"] = json!({});
+        submit(&mut s, "review", &report("failed")).unwrap();
+        let id = event(&mut s, "review", "complete");
+        let spec = application(&s, "review", &id, "repair");
+        s["tasks"]["parent"]["open_gaps"] = invalid;
+        let before = s.clone();
+        assert!(progress::apply(&mut s, &spec, 4.0).is_err());
+        assert_eq!(s, before);
+        s["tasks"]["parent"]["open_gaps"] = json!({});
+        progress::apply(&mut s, &spec, 4.0).unwrap();
+        assert_eq!(
+            s["tasks"]["parent"]["open_gaps"].as_object().unwrap().len(),
+            1
+        );
+    }
+}
+
+#[path = "common/state_cli.rs"]
+mod state_cli;
+
+#[test]
+fn cli_rejects_corrupt_gap_and_verdict_containers() {
+    for field in ["open_gaps", "verdicts"] {
+        for invalid in [J::Null, json!([]), json!(false)] {
+            let (_dir, mut s, _) = fixture();
+            submit(&mut s, "review", &report("failed")).unwrap();
+            let id = event(&mut s, "review", "complete");
+            let spec = application(&s, "review", &id, "repair");
+            s["tasks"]["parent"][field] = invalid;
+            state_cli::rejects_without_writing(s, &spec, "task-apply", field);
+        }
+    }
+}

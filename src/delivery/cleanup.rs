@@ -89,6 +89,7 @@ fn remove_shared(env: &mut TaskEnvironment, root: &Path) -> Result<()> {
     let mut state = crate::queue::load_queue(root)?;
     validate_foreign_tasks(env, root, &state)?;
     prepare_removal(env, &state)?;
+    validate_removal(&env.delivery["removal"])?;
     remove_sidecars(root, &env.delivery["removal"], &mut state)?;
     prune(&mut state, &env.delivery["removal"]);
     clear_receiver(root, &state)?;
@@ -141,6 +142,20 @@ fn prepare_removal(env: &mut TaskEnvironment, state: &J) -> Result<()> {
     env.delivery["removal"] = json!({"tasks":tasks,"waits":waits,"events":events});
     env.persist()
 }
+fn validate_removal(plan: &J) -> Result<()> {
+    for key in ["tasks", "waits", "events"] {
+        let values = plan[key]
+            .as_array()
+            .ok_or_else(|| FlowError::progress(format!("removal.{key} must be an array")))?;
+        for value in values {
+            let id = value.as_str().ok_or_else(|| {
+                FlowError::progress(format!("removal.{key} entry must be a string"))
+            })?;
+            safe_id(id)?;
+        }
+    }
+    Ok(())
+}
 fn contains(plan: &J, key: &str, id: &J) -> bool {
     plan[key].as_array().is_some_and(|a| a.contains(id))
 }
@@ -156,8 +171,13 @@ fn safe_id(id: &str) -> Result<()> {
     )
 }
 fn remove_sidecars(root: &Path, plan: &J, state: &mut J) -> Result<()> {
-    for id in plan["waits"].as_array().unwrap() {
-        let id = id.as_str().unwrap();
+    let waits = plan["waits"]
+        .as_array()
+        .ok_or_else(|| FlowError::progress("removal.waits must be an array"))?;
+    for id in waits {
+        let id = id
+            .as_str()
+            .ok_or_else(|| FlowError::progress("removal.waits entry must be a string"))?;
         safe_id(id)?;
         util::remove_state_file(&root.join("results"), &format!("{id}.json"))?;
     }

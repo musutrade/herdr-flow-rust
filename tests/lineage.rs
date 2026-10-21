@@ -621,3 +621,81 @@ fn opencode_successor_preserves_adapter_through_writer_and_takeover() {
         "opencode"
     );
 }
+
+#[test]
+fn corrupt_inherited_permissions_fail_without_mutating_requirements_or_activities() {
+    let directory = common::tempdir().unwrap();
+    let input = file(directory.path(), "input", "candidate", None);
+    for malformed in [
+        J::Null,
+        json!([]),
+        json!(false),
+        json!({"develop":null}),
+        json!({"develop":[]}),
+    ] {
+        for operation in ["revise", "activity"] {
+            let mut s = state();
+            add(&mut s, &input);
+            s["tasks"]["project"]["requirements"]["1"]["authorization"] = malformed.clone();
+            let before = s.clone();
+            let spec = if operation == "revise" {
+                let mut spec = plan();
+                spec["kind"] = json!("revise");
+                spec.as_object_mut().unwrap().remove("authorization");
+                spec
+            } else {
+                activity_spec("dev", "development", &input)
+            };
+            let error = mutate(&mut s, spec).unwrap_err();
+            assert!(
+                error.message.contains("requirement.authorization"),
+                "{error}"
+            );
+            assert_eq!(s, before);
+        }
+    }
+    let mut s = state();
+    s["tasks"]["project"]["requirements"]["1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("authorization");
+    let mut spec = plan();
+    spec["kind"] = json!("revise");
+    spec.as_object_mut().unwrap().remove("authorization");
+    let before = s.clone();
+    assert!(mutate(&mut s, spec.clone()).is_err());
+    assert_eq!(s, before);
+    s["tasks"]["project"]["requirements"]["1"]["authorization"] = json!({});
+    let before = s.clone();
+    let error = mutate(&mut s, spec.clone()).unwrap_err();
+    assert!(error.message.contains("record existing authorization"));
+    assert_eq!(s, before);
+    s["tasks"]["project"]["requirements"]["1"]["authorization"] =
+        state()["tasks"]["project"]["requirements"]["1"]["authorization"].clone();
+    mutate(&mut s, spec).unwrap();
+    assert_eq!(s["tasks"]["project"]["requirement_revision"], 2);
+}
+
+#[path = "common/state_cli.rs"]
+mod state_cli;
+
+#[test]
+fn cli_rejects_corrupt_authorization_and_requirement_containers() {
+    for invalid in [J::Null, json!([]), json!(false), json!({"develop": false})] {
+        let mut s = state();
+        s["tasks"]["project"]["requirements"]["1"]["authorization"] = invalid;
+        let mut spec = plan();
+        spec["kind"] = json!("revise");
+        spec["state_version"] = s["tasks"]["project"]["state_version"].clone();
+        spec.as_object_mut().unwrap().remove("authorization");
+        state_cli::rejects_without_writing(s, &spec, "task-lineage", "requirement.authorization");
+    }
+    for invalid in [J::Null, json!([]), json!(false), json!({"1":false})] {
+        let mut s = state();
+        s["tasks"]["project"]["requirements"] = invalid;
+        let mut spec = plan();
+        spec["kind"] = json!("revise");
+        spec["state_version"] = s["tasks"]["project"]["state_version"].clone();
+        state_cli::rejects_without_writing(s, &spec, "task-lineage", "requirement");
+    }
+}

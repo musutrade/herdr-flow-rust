@@ -125,6 +125,9 @@ pub(super) fn record(parent: &mut J, child: &J, spec: &J) -> Result<()> {
         next.is_object(),
         "acceptance requires a structured continuation",
     )?;
+    if let Some(verdicts) = parent.get("verdicts") {
+        object(verdicts, "verdicts")?;
+    }
     parent["approved"] = Value::Null;
     let id = child["task"].as_str().unwrap_or_default();
     if spec["verdict"].is_null() {
