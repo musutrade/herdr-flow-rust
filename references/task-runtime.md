@@ -181,3 +181,26 @@ PID、进程启动时间和 socket 的 device/inode。启动器等待当前子�
 单元测试中。可设置 `HERDR_TEST_RELEASE_BIN` 为对应 release 二进制路径重跑
 生命周期回归，验证 `panic=abort` 下的存活、退出和重启；这些协议测试不等同于
 #38 的真实模型全流程验收。
+
+### #44 acceptance evidence
+
+The reliability changes were delivered in PRs #49 (captured output budgets),
+#50 (persistent state validation) and #51 (broker isolation and ownership).
+The follow-up acceptance tests exercise real broker subprocesses without a live
+model. They use the same optional `HERDR_TEST_RELEASE_BIN` override as the earlier
+lifecycle suite.
+
+| Contract | Regression evidence |
+| --- | --- |
+| Bad connections do not poison later native calls | `malformed_connections_are_followed_by_successful_native_requests` sends malformed, empty, truncated and abandoned frames, then checks actual `thread/read` results on the same broker |
+| Journal write failure is fatal and does not replay | `journal_write_failure_stops_without_replaying_and_can_recover` removes directory write permission after the native request arrives, checks EOF and exit 2, preserves the old journal, and restores permissions before a fresh broker recovers the stale socket |
+| Bounded reads and writes | Broker transport tests cover exact byte limits, fragmented frames, slow drip deadlines, nonreading peers and response size; lifecycle tests cover the service read deadline |
+| Ownership and recovery | Lifecycle tests cover duplicate owners, SIGKILL recovery, replaced socket and lock paths, and runtime instance loss |
+| Corrupt persistent state | `lineage`, `acceptance`, `delivery` and broker lifecycle tests exercise invalid containers and field types; CLI variants check failure without partial state writes |
+| Output budgets and cleanup | `output_budget` covers stdout/stderr limits, exact boundaries, descendant cleanup and preservation of an unrelated process |
+
+The write-permission regression runs under the ordinary unprivileged test
+account, matching the runtime deployment contract. Read-only storage can prevent
+both failure-status persistence and socket unlink; the test deliberately checks
+recovery after storage becomes writable instead of promising cleanup during the
+failure. These checks do not replace #38's live model workflow acceptance.
