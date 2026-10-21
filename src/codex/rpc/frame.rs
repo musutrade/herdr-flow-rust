@@ -4,7 +4,9 @@ use super::{protocol_error, MAX_MESSAGE};
 use crate::error::Result;
 use crate::util::pyjson::random_bytes;
 
-/// RFC 6455 XOR masking.
+/// RFC 6455 XOR masking. Empty masks leave payload bytes unchanged; otherwise
+/// at least four mask bytes are required and only the first four are used.
+/// Empty payloads return immediately; size-limit errors precede mask validation.
 pub fn apply_mask(payload: &[u8], mask: &[u8], max_message: usize) -> Result<Vec<u8>> {
     if payload.is_empty() {
         return Ok(Vec::new());
@@ -12,7 +14,10 @@ pub fn apply_mask(payload: &[u8], mask: &[u8], max_message: usize) -> Result<Vec
     if payload.len() > max_message {
         return Err(protocol_error("payload exceeds maximum size"));
     }
-    let mask = if mask.is_empty() { &[0u8][..] } else { mask };
+    let mask = if mask.is_empty() { &[0u8; 4][..] } else { mask };
+    if mask.len() < 4 {
+        return Err(protocol_error("WebSocket mask must contain four bytes"));
+    }
     Ok(payload
         .iter()
         .enumerate()
