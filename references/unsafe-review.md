@@ -201,8 +201,26 @@ are still pending. #46 remains open.
 Creation, persistence, restoration, process registration, descriptor registration,
 lock release and recovery now state caller ownership, partial-failure and recovery
 contracts. Restore reconstructs metadata but deliberately cannot reconstruct live
-OS file descriptors. A follow-up must check alignment between restored open_files
-and the new empty in-memory file_handles list when new handles are registered and
-unregistered; this review does not yet establish that mixed lifecycle as correct.
+OS file descriptors. This review identified alignment between restored open_files
+and the new empty in-memory file_handles list as a follow-up; the regression and
+correction are recorded below.
 Landlock syscall layout and remaining public delivery/broker contracts still need
 an explicit inventory reconciliation. #46 remains open.
+
+
+### Restored descriptor registration correction
+
+A deterministic lifecycle regression confirmed that restoring metadata for path A,
+registering a new descriptor for B, then unregistering A closed B's descriptor.
+The durable path vector and transient descriptor vector were indexed together even
+though restore clears only the latter. The same mismatch after explicit descriptor
+release could also leave B's descriptor open when B was unregistered first.
+
+Transient descriptors are now owned by a map keyed by the resolved registration
+path. Unregistration removes only that path's owner, independently of metadata
+order or the presence of metadata-only paths. The map is still serde-skipped;
+existing durable documents require no migration. Duplicate-path registration
+retains its existing no-op/drop semantics, and restore still does not reopen files.
+The tests exercise both restore/old-first removal and release/new-first removal,
+including repeated unregistration and normal cleanup. Persistence errors still do
+not roll back an already closed descriptor, as the API contract now states.
