@@ -155,3 +155,33 @@ required one-integer ABI and now uses only a lock-free atomic store. Restoring
 saved handlers is best effort; concurrent signal-disposition mutation is outside
 the documented API contract. Remaining TUI FD and /proc discovery reviews are
 still pending; #46 remains open.
+
+### TUI FD and connect-wait review
+
+| Site / unsafe operations | Preconditions and conclusion |
+| --- | --- |
+| `current_uid` / geteuid | No memory arguments; effective UID is an ownership input, not isolation from other processes of that UID. |
+| `executable_access` / access | CString outlives the call; X_OK is scalar. The access probe is not a guarantee that a later pathname exec observes the same file. |
+| `open_upstream_socket`, `finish_connect`, `close_socket` | Fresh SOCK_CLOEXEC descriptor has exactly one raw owner until success transfers it once to UnixStream. Ordinary errors close once; peer-verification errors drop the stream. This is not an unwind-proof RAII raw intermediate: panic=abort releases OS descriptors and no recoverable panic path is assumed between acquisition and transfer. |
+| `socket_flags`, `set_nonblocking` / fcntl | Connect retains ownership; F_GETFL/F_SETFL only borrow the scalar fd, preserve existing flags and propagate errors. |
+| `fill_address`, `sockaddr_path_offset`, `start_connect` | Zero is valid for the Linux integer/byte record. Checked name length leaves space for NUL or abstract prefix. Pointer subtraction uses fields of one live record; computed connect length fits that record. No raw pointer outlives the call. |
+| `poll_once`, `read_socket_error` | Initialized single pollfd and c_int/socklen_t outputs remain live for the calls; socket remains owned. SO_ERROR returns the expected Linux integer layout. Poll errors are captured immediately before other work. |
+| `install_directory_lock` | Fresh directory fd from open_dir_fd transfers exactly once to File before further fallible operations; O_CLOEXEC already established by PR59. |
+| `poll_events`, listener listen | Poll vector is not resized during call, each fd remains owned by the bridge, length equals initialized elements. Listener remains borrowed through listen; failure drops its Rust owner through the caller. |
+| `open_lock_file`, `lock_exclusive` | Live parent fd and CString; O_CREAT includes correctly typed mode. Fresh O_NOFOLLOW/O_CLOEXEC fd transfers to File once; nonblocking flock borrows it. Directory/File owners release both lock and fd on later errors/drop. |
+| `send_sigterm` | Called after try_wait(None) under the documented exclusive-waiter/no-auto-reap contract; an exited unreaped child reserves its numeric PID. This complements the separately reviewed pending-signal handoff. |
+
+Connect wait now uses one elapsed-time budget across EINTR and a loop, replacing
+recursive retries that restarted the entire timeout. The deterministic regression
+injects an interrupted poll that consumes its budget: the extracted old retry
+logic incorrectly polls again; the new loop returns timeout. This tests the retry
+policy through its poll-operation seam, not delivery of real OS signals. A 10,000
+interrupt sequence verifies constant-stack progress to readiness, and tests cover
+zero-budget real writable sockets and preserved non-EINTR errors. Scheduling may
+overshoot a timeout, but retries no longer reset it or grow the call stack. This
+resolves the repeated-EINTR limitation recorded in the previous section; filesystem
+work still prevents a hard overall signal-delivery deadline.
+
+Together with the signal section, this records the TUI production unsafe sites.
+Remaining task-environment /proc discovery, descriptor cleanup and key API reviews
+are still pending. #46 remains open.

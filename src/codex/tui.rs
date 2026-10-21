@@ -2037,7 +2037,11 @@ fn wait_for_connect(fd: RawFd, timeout: Duration) -> Result<()> {
 }
 
 fn poll_writable(fd: RawFd, timeout: Duration) -> Result<libc::c_int> {
-    let millis = poll_millis(timeout);
+    retry_interrupted_poll(timeout, &mut |remaining| poll_once(fd, remaining))
+        .map_err(|error| FlowError::io(format!("upstream connect poll failed: {error}")))
+}
+
+fn poll_once(fd: RawFd, timeout: Duration) -> std::io::Result<libc::c_int> {
     let mut poll_fd = libc::pollfd {
         fd,
         events: libc::POLLOUT,
@@ -2045,21 +2049,31 @@ fn poll_writable(fd: RawFd, timeout: Duration) -> Result<libc::c_int> {
     };
     // SAFETY: poll_fd is one live writable element; fd stays owned by the
     // connect path and poll only borrows it.
-    let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+    let result = unsafe { libc::poll(&mut poll_fd, 1, poll_millis(timeout)) };
     if result >= 0 {
-        return Ok(result);
+        Ok(result)
+    } else {
+        Err(std::io::Error::last_os_error())
     }
-    retry_poll_on_interrupt(fd, timeout)
 }
 
-fn retry_poll_on_interrupt(fd: RawFd, timeout: Duration) -> Result<libc::c_int> {
-    let error = std::io::Error::last_os_error();
-    if error.kind() == IoErrorKind::Interrupted {
-        return poll_writable(fd, timeout);
+fn retry_interrupted_poll(
+    timeout: Duration,
+    poll: &mut impl FnMut(Duration) -> std::io::Result<libc::c_int>,
+) -> std::io::Result<libc::c_int> {
+    let started = Instant::now();
+    let mut remaining = timeout;
+    loop {
+        match poll(remaining) {
+            Err(error) if error.kind() == IoErrorKind::Interrupted => {
+                remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Ok(0);
+                }
+            }
+            result => return result,
+        }
     }
-    Err(FlowError::io(format!(
-        "upstream connect poll failed: {error}"
-    )))
 }
 
 fn poll_millis(timeout: Duration) -> libc::c_int {
@@ -2815,9 +2829,9 @@ impl ProxyBridge {
     /// This bridge must exclusively reap its Child: no external waiters,
     /// SIGCHLD=SIG_IGN or SA_NOCLDWAIT. The signal handler only records a request;
     /// the owner forwards it at the next loop boundary (poll is bounded at
-    /// 100ms, each upstream connect poll at 2s), then allows 5s before kill.
-    /// Filesystem work and repeated interrupted-connect retries can delay that
-    /// boundary; this is not a hard deadline.
+    /// 100ms, the upstream connect wait has one 2s budget across EINTR retries),
+    /// then allows 5s before kill. Filesystem work and scheduling can delay that
+    /// boundary; this is not a hard overall deadline.
     pub fn run(&mut self) -> i32 {
         STOP_SIGNAL.store(0, Ordering::SeqCst);
         let mut previous: PreviousSignals = Vec::new();
@@ -3045,8 +3059,10 @@ fn terminate_child(child: &mut Child) -> Result<()> {
 
 fn send_sigterm(child: &Child) {
     let pid = child.id();
-    // SAFETY: kill takes only a scalar process ID and signal, with no Rust
-    // memory or fd ownership involved. Child lifecycle checks are separate.
+    // SAFETY: terminate_child is reached only after the exclusive Child owner
+    // observed try_wait(None). An exited unreaped child reserves its PID until
+    // our next wait; run() forbids external waiters and SIGCHLD auto-reaping.
+    // kill receives only scalar arguments and borrows no Rust memory.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
@@ -3463,5 +3479,72 @@ mod signal_handoff_tests {
         assert_eq!(outcome.unwrap(), 128 + libc::SIGHUP);
         assert_eq!(status.signal(), Some(libc::SIGHUP));
         signal_owned_child(live, libc::SIGTERM).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod connect_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn interruption_cannot_restart_an_exhausted_budget() {
+        let mut calls = 0;
+        let result = retry_interrupted_poll(Duration::from_millis(10), &mut |budget| {
+            calls += 1;
+            if calls == 1 {
+                // Model a poll interrupted after consuming its entire budget.
+                // No timing threshold assertion: sleep cannot end early.
+                std::thread::sleep(budget);
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok(1)
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            (result, calls),
+            (0, 1),
+            "expired wait restarted after EINTR"
+        );
+    }
+}
+
+#[cfg(test)]
+mod connect_poll_tests {
+    use super::*;
+
+    #[test]
+    fn interruption_storm_uses_constant_stack_and_preserves_ready_result() {
+        let timeout = Duration::from_secs(10);
+        let mut calls = 0;
+        let result = retry_interrupted_poll(timeout, &mut |remaining| {
+            assert!(remaining <= timeout);
+            calls += 1;
+            if calls <= 10_000 {
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok(1)
+            }
+        })
+        .unwrap();
+        assert_eq!((result, calls), (1, 10_001));
+    }
+
+    #[test]
+    fn zero_budget_probes_ready_fd_and_non_interrupt_errors_survive() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            poll_writable(stream.as_raw_fd(), Duration::ZERO).unwrap(),
+            1
+        );
+        let error = retry_interrupted_poll(Duration::ZERO, &mut |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(
+            retry_interrupted_poll(Duration::ZERO, &mut |_| Ok(0)).unwrap(),
+            0
+        );
     }
 }
