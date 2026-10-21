@@ -4,8 +4,7 @@
 //! paths/metadata, process identities, queue keys/counts and bounded disk
 //! observations. It does not report file contents, config or auth. Shared queue
 //! JSON is parsed only for ownership keys/counts, not copied into evidence.
-use herdr_flow::queue;
-use herdr_flow::task_env::{self, WorktreeRegistration};
+use herdr_flow::task_env::{self, Registry, WorktreeRegistration};
 use serde_json::{json, Value as J};
 use std::ffi::CString;
 use std::fs;
@@ -20,10 +19,14 @@ const MAX_DEPTH: usize = 32;
 const MAX_PROCESSES: usize = 256;
 const MAX_FDS: usize = 256;
 const MAX_QUEUE_KEYS: usize = 128;
+const MAX_WORKTREE_ENTRIES: usize = 256;
 
 pub struct InventorySpec<'a> {
     pub base: &'a Path,
     pub queue: &'a Path,
+    pub registry_root: &'a Path,
+    pub envs_dir: &'a Path,
+    pub plans_dir: &'a Path,
     pub task_id: &'a str,
     pub instance_id: &'a str,
     pub workspace_root: &'a Path,
@@ -37,11 +40,16 @@ pub struct InventorySpec<'a> {
 pub fn collect(spec: &InventorySpec<'_>) -> J {
     let mut errors = Vec::new();
     let allowed = allowed_roots(spec);
+    let excluded_roots = spec
+        .excluded
+        .iter()
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect::<Vec<_>>();
     let registry = registry_observation(spec, &mut errors);
-    let state = state_observation(spec.task_id, &mut errors);
-    let cleanup = cleanup_observation(spec.task_id, &mut errors);
+    let state = state_observation(spec.envs_dir, spec.task_id, &mut errors);
+    let cleanup = cleanup_observation(spec.plans_dir, spec.task_id, &mut errors);
     let queue_value = queue_observation(spec.queue, spec.task_id, &mut errors);
-    let processes = process_observation(spec, &allowed, &mut errors);
+    let processes = process_observation(spec, &allowed, &excluded_roots, &mut errors);
     let worktrees = worktree_observation(spec.worktrees, &mut errors);
     let open_files = spec
         .open_files
@@ -103,7 +111,8 @@ pub fn collect(spec: &InventorySpec<'_>) -> J {
             "max_depth": MAX_DEPTH,
             "max_processes": MAX_PROCESSES,
             "max_fds": MAX_FDS,
-            "max_queue_keys": MAX_QUEUE_KEYS
+            "max_queue_keys": MAX_QUEUE_KEYS,
+            "max_worktree_entries": MAX_WORKTREE_ENTRIES
         },
         "errors": errors
     })
@@ -117,6 +126,9 @@ fn allowed_roots(spec: &InventorySpec<'_>) -> Vec<PathBuf> {
     ];
     roots.extend(spec.runtime_roots.iter().cloned());
     roots
+        .into_iter()
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect()
 }
 
 fn path_observation(path: &Path, role: &str, errors: &mut Vec<String>) -> J {
@@ -161,10 +173,18 @@ fn kind(metadata: &fs::Metadata) -> &'static str {
 }
 
 fn registry_observation(spec: &InventorySpec<'_>, errors: &mut Vec<String>) -> J {
-    let registry = match task_env::load_registry() {
-        Ok(registry) => registry,
+    let path = spec.registry_root.join("registry.json");
+    let registry = match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<Registry>(&bytes) {
+            Ok(registry) => registry,
+            Err(error) => {
+                errors.push(format!("registry parse {}: {error}", path.display()));
+                return json!({"error": error.to_string()});
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Registry::default(),
         Err(error) => {
-            errors.push(format!("registry load: {error}"));
+            errors.push(format!("registry read {}: {error}", path.display()));
             return json!({"error": error.to_string()});
         }
     };
@@ -178,45 +198,76 @@ fn registry_observation(spec: &InventorySpec<'_>, errors: &mut Vec<String>) -> J
             "claimed_roots": entry.claimed_roots().iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
         })
     });
-    let slots = match task_env::occupied_slots() {
-        Ok(slots) => json!(slots),
-        Err(error) => {
-            errors.push(format!("occupied_slots: {error}"));
-            J::Null
-        }
-    };
+    let slots = count_json_entries(spec.envs_dir, "envs", errors)
+        + count_json_entries(spec.plans_dir, "plans", errors);
     json!({
+        "registry_root": spec.registry_root.display().to_string(),
+        "registry_exists": path.exists(),
         "registered": registry.contains(spec.task_id),
         "entry": entry,
         "occupied_slots": slots
     })
 }
 
-fn state_observation(task_id: &str, errors: &mut Vec<String>) -> J {
-    match task_env::environment_state_path(task_id) {
-        Ok(path) => path_observation(&path, "environment_state", errors),
+fn count_json_entries(dir: &Path, label: &str, errors: &mut Vec<String>) -> usize {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
         Err(error) => {
-            errors.push(format!("environment_state_path: {error}"));
-            json!({"role":"environment_state","error":error.to_string()})
+            errors.push(format!("{label} read_dir {}: {error}", dir.display()));
+            return 0;
+        }
+    };
+    let mut count = 0;
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
+                    count += 1;
+                }
+            }
+            Err(error) => errors.push(format!("{label} entry {}: {error}", dir.display())),
         }
     }
+    count
 }
 
-fn cleanup_observation(task_id: &str, errors: &mut Vec<String>) -> J {
-    match task_env::cleanup_state_path(task_id) {
-        Ok(path) => path_observation(&path, "cleanup_plan", errors),
-        Err(error) => {
-            errors.push(format!("cleanup_state_path: {error}"));
-            json!({"role":"cleanup_plan","error":error.to_string()})
-        }
+fn state_observation(envs_dir: &Path, task_id: &str, errors: &mut Vec<String>) -> J {
+    if let Err(error) = task_env::validate_task_id(task_id) {
+        errors.push(format!("environment state task id: {error}"));
+        return json!({"role":"environment_state","error":error.to_string()});
     }
+    path_observation(
+        &envs_dir.join(format!("{task_id}.json")),
+        "environment_state",
+        errors,
+    )
+}
+
+fn cleanup_observation(plans_dir: &Path, task_id: &str, errors: &mut Vec<String>) -> J {
+    if let Err(error) = task_env::validate_task_id(task_id) {
+        errors.push(format!("cleanup plan task id: {error}"));
+        return json!({"role":"cleanup_plan","error":error.to_string()});
+    }
+    path_observation(
+        &plans_dir.join(format!("{task_id}.json")),
+        "cleanup_plan",
+        errors,
+    )
 }
 
 fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>) -> J {
-    let state = match queue::load_queue(queue_root) {
-        Ok(state) => state,
+    let path = queue_root.join("queue.json");
+    let state = match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<J>(&bytes) {
+            Ok(state) => state,
+            Err(error) => {
+                errors.push(format!("queue parse {}: {error}", path.display()));
+                return json!({"error": error.to_string()});
+            }
+        },
         Err(error) => {
-            errors.push(format!("queue load {}: {error}", queue_root.display()));
+            errors.push(format!("queue read {}: {error}", path.display()));
             return json!({"error": error.to_string()});
         }
     };
@@ -240,17 +291,42 @@ fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>)
         keys.truncate(MAX_QUEUE_KEYS);
         json!({"total": total, "truncated": truncated, "keys": keys.as_slice()})
     }
+    fn mixed_page(entries: &mut Vec<J>) -> J {
+        let total = entries.len();
+        let truncated = total > MAX_QUEUE_KEYS;
+        entries.sort_by(|left, right| {
+            left["id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["id"].as_str().unwrap_or(""))
+        });
+        entries.truncate(MAX_QUEUE_KEYS);
+        json!({"total": total, "truncated": truncated, "entries": entries.as_slice()})
+    }
     let tasks = section(&state, "tasks", errors);
     let waits = section(&state, "waits", errors);
     let events = section(&state, "events", errors);
     let deliveries = section(&state, "deliveries", errors);
+    let mut valid_task_keys = std::collections::BTreeSet::new();
     let mut owned_tasks = Vec::new();
     let mut unrelated_tasks = Vec::new();
+    let mut unknown_tasks = Vec::new();
     if let Some(tasks) = tasks {
         for (key, value) in tasks {
-            if key == task_id || value["lineage"]["requirement"] == task_id {
+            if !value.is_object() {
+                errors.push(format!("queue task {key} is not an object"));
+                unknown_tasks.push(key.clone());
+            } else if value
+                .get("task")
+                .is_some_and(|task| task.as_str() != Some(key))
+            {
+                errors.push(format!("queue task {key} has mismatched task identity"));
+                unknown_tasks.push(key.clone());
+            } else if key == task_id || value["lineage"]["requirement"] == task_id {
+                valid_task_keys.insert(key.clone());
                 owned_tasks.push(key.clone());
             } else {
+                valid_task_keys.insert(key.clone());
                 unrelated_tasks.push(key.clone());
             }
         }
@@ -258,43 +334,113 @@ fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>)
     let owned_task_set: std::collections::BTreeSet<_> = owned_tasks.iter().cloned().collect();
     let mut owned_waits = Vec::new();
     let mut unrelated_waits = Vec::new();
+    let mut unknown_waits = Vec::new();
     if let Some(waits) = waits {
         for (key, value) in waits {
-            if value["task"] == task_id
-                || owned_task_set.contains(value["task"].as_str().unwrap_or(""))
-            {
-                owned_waits.push(key.clone());
-            } else {
-                unrelated_waits.push(key.clone());
+            if !value.is_object() {
+                errors.push(format!("queue wait {key} is not an object"));
+                unknown_waits.push(key.clone());
+                continue;
+            }
+            match value["task"].as_str() {
+                Some(task)
+                    if (task == task_id || owned_task_set.contains(task))
+                        && valid_task_keys.contains(task) =>
+                {
+                    owned_waits.push(key.clone());
+                }
+                Some(task) if valid_task_keys.contains(task) => unrelated_waits.push(key.clone()),
+                Some(_) => {
+                    errors.push(format!("queue wait {key} references a missing task"));
+                    unknown_waits.push(key.clone());
+                }
+                None => {
+                    errors.push(format!("queue wait {key} has no task identity"));
+                    unknown_waits.push(key.clone());
+                }
             }
         }
     }
     let mut owned_events = Vec::new();
     let mut unrelated_events = Vec::new();
+    let mut unknown_events = Vec::new();
     if let Some(events) = events {
         for (key, value) in events {
-            if value["task"] == task_id
-                || owned_task_set.contains(value["task"].as_str().unwrap_or(""))
-            {
-                owned_events.push(key.clone());
-            } else {
-                unrelated_events.push(key.clone());
+            if !value.is_object() {
+                errors.push(format!("queue event {key} is not an object"));
+                unknown_events.push(key.clone());
+                continue;
+            }
+            match value["task"].as_str() {
+                Some(task)
+                    if (task == task_id || owned_task_set.contains(task))
+                        && valid_task_keys.contains(task) =>
+                {
+                    owned_events.push(key.clone());
+                }
+                Some(task) if valid_task_keys.contains(task) => unrelated_events.push(key.clone()),
+                Some(_) => {
+                    errors.push(format!("queue event {key} references a missing task"));
+                    unknown_events.push(key.clone());
+                }
+                None => {
+                    errors.push(format!("queue event {key} has no task identity"));
+                    unknown_events.push(key.clone());
+                }
             }
         }
     }
     let owned_event_set: std::collections::BTreeSet<_> = owned_events.iter().cloned().collect();
+    let valid_event_keys: std::collections::BTreeSet<_> = owned_events
+        .iter()
+        .chain(unrelated_events.iter())
+        .cloned()
+        .collect();
     let mut owned_deliveries = Vec::new();
     let mut unrelated_deliveries = Vec::new();
+    let mut unknown_deliveries = Vec::new();
+    let mut mixed_deliveries = Vec::new();
     if let Some(deliveries) = deliveries {
         for (key, value) in deliveries {
-            let owned = value["events"].as_array().is_some_and(|events| {
-                events.iter().any(|event| {
-                    event
-                        .as_str()
-                        .is_some_and(|id| owned_event_set.contains(id))
-                })
-            });
-            if owned {
+            if !value.is_object() {
+                errors.push(format!("queue delivery {key} is not an object"));
+                unknown_deliveries.push(key.clone());
+                continue;
+            }
+            let Some(event_ids) = value["events"].as_array() else {
+                errors.push(format!("queue delivery {key} has no event array"));
+                unknown_deliveries.push(key.clone());
+                continue;
+            };
+            let mut owned = Vec::new();
+            let mut unrelated = Vec::new();
+            let mut unknown = Vec::new();
+            let mut malformed_event = false;
+            for event in event_ids {
+                match event.as_str() {
+                    Some(id) if owned_event_set.contains(id) => owned.push(id.to_string()),
+                    Some(id) if valid_event_keys.contains(id) => unrelated.push(id.to_string()),
+                    Some(id) => {
+                        errors.push(format!(
+                            "queue delivery {key} references missing event {id}"
+                        ));
+                        unknown.push(id.to_string());
+                    }
+                    None => {
+                        malformed_event = true;
+                        errors.push(format!("queue delivery {key} has a non-string event"));
+                    }
+                }
+            }
+            if malformed_event || !unknown.is_empty() || event_ids.is_empty() {
+                unknown_deliveries.push(key.clone());
+            } else if !owned.is_empty() && !unrelated.is_empty() {
+                mixed_deliveries.push(json!({
+                    "id": key,
+                    "owned_events": owned,
+                    "unrelated_events": unrelated
+                }));
+            } else if !owned.is_empty() {
                 owned_deliveries.push(key.clone());
             } else {
                 unrelated_deliveries.push(key.clone());
@@ -313,6 +459,15 @@ fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>)
             "waits": page(&mut unrelated_waits),
             "events": page(&mut unrelated_events),
             "deliveries": page(&mut unrelated_deliveries)
+        },
+        "mixed": {
+            "deliveries": mixed_page(&mut mixed_deliveries)
+        },
+        "unknown": {
+            "tasks": page(&mut unknown_tasks),
+            "waits": page(&mut unknown_waits),
+            "events": page(&mut unknown_events),
+            "deliveries": page(&mut unknown_deliveries)
         }
     })
 }
@@ -320,6 +475,7 @@ fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>)
 fn process_observation(
     spec: &InventorySpec<'_>,
     allowed: &[PathBuf],
+    excluded: &[PathBuf],
     errors: &mut Vec<String>,
 ) -> J {
     let records = task_env::marked_processes(spec.instance_id);
@@ -404,7 +560,7 @@ fn process_observation(
                         match fs::read_link(format!("/proc/{pid}/fd/{fd}")) {
                             Ok(target) => {
                                 let class = if target.is_absolute() {
-                                    path_class(&target, allowed, spec.excluded)
+                                    path_class(&target, allowed, excluded)
                                 } else {
                                     "kernel"
                                 };
@@ -437,7 +593,7 @@ fn process_observation(
                 Ok(cwd) => {
                     record_json["cwd"] = json!({
                         "target": cwd.display().to_string(),
-                        "class": path_class(&cwd, allowed, spec.excluded)
+                        "class": path_class(&cwd, allowed, excluded)
                     });
                     record_json["cwd_status"] = json!("sampled");
                 }
@@ -500,12 +656,16 @@ fn proc_start(pid: i32) -> Result<Option<u64>, String> {
 }
 
 fn path_class(path: &Path, allowed: &[PathBuf], excluded: &[PathBuf]) -> &'static str {
+    let normalized = match fs::canonicalize(path) {
+        Ok(normalized) => normalized,
+        Err(_) => return "unresolved",
+    };
     if excluded
         .iter()
-        .any(|excluded| path == excluded || path.starts_with(excluded))
+        .any(|excluded| normalized == *excluded || normalized.starts_with(excluded))
     {
         "excluded"
-    } else if allowed.iter().any(|root| path.starts_with(root)) {
+    } else if allowed.iter().any(|root| normalized.starts_with(root)) {
         "task_owned"
     } else {
         "outside_unknown"
@@ -522,42 +682,51 @@ fn worktree_observation(worktrees: &[WorktreeRegistration], errors: &mut Vec<Str
                 .repo
                 .as_ref()
                 .map(|repo| path_observation(repo, "worktree_repo", errors));
+            if let Some(repo) = worktree.repo.as_ref() {
+                if !repo.exists() {
+                    errors.push(format!(
+                        "explicit worktree repository {} is missing",
+                        repo.display()
+                    ));
+                }
+            }
             let listing = worktree.repo.as_ref().and_then(|repo| {
-                if seen.insert(repo.clone()) {
-                    match Command::new("git")
-                        .arg("-C")
-                        .arg(repo)
-                        .args(["worktree", "list", "--porcelain"])
-                        .output()
-                    {
-                        Ok(output) if output.status.success() => {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            let entries: Vec<_> = text
-                                .lines()
-                                .filter(|line| line.starts_with("worktree "))
-                                .collect();
-                            Some(json!({
-                                "repo": repo.display().to_string(),
-                                "total": entries.len(),
-                                "truncated": entries.len() > 64,
-                                "entries": entries.into_iter().take(64).collect::<Vec<_>>()
-                            }))
-                        }
-                        Ok(output) => {
-                            errors.push(format!(
-                                "git worktree list {}: {}",
-                                repo.display(),
-                                String::from_utf8_lossy(&output.stderr).trim()
-                            ));
-                            None
-                        }
-                        Err(error) => {
-                            errors.push(format!("git worktree list {}: {error}", repo.display()));
-                            None
-                        }
+                if !repo.exists() || !seen.insert(repo.clone()) {
+                    return None;
+                }
+                match Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(["worktree", "list", "--porcelain"])
+                    .output()
+                {
+                    Ok(output) if output.status.success() => {
+                        let entries = String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .filter(|line| line.starts_with("worktree "))
+                            .map(|line| line.to_string())
+                            .collect::<Vec<_>>();
+                        let total = entries.len();
+                        let truncated = total > MAX_WORKTREE_ENTRIES;
+                        Some(json!({
+                            "repo": repo.display().to_string(),
+                            "total": total,
+                            "truncated": truncated,
+                            "entries": entries.into_iter().take(MAX_WORKTREE_ENTRIES).collect::<Vec<_>>()
+                        }))
                     }
-                } else {
-                    None
+                    Ok(output) => {
+                        errors.push(format!(
+                            "git worktree list {}: {}",
+                            repo.display(),
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                        None
+                    }
+                    Err(error) => {
+                        errors.push(format!("git worktree list {}: {error}", repo.display()));
+                        None
+                    }
                 }
             });
             json!({
@@ -569,7 +738,34 @@ fn worktree_observation(worktrees: &[WorktreeRegistration], errors: &mut Vec<Str
         .collect()
 }
 
+fn excluded_match(path: &Path, excluded: &[PathBuf]) -> bool {
+    let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    excluded.iter().any(|excluded| {
+        let excluded = fs::canonicalize(excluded).unwrap_or_else(|_| excluded.clone());
+        candidate == excluded || candidate.starts_with(&excluded)
+    })
+}
+
 fn base_observation(base: &Path, excluded: &[PathBuf], errors: &mut Vec<String>) -> J {
+    if let Err(error) = fs::symlink_metadata(base) {
+        if error.kind() == io::ErrorKind::NotFound {
+            errors.push(format!("declared base {} is missing", base.display()));
+            return json!({
+                "path": base.display().to_string(),
+                "missing": true,
+                "entries": 0,
+                "files": 0,
+                "dirs": 0,
+                "symlinks": 0,
+                "bytes": 0,
+                "allocated_blocks_512": 0,
+                "excluded_files": 0,
+                "excluded_bytes": 0,
+                "excluded_allocated_blocks_512": 0,
+                "truncated": false
+            });
+        }
+    }
     #[derive(Default)]
     struct Usage {
         entries: usize,
@@ -603,7 +799,7 @@ fn base_observation(base: &Path, excluded: &[PathBuf], errors: &mut Vec<String>)
             }
         };
         usage.entries += 1;
-        let is_excluded = excluded.contains(&path.to_path_buf());
+        let is_excluded = excluded_match(path, excluded);
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             usage.dirs += 1;
             if is_excluded {

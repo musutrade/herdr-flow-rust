@@ -341,7 +341,11 @@ marked process pid/start/cwd/fd targets, shared-queue ownership counts, explicit
 exclusions, scoped base file/byte/allocated-block counts and a noisy filesystem
 free-byte observation. It reads queue structure to classify ownership, but does
 not capture file payloads, configuration, auth or credentials, and never deletes
-an observed resource.
+an observed resource. Registry/env/plan roots are supplied explicitly and read
+with non-creating metadata/JSON access; missing directories are not created or
+chmodded. Queue observations distinguish owned, unrelated, mixed and unknown
+entries, and malformed or missing references are errors/unknown, not unrelated.
+Base absence and missing explicit worktree repositories are reported errors.
 
 The synthetic two-round test in `tests/resource_inventory.rs` reuses one campaign
 base and shared queue, creates a real marked child with an outside open fd,

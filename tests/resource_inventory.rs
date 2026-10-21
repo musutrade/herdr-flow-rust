@@ -184,6 +184,16 @@ fn reset_owned_queue(q: &Path, task: &str) {
     queue::save(q, &mut state).unwrap();
 }
 
+fn unrelated_values(q: &Path) -> J {
+    let state = queue::load_queue(q).unwrap();
+    json!({
+        "tasks": state["tasks"]["synthetic-unrelated"].clone(),
+        "waits": state["waits"]["synthetic-unrelated-wait"].clone(),
+        "events": state["events"]["synthetic-unrelated-event"].clone(),
+        "deliveries": state["deliveries"]["synthetic-unrelated-delivery"].clone()
+    })
+}
+
 fn normalized_queue(q: &Path) -> J {
     let mut state = queue::load_queue(q).unwrap();
     if let Some(state) = state.as_object_mut() {
@@ -269,6 +279,9 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
     private_dir(&base);
     let queue = campaign.join("queue");
     queue::init(&queue, None, 30).unwrap();
+    let registry_root = campaign.join("registry");
+    let envs_dir = registry_root.join("envs");
+    let plans_dir = registry_root.join("plans");
     let repo = campaign.join("repo");
     setup_repo(&repo);
     let outside_dir = campaign.join("outside-dir");
@@ -286,8 +299,10 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
     fs::write(&selected, "{}").unwrap();
     let _registry_root = RegistryRootGuard::set(&campaign.join("registry"));
     let excluded = vec![formal.clone(), user.clone(), selected.clone()];
+    let base_mode = fs::metadata(&base).unwrap().permissions().mode();
     add_unrelated_queue(&queue);
     let queue_baseline = normalized_queue(&queue);
+    let unrelated_baseline = unrelated_values(&queue);
     let mut base_after_first = J::Null;
 
     for round in 1..=2 {
@@ -327,11 +342,23 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
         let open_files_before = env.open_files.clone();
         let runtime_roots = vec![runtime.clone()];
 
+        // Make collector mutation visible: private-dir helpers would chmod these.
+        let registry_bytes = fs::read(registry_root.join("registry.json")).unwrap();
+        let state_bytes = fs::read(envs_dir.join(format!("{task}.json"))).unwrap();
+        fs::set_permissions(&registry_root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&envs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if plans_dir.exists() {
+            fs::set_permissions(&plans_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
         let deadline = Instant::now() + Duration::from_secs(3);
         let before = loop {
             let report = collect(&InventorySpec {
                 base: &base,
                 queue: &queue,
+                registry_root: &registry_root,
+                envs_dir: &envs_dir,
+                plans_dir: &plans_dir,
                 task_id: &task,
                 instance_id: &instance,
                 workspace_root: &workspace,
@@ -350,6 +377,29 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
             std::thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(fs::read(queue.join("queue.json")).unwrap(), queue_before);
+        assert_eq!(fs::metadata(&base).unwrap().permissions().mode(), base_mode);
+        assert_eq!(
+            fs::metadata(&registry_root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&envs_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        if plans_dir.exists() {
+            assert_eq!(
+                fs::metadata(&plans_dir).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(
+            fs::read(registry_root.join("registry.json")).unwrap(),
+            registry_bytes
+        );
+        assert_eq!(
+            fs::read(envs_dir.join(format!("{task}.json"))).unwrap(),
+            state_bytes
+        );
         assert_eq!(before["errors"], json!([]));
         assert_eq!(before["processes"]["truncated"], false);
         assert_eq!(before["base_usage"]["truncated"], false);
@@ -372,6 +422,11 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
         assert_eq!(before["registry"]["occupied_slots"], 1);
         assert_owned_queue(&before, &task);
         assert_unrelated_queue(&before);
+        assert_eq!(before["queue_entries"]["mixed"]["deliveries"]["total"], 0);
+        assert_eq!(before["queue_entries"]["unknown"]["tasks"]["total"], 0);
+        assert_eq!(before["queue_entries"]["unknown"]["waits"]["total"], 0);
+        assert_eq!(before["queue_entries"]["unknown"]["events"]["total"], 0);
+        assert_eq!(before["queue_entries"]["unknown"]["deliveries"]["total"], 0);
         assert!(before["worktrees"]
             .as_array()
             .unwrap()
@@ -381,7 +436,11 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
                     .as_array()
                     .is_some_and(|entries| entries.iter().any(|entry| entry
                         .as_str()
-                        .is_some_and(|line| line.contains(worktree.to_str().unwrap()))))));
+                        .is_some_and(|line| line.contains(worktree.to_str().unwrap()))))
+                && item["git_worktree_list"]["total"]
+                    .as_u64()
+                    .is_some_and(|total| total >= 2)
+                && item["git_worktree_list"]["truncated"] == false));
         assert_eq!(
             before["worktrees"][0]["git_worktree_list"]["truncated"],
             false
@@ -423,6 +482,9 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
         let after = collect(&InventorySpec {
             base: &base,
             queue: &queue,
+            registry_root: &registry_root,
+            envs_dir: &envs_dir,
+            plans_dir: &plans_dir,
             task_id: &task,
             instance_id: &instance,
             workspace_root: &workspace,
@@ -485,13 +547,23 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
         assert_eq!(fs::read_to_string(&selected).unwrap(), "{}");
         assert_owned_queue(&after, &task);
         assert_unrelated_queue(&after);
+        assert_eq!(unrelated_values(&queue), unrelated_baseline);
+        assert_eq!(after["queue_entries"]["mixed"]["deliveries"]["total"], 0);
+        assert_eq!(after["queue_entries"]["unknown"]["tasks"]["total"], 0);
+        assert_eq!(after["queue_entries"]["unknown"]["waits"]["total"], 0);
+        assert_eq!(after["queue_entries"]["unknown"]["events"]["total"], 0);
+        assert_eq!(after["queue_entries"]["unknown"]["deliveries"]["total"], 0);
 
         // Fixture reset only; not a production cleanup/lifecycle proof.
         reset_owned_queue(&queue, &task);
         assert_eq!(normalized_queue(&queue), queue_baseline);
+        assert_eq!(unrelated_values(&queue), unrelated_baseline);
         let base_record = collect(&InventorySpec {
             base: &base,
             queue: &queue,
+            registry_root: &registry_root,
+            envs_dir: &envs_dir,
+            plans_dir: &plans_dir,
             task_id: &task,
             instance_id: &instance,
             workspace_root: &workspace,
@@ -530,7 +602,10 @@ fn queue_inventory_reports_totals_truncation_and_malformed_sections() {
     private_dir(&base);
     let queue = temp.path().join("queue");
     queue::init(&queue, None, 30).unwrap();
-    let _registry_root = RegistryRootGuard::set(&temp.path().join("registry"));
+    let registry_root = temp.path().join("registry");
+    let envs_dir = registry_root.join("envs");
+    let plans_dir = registry_root.join("plans");
+    let _registry_root = RegistryRootGuard::set(&registry_root);
     let mut state = queue::load_queue(&queue).unwrap();
     ensure_queue_maps(&mut state);
     for index in 0..130 {
@@ -542,6 +617,9 @@ fn queue_inventory_reports_totals_truncation_and_malformed_sections() {
     let report = collect(&InventorySpec {
         base: &base,
         queue: &queue,
+        registry_root: &registry_root,
+        envs_dir: &envs_dir,
+        plans_dir: &plans_dir,
         task_id: "owned",
         instance_id: "none",
         workspace_root: &base.join("missing-workspace"),
@@ -570,6 +648,9 @@ fn queue_inventory_reports_totals_truncation_and_malformed_sections() {
     let report = collect(&InventorySpec {
         base: &base,
         queue: &queue,
+        registry_root: &registry_root,
+        envs_dir: &envs_dir,
+        plans_dir: &plans_dir,
         task_id: "owned",
         instance_id: "none",
         workspace_root: &base.join("missing-workspace"),
@@ -586,4 +667,177 @@ fn queue_inventory_reports_totals_truncation_and_malformed_sections() {
         .any(|error| error
             .as_str()
             .is_some_and(|error| error.contains("queue section tasks"))));
+}
+
+#[test]
+fn queue_inventory_reports_mixed_and_unknown_malformed_entries() {
+    let temp = temp();
+    let base = temp.path().join("inventory");
+    private_dir(&base);
+    let queue = temp.path().join("queue");
+    queue::init(&queue, None, 30).unwrap();
+    let registry_root = temp.path().join("registry");
+    let envs_dir = registry_root.join("envs");
+    let plans_dir = registry_root.join("plans");
+    let _registry_root = RegistryRootGuard::set(&registry_root);
+    let mut state = queue::load_queue(&queue).unwrap();
+    ensure_queue_maps(&mut state);
+    state["tasks"]["owned"] = json!({});
+    state["tasks"]["unrelated"] = json!({});
+    state["tasks"]["malformed"] = json!("bad");
+    state["tasks"]["mismatch"] = json!({"task":"other"});
+    state["waits"]["owned-wait"] = json!({"task":"owned"});
+    state["waits"]["unrelated-wait"] = json!({"task":"unrelated"});
+    state["waits"]["missing-wait"] = json!({"task":"missing"});
+    state["waits"]["malformed-wait"] = json!("bad");
+    state["waits"]["mismatched-wait"] = json!({"task":"mismatch"});
+    state["events"]["owned-event"] = json!({"task":"owned"});
+    state["events"]["unrelated-event"] = json!({"task":"unrelated"});
+    state["events"]["missing-event"] = json!({"task":"missing"});
+    state["events"]["malformed-event"] = json!("bad");
+    state["deliveries"]["mixed"] = json!({"events":["owned-event","unrelated-event"]});
+    state["deliveries"]["owned-only"] = json!({"events":["owned-event"]});
+    state["deliveries"]["unrelated-only"] = json!({"events":["unrelated-event"]});
+    state["deliveries"]["missing-event"] = json!({"events":["ghost-event"]});
+    state["deliveries"]["empty"] = json!({"events":[]});
+    state["deliveries"]["malformed"] = json!({"events":"bad"});
+    state["deliveries"]["nonstring"] = json!({"events":[1]});
+    queue::save(&queue, &mut state).unwrap();
+
+    let report = collect(&InventorySpec {
+        base: &base,
+        queue: &queue,
+        registry_root: &registry_root,
+        envs_dir: &envs_dir,
+        plans_dir: &plans_dir,
+        task_id: "owned",
+        instance_id: "none",
+        workspace_root: &base.join("missing-workspace"),
+        temp_root: &base.join("missing-temp"),
+        runtime_roots: &[],
+        worktrees: &[],
+        open_files: &[],
+        excluded: &[],
+    });
+    assert!(!report["errors"].as_array().unwrap().is_empty());
+    assert_page(
+        &report["queue_entries"]["owned"],
+        "tasks",
+        1,
+        &["owned"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["unrelated"],
+        "tasks",
+        1,
+        &["unrelated"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["unknown"],
+        "tasks",
+        2,
+        &["malformed", "mismatch"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["unknown"],
+        "waits",
+        3,
+        &["malformed-wait", "mismatched-wait", "missing-wait"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["unknown"],
+        "events",
+        2,
+        &["malformed-event", "missing-event"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["owned"],
+        "deliveries",
+        1,
+        &["owned-only"],
+        false,
+    );
+    assert_page(
+        &report["queue_entries"]["unrelated"],
+        "deliveries",
+        1,
+        &["unrelated-only"],
+        false,
+    );
+    let mixed = &report["queue_entries"]["mixed"]["deliveries"];
+    assert_eq!(mixed["total"], 1);
+    assert_eq!(mixed["truncated"], false);
+    let entry = &mixed["entries"][0];
+    assert_eq!(entry["id"], "mixed");
+    assert_eq!(entry["owned_events"], json!(["owned-event"]));
+    assert_eq!(entry["unrelated_events"], json!(["unrelated-event"]));
+    assert_page(
+        &report["queue_entries"]["unknown"],
+        "deliveries",
+        4,
+        &["empty", "malformed", "missing-event", "nonstring"],
+        false,
+    );
+}
+
+#[test]
+fn collector_does_not_create_missing_registry_base_or_queue() {
+    let temp = temp();
+    let campaign = temp.path().join("campaign");
+    private_dir(&campaign);
+    let sentinel = campaign.join("sentinel");
+    fs::write(&sentinel, "unchanged").unwrap();
+    let base = campaign.join("missing-base");
+    let queue = campaign.join("missing-queue");
+    let registry_root = campaign.join("missing-registry");
+    let envs_dir = registry_root.join("envs");
+    let plans_dir = registry_root.join("plans");
+    let before = fs::metadata(&campaign).unwrap();
+    let before_mode = before.permissions().mode();
+    let before_entries = fs::read_dir(&campaign).unwrap().count();
+    let report = collect(&InventorySpec {
+        base: &base,
+        queue: &queue,
+        registry_root: &registry_root,
+        envs_dir: &envs_dir,
+        plans_dir: &plans_dir,
+        task_id: "owned",
+        instance_id: "none",
+        workspace_root: &campaign.join("missing-workspace"),
+        temp_root: &campaign.join("missing-temp"),
+        runtime_roots: &[],
+        worktrees: &[],
+        open_files: &[],
+        excluded: &[],
+    });
+    assert!(!base.exists());
+    assert!(!queue.exists());
+    assert!(!registry_root.exists());
+    assert!(!envs_dir.exists());
+    assert!(!plans_dir.exists());
+    assert_eq!(
+        fs::metadata(&campaign).unwrap().permissions().mode(),
+        before_mode
+    );
+    assert_eq!(fs::read_dir(&campaign).unwrap().count(), before_entries);
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "unchanged");
+    assert!(report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error
+            .as_str()
+            .is_some_and(|error| error.contains("declared base"))));
+    assert!(report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error
+            .as_str()
+            .is_some_and(|error| error.contains("queue read"))));
 }
