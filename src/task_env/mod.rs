@@ -38,9 +38,13 @@ use crate::error::Result;
 
 /// Create a new task environment and reserve its resource slot.
 ///
-/// `workspace_root` and `temp_root` must be absent or empty: the environment
-/// only ever destroys directories it created. Delivery targets must resolve
-/// outside both roots.
+/// `workspace_root` and `temp_root` must be absent or empty and non-overlapping.
+/// Accepted roots, including pre-existing empty directories, are claimed as
+/// disposable and may be removed by destruction. Delivery targets must resolve
+/// outside both roots and roots outside the control tree. The returned handle
+/// holds the exclusive task lock. Failure may leave recovery state; use
+/// [`recover_interrupted`] before retrying creation. Spawning/confinement and
+/// cleanup require the supported Linux /proc, Landlock and pidfd facilities.
 pub fn create_environment(
     task_id: &str,
     workspace_root: &std::path::Path,
@@ -54,6 +58,9 @@ pub fn create_environment(
 ///
 /// Restoring never allocates a second environment: it returns the registered
 /// document, including one left in `creating` or `destroying` by a crash.
+/// Acquires exclusive ownership and fails while another handle owns the task.
+/// Does not restart processes, reopen persisted file paths, or finish cleanup;
+/// use [`recover_interrupted`] when destruction/recovery is intended.
 pub fn restore_environment(task_id: &str) -> Result<TaskEnvironment> {
     restore(task_id)
 }
@@ -61,7 +68,11 @@ pub fn restore_environment(task_id: &str) -> Result<TaskEnvironment> {
 /// Destroy an environment: release every resource, then free its slot.
 ///
 /// Idempotent. A failed attempt keeps the plan and the slot, and can be
-/// resumed with [`cleanup_failed_environment`].
+/// resumed with [`cleanup_failed_environment`]. Loads durable registration so a
+/// stale handle cannot omit later resources. May stop/kill owned processes,
+/// close local descriptors, remove disposable trees and unregister worktrees;
+/// failures do not roll back those effects. Call from an external supervisor,
+/// not a task-owned process. Do not free claims or delete journals after errors.
 pub fn destroy_environment(environment: &TaskEnvironment) -> Result<()> {
     cleanup::destroy(environment)
 }

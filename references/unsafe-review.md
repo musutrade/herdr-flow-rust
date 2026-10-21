@@ -48,19 +48,13 @@ threads changing the process descriptor table. Empty argv is rejected before
 logs or pipes are created; it is an input-contract panic fix, not a demonstrated
 memory-corruption vulnerability.
 
-## Still open
+## Acceptance status
 
-- Complete per-site review for task environment creation/destruction, TUI signal
-  and terminal state, registry/delivery, socket helpers and remaining filesystem
-  and process operations. Preserve unresolved assumptions rather than marking
-  all listed candidates safe.
-- Review raw-descriptor APIs such as `write_ready_fd` and `open_dir_fd`, including
-  ownership transfer, intended exec inheritance and failure handling at callers.
-- Check macro/conditional classification against the actual Linux build and
-  decide which dependency/generated-code contracts require additional evidence.
-- Finish task-environment, delivery/recovery and broker public API contracts:
-  locks, resource ownership, platform, side effects and recovery after partial
-  failures. New rustdoc here covers spawn ownership and atomic-write ambiguity.
+The sections below preserve the incremental findings and fixes. The final
+inventory reconciliation at the end supersedes earlier pending-work statements
+where it records completed review. Independent acceptance must verify the full
+mapping and API coverage, and explicitly account for the remaining semantic
+questions; no blanket unsafe-safety claim is made.
 
 No examples in this batch access real user directories, credentials or services.
 Inventory generation reads source; process regressions use isolated temporary
@@ -224,3 +218,83 @@ retains its existing no-op/drop semantics, and restore still does not reopen fil
 The tests exercise both restore/old-first removal and release/new-first removal,
 including repeated unregistration and normal cleanup. Persistence errors still do
 not roll back an already closed descriptor, as the API contract now states.
+
+## Inventory reconciliation after PR65
+
+The regenerated source inventory at the PR65 tree has **93 explicit production
+candidate unsafe blocks in 14 files**, five explicit test blocks and three unsafe
+tokens inside test macros. Production macro invocations remain unexpanded (1,496
+rows); test invocations have 356 rows. Counts are an audit checkpoint, not a
+future invariant. This documentation-only reconciliation does not change sites.
+
+| File | Production blocks | Review coverage |
+| --- | ---: | --- |
+| `codex/tui.rs` | 25 | Signal handoff/reaping and TUI FD/connect-wait sections |
+| `task_env/env.rs` | 19 | Descriptor walk, process identity observations and Landlock details below |
+| `util/process.rs` | 13 | Readiness ownership, raw dir/readiness APIs, captured executables, remaining details below |
+| `util/process/capture.rs` | 8 | Reviewed boundary table: child-group capture and exclusive-waiter assumptions |
+| `util/fs.rs` | 7 | File/raw flock and effective UID review |
+| `util/fs/secure.rs` | 4 | Reviewed boundary table: pinned directory creation/open |
+| `util/unix_socket.rs` | 4 | Socket address layout and owned descriptor review |
+| `delivery/local.rs` | 3 | Prepared confinement and parent-death ordering below |
+| `task_env/cleanup/signals.rs` | 3 | pidfd ownership and identity-checked signalling section |
+| `codex/peer.rs` | 2 | Live socket/ucred query and same-UID check; Linux conditional |
+| `codex/rpc.rs` | 2 | Effective UID and single-slot poll review |
+| `task_env/cleanup.rs` | 1 | Descriptor-relative rename_noreplace review |
+| `task_env/registry.rs` | 1 | Effective UID query review |
+| `task_runtime/mod.rs` | 1 | Prepared confinement callback review |
+
+### Remaining sites reconciled
+
+- `task_env/env.rs`: the pre_exec block captures parent-prepared state and only
+  calls setsid and PreparedConfinement::apply with scalar errors. The owned File
+  transfer, PR_SET_NO_NEW_PRIVS, ABI query, ruleset creation, add-rule and restrict
+  syscalls account for the six Landlock blocks. The ruleset attr is repr(C) with
+  one initialized u64; the path-beneath attr is repr(C, packed) with u64 rights
+  and i32 parent fd, matching the Linux UAPI prefix. Live attrs and descriptors
+  outlive each syscall; no references to unaligned packed fields are formed.
+  ABI query passes null/zero with VERSION. Creation passes the actual struct
+  size; only successful nonnegative results become a File. add-rule copies the
+  kernel rule before its borrowed directory File drops. restrict_self borrows
+  the ruleset, does not consume it, and CLOEXEC closes the child's copy.
+- Landlock policy is a filesystem policy, not a network sandbox or a revocation
+  of writable descriptors already inherited from the supervisor. Approved stdio
+  and descriptor inheritance remain deployment/caller responsibilities. Private
+  roots and the existing trusted-directory/same-UID assumptions still apply.
+- `util/process.rs`: current_uid has no memory arguments. Readiness poll receives
+  one initialized slot and read receives a live 4096-byte buffer; only positive
+  returned lengths index the buffer, bounded by read's count. The parent OwnedFd
+  stays live throughout. The detached-process pre_exec block captures no heap
+  owners and calls only setsid/errno. These complete the sites beyond the already
+  reviewed pipe, fcntl, captured-executable, directory-open and readiness-write
+  blocks. The readiness protocol expects its small JSON response in one read;
+  this review does not promise arbitrary fragmented-stream framing.
+- `delivery/local.rs`: its pre_exec callback captures parent-prepared policy,
+  arms PR_SET_PDEATHSIG before comparing getppid to the recorded supervisor, then
+  applies confinement. Both scalar syscalls have no borrowed memory. The second
+  check covers supervisor death before arming; errors use scalar errno. Runtime
+  confine_server likewise prepares before fork and borrows the captured policy.
+
+The only conditional production unsafe row is Linux SO_PEERCRED in codex/peer;
+its non-Linux branch rejects verification. The source-defined production macro
+log_event expands logging/JSON construction, not an unsafe token. The inventory's
+literal unsafe macro tokens are in tests. Standard/dependency macros, derive
+output and dependency internals remain outside this source audit; locked
+versions and dependency-audit CI do not constitute a proof of their memory safety.
+
+### API coverage and remaining semantic questions
+
+Task-env public wrappers now state exclusive ownership, accepted disposable roots,
+restoration without reopened descriptors, and destructive/partial-failure effects.
+Delivery prepare/execute/reconcile/retry/finish and Executor now distinguish
+non-submitting checks from submission, lock scope, unknown outcomes and recovery.
+Broker serve states ownership, process lifetime, socket cleanup and restart rules.
+Together with earlier spawn, atomic-write, raw-fd and task-env contracts these
+cover the prioritized API boundaries; simple helpers are not given boilerplate.
+
+Independent acceptance must still assess these explicitly retained assumptions:
+/proc marker/group/start-time discovery uses separate observations and clock-tick
+identity, same-UID isolation is external, caller-supplied path/fd correspondence
+is trusted, and arbitrary generated/dependency unsafe is not covered. No real PID
+wraparound or atomic /proc ownership proof is claimed. The table maps every source
+candidate to a conclusion and prerequisites, not to an unconditional safety label.
