@@ -251,7 +251,7 @@ pub fn try_lock_task(task_id: &str) -> Result<Option<std::fs::File>> {
     }
 }
 
-/// Load the index without locking; writers hold [`lock_registry`] first.
+/// Load the index without locking; writers hold the internal `lock_registry` guard first.
 pub fn load_registry() -> Result<Registry> {
     let path = registry_path()?;
     if !path.exists() {
