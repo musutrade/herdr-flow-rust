@@ -47,9 +47,8 @@ four; empty or short masks deserve a separate input-contract regression review
 that behavior. Track the finding with #48 parser/input review; it is not evidence
 that a source move fixes malformed-input behavior.
 
-#47 remains open: this first boundary and candidate list do not claim completion
-of the remaining dependency and compatibility reviews. #38 real-workflow
-acceptance is outside this source refactor.
+#47 remains open pending independent acceptance of the review and merged
+checks. #38 real-workflow acceptance is outside this source refactor.
 
 ## Second batch: TUI wire observation
 
@@ -72,3 +71,69 @@ Existing `tui_bridge` tests exercise split handshake/frame observations and
 close/binary rejection through the preserved public path; the full validation
 gates remain required. Shared session state and persistence extraction remain
 deferred: this small boundary does not justify a broader TUI state-machine move.
+
+## Final candidate disposition and acceptance evidence
+
+Reviewed against main `0ac9a64acf863a0db264c270815d66b1459fc9eb`, after
+PR #67 (frame codec) and PR #68 (wire observation). The remaining candidates
+above are deliberately not selected for this issue, for the concrete reasons
+below. They are not a requirement to split every large file in a later batch.
+
+- `queue::tick` loads state, collects observations, applies `progress::stalls`,
+  updates the heartbeat, saves, and then dispatches. Save-before-dispatch is a
+  meaningful ordering boundary. `queue::locked` returns a caller-owned guard;
+  moving or merging persistence cannot silently take over that guard lifetime.
+  Keep these entrypoints and ordering together; no demonstrated gain from a
+  generic persistence abstraction justifies a change.
+- `progress::apply` selects `LocalArtifacts` for `apply_with_adapter`. That
+  wrapper preserves an adapter substitution/test seam. The latter stages a
+  cloned state, runs acceptance preparation, applies the successor and records
+  lineage, then commits `*s` only after success. Its helper chain separates
+  validation and mutation. Flattening it or removing the clone would need a
+  separate behavioral/performance justification that this review does not have.
+- `pr::mutable` validates the spec, task/version, ownership and control state;
+  `pr::store` increments the version, records an audit event and replaces the
+  task entry. These are not equivalent to queue JSON persistence or arbitrary
+  object wrappers. Keep their error/mutation boundaries and public API; no
+  identical-semantic duplicate has been established for extraction.
+- `crap::analyze_source` parses the AST, collects functions in traversal order,
+  scans source declarations and consumes `SpanMatcher` while analyzing each
+  function. Moving just one half would separate paired ordering assumptions.
+  No correctness or review benefit sufficient to justify changing this gate
+  has been established; embedded source fixtures remain tests, not dead code.
+- TUI session/review persistence shares observer state with marker updates.
+  The narrow byte observation boundary was selected; further state-machine
+  extraction would require exposing or relocating that shared mutable state.
+  Retain it instead of introducing visibility changes without a demonstrated
+  review benefit. RPC handshake/deadline/connection ownership likewise stays
+  together; only the reusable frame codec was selected.
+
+No public helper was removed or narrowed. The five moved public symbols retain
+original re-exports without introducing new platform conditions. Other public
+API contracts, platform-specific implementations and document references remain
+unchanged. Repository call counts cannot establish whether downstream callers
+exist; this review makes no dead-code claim from those counts.
+
+| #47 acceptance item | Evidence / boundary |
+| --- | --- |
+| Current candidates and justified selection | Six-module table, two selected byte-processing boundaries, explicit rejected candidates and dependency chains above. Old duplicate/dead-code counts are not treated as evidence. |
+| Clear responsibilities and compatibility | PR #67 and #68 preserve implementation bodies and old public import paths; private modules introduce no new API surface or cfg gates. Internal diagnostic/type-name strings are not promised stable. |
+| Error, lock, state, timeout and cleanup semantics | Moved blocks were checked byte-for-byte; parent changes only extraction/imports/re-exports. Socket, lock, signal, process and persistence ownership remain in place. Existing frame, RPC, TUI and runtime integration tests cover consumers. |
+| Public exports, CLI, MSRV, docs and gates | Both batches passed full tests (453 passed, 0 failed, 5 ignored), absolute CRAP threshold 10 without baseline/exemptions, Clippy and rustdoc with warnings denied, and stable/Rust 1.85 release builds; exact-head and post-merge CI passed. CLI and dependency files were unchanged. |
+
+This final evidence update is Markdown only and reuses the verified PR #68
+runtime evidence; it does not claim another runtime suite was run for prose.
+Independent review and merged checks determine closure, not this document alone.
+The public short-mask input concern remains tracked for #48; #38 real-agent
+acceptance remains separate.
+
+### Retained failure evidence
+
+PR #68's first local rerun failed the existing `output_budget` test
+`output_limit_reclaims_group_and_preserves_unrelated_process` at its absent-marker
+assertion; targeted and full reruns and exact CI passed. The test starts a child
+that writes after 300 ms and checks for absence after capture returns. A delayed
+parent could allow that write before reclamation, but the retained assertion
+alone does not distinguish scheduling delay from a reclamation defect. Keep the
+failure log and investigate this separately with process/readiness evidence;
+neither the unchanged source move nor a passing rerun proves its root cause.
