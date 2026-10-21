@@ -48,10 +48,7 @@ pub(super) fn run(
     deadline: Instant,
 ) -> Result<CommandOutput> {
     let mut command = OwnedCommand(Some(child));
-    let mut pipes = Pipes::new(
-        command.child(),
-        options.stdin.as_deref().unwrap_or_default(),
-    )?;
+    let mut pipes = Pipes::new(command.child(), options)?;
     let status = wait(&mut command, &mut pipes, deadline, program)?;
     Ok(CommandOutput {
         status,
@@ -134,19 +131,23 @@ fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
 struct Captured<R> {
     pipe: Option<R>,
     bytes: Vec<u8>,
+    limit: usize,
+    name: &'static str,
 }
 
 impl<R: Read + AsRawFd> Captured<R> {
-    fn new(pipe: Option<R>) -> Result<Self> {
+    fn new(pipe: Option<R>, limit: usize, name: &'static str) -> Result<Self> {
         let pipe = pipe.ok_or_else(|| FlowError::io("missing capture pipe"))?;
         nonblocking(&pipe)?;
         Ok(Self {
             pipe: Some(pipe),
             bytes: Vec::new(),
+            limit,
+            name,
         })
     }
 
-    fn pump(&mut self) -> io::Result<()> {
+    fn pump(&mut self) -> Result<()> {
         let Some(pipe) = self.pipe.as_mut() else {
             return Ok(());
         };
@@ -155,9 +156,17 @@ impl<R: Read + AsRawFd> Captured<R> {
         let mut buffer = [0; 64 * 1024];
         match pipe.read(&mut buffer) {
             Ok(0) => self.pipe = None,
-            Ok(n) => self.bytes.extend_from_slice(&buffer[..n]),
+            Ok(n) => {
+                if n > self.limit.saturating_sub(self.bytes.len()) {
+                    return Err(FlowError::new(
+                        ErrorKind::OutputLimit,
+                        format!("{} exceeded {} byte capture limit", self.name, self.limit),
+                    ));
+                }
+                self.bytes.extend_from_slice(&buffer[..n]);
+            }
             Err(error) if retry_io(&error) => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
@@ -211,18 +220,21 @@ struct Pipes<'a> {
 }
 
 impl<'a> Pipes<'a> {
-    fn new(child: &mut Child, data: &'a [u8]) -> Result<Self> {
+    fn new(child: &mut Child, options: &'a CommandOptions) -> Result<Self> {
         Ok(Self {
-            stdout: Captured::new(child.stdout.take())?,
-            stderr: Captured::new(child.stderr.take())?,
-            stdin: Input::new(child.stdin.take(), data)?,
+            stdout: Captured::new(child.stdout.take(), options.stdout_limit, "stdout")?,
+            stderr: Captured::new(child.stderr.take(), options.stderr_limit, "stderr")?,
+            stdin: Input::new(
+                child.stdin.take(),
+                options.stdin.as_deref().unwrap_or_default(),
+            )?,
         })
     }
 
-    fn pump(&mut self) -> io::Result<()> {
+    fn pump(&mut self) -> Result<()> {
         self.stdout.pump()?;
         self.stderr.pump()?;
-        self.stdin.pump()
+        self.stdin.pump().map_err(Into::into)
     }
 
     fn complete(&self) -> bool {

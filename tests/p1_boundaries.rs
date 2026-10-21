@@ -29,7 +29,6 @@ fn command_deadline_covers_descendant_pipes_and_blocked_stdin() {
         "sleep 1 & exit 0",
         "sleep 1 & wait",
         "setsid /bin/sh -c 'sleep 1' & exit 0",
-        "yes output",
     ] {
         let start = Instant::now();
         let result = shell(script, Some(vec![b'x'; 1024 * 1024]));

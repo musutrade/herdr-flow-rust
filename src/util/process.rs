@@ -31,6 +31,9 @@ pub struct CommandOptions {
     /// Remove inherited GIT_* variables before applying explicit env entries.
     pub remove_git_env: bool,
     pub stdin: Option<Vec<u8>>,
+    /// Maximum captured bytes per stream. Exceeding either limit fails the command.
+    pub stdout_limit: usize,
+    pub stderr_limit: usize,
 }
 
 impl Default for CommandOptions {
@@ -42,6 +45,8 @@ impl Default for CommandOptions {
             clear_env: false,
             remove_git_env: false,
             stdin: None,
+            stdout_limit: 16 * 1024 * 1024,
+            stderr_limit: 16 * 1024 * 1024,
         }
     }
 }
@@ -69,6 +74,9 @@ impl CommandOutput {
 
 /// Run a command with captured stdout/stderr and a hard timeout.
 ///
+/// Output is bounded during collection (16 MiB per stream by default). An
+/// exceeded budget returns `OutputLimitExceeded`, without partial output, and
+/// kills the owned process group using the same cleanup as a timeout.
 /// A timeout is reported as `TimeoutExpired`. A non-zero exit is returned to
 /// the caller as data; policy about failures belongs to each boundary.
 pub fn run_command(argv: &[String], options: &CommandOptions) -> Result<CommandOutput> {
