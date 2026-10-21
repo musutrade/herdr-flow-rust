@@ -1,8 +1,9 @@
 //! Bounded, test-only metadata inventory for task-owned and outside resources.
 //!
-//! This collector never mutates or deletes observed resources. It records only
+//! This collector never mutates or deletes observed resources. It records
 //! paths/metadata, process identities, queue keys/counts and bounded disk
-//! observations. It deliberately does not read file contents, config or auth.
+//! observations. It does not report file contents, config or auth. Shared queue
+//! JSON is parsed only for ownership keys/counts, not copied into evidence.
 use herdr_flow::queue;
 use herdr_flow::task_env::{self, WorktreeRegistration};
 use serde_json::{json, Value as J};
@@ -58,6 +59,11 @@ pub fn collect(spec: &InventorySpec<'_>) -> J {
         .map(|path| path_observation(path, "excluded", &mut errors))
         .collect::<Vec<_>>();
     let base = base_observation(spec.base, spec.excluded, &mut errors);
+    let roots = json!({
+        "workspace": path_observation(spec.workspace_root, "workspace", &mut errors),
+        "temp": path_observation(spec.temp_root, "temp", &mut errors)
+    });
+    let queue_usage = path_observation(spec.queue, "queue", &mut errors);
     let free_bytes = match free_bytes(spec.base) {
         Ok(bytes) => json!(bytes),
         Err(error) => {
@@ -72,6 +78,8 @@ pub fn collect(spec: &InventorySpec<'_>) -> J {
         "temp_root": spec.temp_root.display().to_string(),
         "queue": spec.queue.display().to_string(),
         "base": spec.base.display().to_string(),
+        "roots": roots,
+        "queue_usage": queue_usage,
         "registry": registry,
         "state": state,
         "cleanup": cleanup,
@@ -83,6 +91,13 @@ pub fn collect(spec: &InventorySpec<'_>) -> J {
         "excluded": excluded,
         "base_usage": base,
         "free_bytes_filesystem": free_bytes,
+        "free_bytes_is_observation_only": true,
+        "observation_limits": [
+            "marked_processes internally enumerates /proc and suppresses discovery errors; zero/partial count is not complete discovery proof",
+            "per-pid fd/cwd inspection is a momentary sample and can miss short-lived, closed or unlinked fds",
+            "git worktree list uses Command::output without an external timeout, only for explicitly registered fixture repos",
+            "filesystem free bytes are noisy and are not a pass/fail leak proof"
+        ],
         "limits": {
             "max_files": MAX_FILES,
             "max_depth": MAX_DEPTH,
@@ -205,82 +220,99 @@ fn queue_observation(queue_root: &Path, task_id: &str, errors: &mut Vec<String>)
             return json!({"error": error.to_string()});
         }
     };
-    let tasks = state["tasks"].as_object().cloned().unwrap_or_default();
+    fn section<'a>(
+        state: &'a J,
+        name: &str,
+        errors: &mut Vec<String>,
+    ) -> Option<&'a serde_json::Map<String, J>> {
+        match state.get(name).and_then(J::as_object) {
+            Some(section) => Some(section),
+            None => {
+                errors.push(format!("queue section {name} is not an object"));
+                None
+            }
+        }
+    }
+    fn page(keys: &mut Vec<String>) -> J {
+        let total = keys.len();
+        let truncated = total > MAX_QUEUE_KEYS;
+        keys.sort();
+        keys.truncate(MAX_QUEUE_KEYS);
+        json!({"total": total, "truncated": truncated, "keys": keys.as_slice()})
+    }
+    let tasks = section(&state, "tasks", errors);
+    let waits = section(&state, "waits", errors);
+    let events = section(&state, "events", errors);
+    let deliveries = section(&state, "deliveries", errors);
     let mut owned_tasks = Vec::new();
     let mut unrelated_tasks = Vec::new();
-    for (key, task) in &tasks {
-        let owned = key == task_id || task["lineage"]["requirement"] == task_id;
-        if owned {
-            owned_tasks.push(key.clone());
-        } else {
-            unrelated_tasks.push(key.clone());
+    if let Some(tasks) = tasks {
+        for (key, value) in tasks {
+            if key == task_id || value["lineage"]["requirement"] == task_id {
+                owned_tasks.push(key.clone());
+            } else {
+                unrelated_tasks.push(key.clone());
+            }
         }
     }
     let owned_task_set: std::collections::BTreeSet<_> = owned_tasks.iter().cloned().collect();
-    let waits = state["waits"].as_object().cloned().unwrap_or_default();
-    let owned_waits = waits
-        .iter()
-        .filter(|(_, wait)| {
-            wait["task"] == task_id || owned_task_set.contains(wait["task"].as_str().unwrap_or(""))
-        })
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let unrelated_waits = waits
-        .keys()
-        .filter(|key| !owned_waits.contains(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    let events = state["events"].as_object().cloned().unwrap_or_default();
-    let owned_events = events
-        .iter()
-        .filter(|(_, event)| {
-            event["task"] == task_id
-                || owned_task_set.contains(event["task"].as_str().unwrap_or(""))
-        })
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let unrelated_events = events
-        .keys()
-        .filter(|key| !owned_events.contains(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    let owned_event_set: std::collections::BTreeSet<_> = owned_events.iter().cloned().collect();
-    let deliveries = state["deliveries"].as_object().cloned().unwrap_or_default();
-    let mut owned_deliveries = Vec::new();
-    let mut unrelated_deliveries = Vec::new();
-    for (key, delivery) in &deliveries {
-        let owned = delivery["events"].as_array().is_some_and(|events| {
-            events.iter().any(|event| {
-                event
-                    .as_str()
-                    .is_some_and(|id| owned_event_set.contains(id))
-            })
-        });
-        if owned {
-            owned_deliveries.push(key.clone());
-        } else {
-            unrelated_deliveries.push(key.clone());
+    let mut owned_waits = Vec::new();
+    let mut unrelated_waits = Vec::new();
+    if let Some(waits) = waits {
+        for (key, value) in waits {
+            if value["task"] == task_id
+                || owned_task_set.contains(value["task"].as_str().unwrap_or(""))
+            {
+                owned_waits.push(key.clone());
+            } else {
+                unrelated_waits.push(key.clone());
+            }
         }
     }
-    let truncate = |mut values: Vec<String>| {
-        values.sort();
-        if values.len() > MAX_QUEUE_KEYS {
-            values.truncate(MAX_QUEUE_KEYS);
+    let mut owned_events = Vec::new();
+    let mut unrelated_events = Vec::new();
+    if let Some(events) = events {
+        for (key, value) in events {
+            if value["task"] == task_id
+                || owned_task_set.contains(value["task"].as_str().unwrap_or(""))
+            {
+                owned_events.push(key.clone());
+            } else {
+                unrelated_events.push(key.clone());
+            }
         }
-        values
-    };
+    }
+    let owned_event_set: std::collections::BTreeSet<_> = owned_events.iter().cloned().collect();
+    let mut owned_deliveries = Vec::new();
+    let mut unrelated_deliveries = Vec::new();
+    if let Some(deliveries) = deliveries {
+        for (key, value) in deliveries {
+            let owned = value["events"].as_array().is_some_and(|events| {
+                events.iter().any(|event| {
+                    event
+                        .as_str()
+                        .is_some_and(|id| owned_event_set.contains(id))
+                })
+            });
+            if owned {
+                owned_deliveries.push(key.clone());
+            } else {
+                unrelated_deliveries.push(key.clone());
+            }
+        }
+    }
     json!({
         "owned": {
-            "tasks": truncate(owned_tasks),
-            "waits": truncate(owned_waits),
-            "events": truncate(owned_events),
-            "deliveries": truncate(owned_deliveries)
+            "tasks": page(&mut owned_tasks),
+            "waits": page(&mut owned_waits),
+            "events": page(&mut owned_events),
+            "deliveries": page(&mut owned_deliveries)
         },
         "unrelated": {
-            "tasks": truncate(unrelated_tasks),
-            "waits": truncate(unrelated_waits),
-            "events": truncate(unrelated_events),
-            "deliveries": truncate(unrelated_deliveries)
+            "tasks": page(&mut unrelated_tasks),
+            "waits": page(&mut unrelated_waits),
+            "events": page(&mut unrelated_events),
+            "deliveries": page(&mut unrelated_deliveries)
         }
     })
 }
@@ -297,20 +329,27 @@ fn process_observation(
         .take(MAX_PROCESSES)
         .map(|record| {
             let pid = record.pid;
-            let before = proc_start(pid);
-            let mut before_start = None;
             let mut record_json = json!({
                 "pid": pid,
-                "pgid": record.pgid,
                 "expected_start": record.start_time,
-                "start_before": before.as_ref().ok().cloned().flatten(),
                 "status": "unknown",
                 "fds": [],
                 "fd_errors": [],
+                "fd_vanished": 0,
+                "fd_observed": 0,
+                "fd_truncated": false,
                 "cwd": J::Null,
+                "cwd_status": "unknown",
                 "complete": false
             });
-            match before {
+            if record.start_time.is_none() {
+                record_json["status"] = json!("unknown_identity");
+                errors.push(format!(
+                    "process {pid} has no expected start identity; fd/cwd not inspected"
+                ));
+                return record_json;
+            }
+            let before_start = match proc_start(pid) {
                 Err(error) => {
                     errors.push(format!("process {pid} start before: {error}"));
                     record_json["status"] = json!("error");
@@ -321,15 +360,18 @@ fn process_observation(
                     record_json["status"] = json!("gone");
                     return record_json;
                 }
-                Ok(Some(start)) => {
-                    if record.start_time.is_some() && Some(start) != record.start_time {
-                        record_json["status"] = json!("identity_changed");
-                        return record_json;
-                    }
-                    before_start = Some(start);
-                    record_json["status"] = json!("sampled");
-                }
+                Ok(Some(start)) => start,
+            };
+            record_json["start_before"] = json!(before_start);
+            if Some(before_start) != record.start_time {
+                record_json["status"] = json!("identity_changed");
+                return record_json;
             }
+            let mut fd_ok = true;
+            let mut cwd_ok = true;
+            let mut fd_vanished = 0usize;
+            let mut fd_observed = 0usize;
+            let mut fd_truncated = false;
             let fd_dir = format!("/proc/{pid}/fd");
             match fs::read_dir(&fd_dir) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -340,11 +382,12 @@ fn process_observation(
                     errors.push(format!("process {pid} fd dir: {error}"));
                     record_json["status"] = json!("error");
                     record_json["error"] = json!(error.to_string());
+                    fd_ok = false;
                 }
                 Ok(entries) => {
                     let mut fds = Vec::new();
                     let mut fd_errors = Vec::new();
-                    for entry in entries.take(MAX_FDS) {
+                    for entry in entries.take(MAX_FDS + 1) {
                         let entry = match entry {
                             Ok(entry) => entry,
                             Err(error) => {
@@ -352,6 +395,11 @@ fn process_observation(
                                 continue;
                             }
                         };
+                        fd_observed += 1;
+                        if fd_observed > MAX_FDS {
+                            fd_truncated = true;
+                            break;
+                        }
                         let fd = entry.file_name().to_string_lossy().to_string();
                         match fs::read_link(format!("/proc/{pid}/fd/{fd}")) {
                             Ok(target) => {
@@ -366,11 +414,20 @@ fn process_observation(
                                     "class": class
                                 }));
                             }
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                fd_vanished += 1;
+                            }
                             Err(error) => {
                                 fd_errors.push(format!("fd {fd}: {error}"));
                             }
                         }
+                    }
+                    fd_ok = fd_errors.is_empty() && fd_vanished == 0 && !fd_truncated;
+                    if !fd_errors.is_empty() {
+                        errors.push(format!(
+                            "process {pid} fd observation errors: {}",
+                            fd_errors.join("; ")
+                        ));
                     }
                     record_json["fds"] = json!(fds);
                     record_json["fd_errors"] = json!(fd_errors);
@@ -382,31 +439,42 @@ fn process_observation(
                         "target": cwd.display().to_string(),
                         "class": path_class(&cwd, allowed, spec.excluded)
                     });
+                    record_json["cwd_status"] = json!("sampled");
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    record_json["cwd_status"] = json!("vanished");
+                    cwd_ok = false;
+                }
                 Err(error) => {
                     errors.push(format!("process {pid} cwd: {error}"));
                     record_json["cwd"] = json!({"error": error.to_string()});
+                    record_json["cwd_status"] = json!("error");
+                    cwd_ok = false;
                 }
             }
-            let after = proc_start(pid);
-            match after {
+            let after_start = match proc_start(pid) {
                 Err(error) => {
                     errors.push(format!("process {pid} start after: {error}"));
                     record_json["status"] = json!("error_after");
                     record_json["error"] = json!(error);
+                    return record_json;
                 }
                 Ok(None) => {
                     record_json["status"] = json!("gone_after_sampling");
+                    return record_json;
                 }
-                Ok(Some(after_start)) => {
-                    let complete = before_start.is_some() && before_start == Some(after_start);
-                    record_json["start_after"] = json!(after_start);
-                    record_json["complete"] = json!(complete);
-                    if !complete {
-                        record_json["status"] = json!("identity_changed");
-                    }
-                }
+                Ok(Some(start)) => start,
+            };
+            record_json["start_after"] = json!(after_start);
+            record_json["fd_vanished"] = json!(fd_vanished);
+            record_json["fd_observed"] = json!(fd_observed);
+            record_json["fd_truncated"] = json!(fd_truncated);
+            let complete = before_start == after_start && fd_ok && cwd_ok;
+            record_json["complete"] = json!(complete);
+            if complete {
+                record_json["status"] = json!("sampled");
+            } else {
+                record_json["status"] = json!("incomplete");
             }
             record_json
         })
@@ -415,6 +483,8 @@ fn process_observation(
         "instance": spec.instance_id,
         "count": records.len(),
         "truncated": truncated,
+        "count_is_not_discovery_proof": true,
+        "discovery_limitation": "marked_processes filters /proc internally and suppresses its enumeration/read errors; a zero/partial count is not proof of complete process discovery",
         "records": records
     })
 }
@@ -595,5 +665,5 @@ fn free_bytes(path: &Path) -> Result<u64, String> {
     }
     // SAFETY: statvfs initialized stat on success.
     let stat = unsafe { stat.assume_init() };
-    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
