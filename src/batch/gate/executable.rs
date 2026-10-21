@@ -16,6 +16,7 @@ pub(super) fn open(path: &Path) -> Result<Arc<File>> {
     check_path(path)?;
     let resolved = fs::canonicalize(path)?;
     check_path(&resolved)?;
+    check_executable(&fs::symlink_metadata(&resolved)?)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)

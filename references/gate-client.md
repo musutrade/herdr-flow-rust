@@ -148,3 +148,14 @@ not by itself complete #45. The rejection regression demonstrates that a
 world-writable executable was run on the baseline and is rejected before code
 execution with this enforcement; descriptor tests cover scripts, trusted
 symlinks and atomic upgrades.
+
+### Operation identity validation
+
+Both verify and inspect require a nonempty operation string of at most 500
+characters before invoking the verifier. A missing, null, blank or non-string
+operation is rejected; echoing a null operation is not identity binding. The
+isolated receipt fixture reproduced acceptance of a null/null operation on the
+baseline. Regression cases also cover changed input-binding fields, wrong
+operation/App/check identity, expiry (including the exact boundary), invalid
+coverage/validity flags and replay against a new operation. They do not claim
+access to or compromise of a deployed authoritative service.
