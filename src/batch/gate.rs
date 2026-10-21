@@ -15,6 +15,7 @@ use crate::logging;
 use crate::model::{self, J};
 use crate::progress;
 use crate::util;
+mod executable;
 
 pub fn validate(config: Option<&J>) -> Result<J> {
     let config = config
@@ -85,18 +86,26 @@ fn query_reference(
     expected: J,
 ) -> Result<J> {
     let reference = progress::text(reference, "trusted gate run reference", 500)?;
-    let request = query_request(batch, &expected, &reference);
+    let request = query_request(batch, &expected, &reference)?;
     query_call(&config, &request, &expected, now)
 }
 
-fn query_request(batch: &J, expected: &J, reference: &str) -> J {
-    json!({
+fn query_request(batch: &J, expected: &J, reference: &str) -> Result<J> {
+    Ok(json!({
         "version": 1,
         "action": "verify",
         "binding": expected,
-        "operation": batch.get("gate").and_then(|gate| gate.get("operation")).cloned().unwrap_or(Value::Null),
+        "operation": operation(batch)?,
         "reference": reference
-    })
+    }))
+}
+
+fn operation(batch: &J) -> Result<String> {
+    progress::text(
+        batch.get("gate").and_then(|gate| gate.get("operation")),
+        "trusted gate operation",
+        500,
+    )
 }
 
 fn query_call(config: &J, request: &J, expected: &J, now: f64) -> Result<J> {
@@ -201,7 +210,11 @@ pub fn call(config: &J, request: &J) -> Result<J> {
 }
 
 fn call_run(argv: &[String], stdin: Vec<u8>) -> Result<J> {
-    let options = call_options(stdin);
+    let mut options = call_options(stdin);
+    let program = argv
+        .first()
+        .ok_or_else(|| FlowError::progress("missing gate verifier executable"))?;
+    options.executable_file = Some(executable::open(Path::new(program))?);
     let output = util::process::run_command(argv, &options).map_err(|error| {
         FlowError::progress(format!(
             "trusted gate verification unavailable; preserve the existing operation: {error}"
@@ -279,7 +292,7 @@ fn quiescent_request(batch: &J, config: J, expected: J) -> Result<J> {
         "version": 1,
         "action": "inspect",
         "binding": expected,
-        "operation": batch.get("gate").and_then(|gate| gate.get("operation")).cloned().unwrap_or(Value::Null)
+        "operation": operation(batch)?
     });
     quiescent_call(config, request)
 }

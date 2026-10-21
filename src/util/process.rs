@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -31,6 +31,8 @@ pub struct CommandOptions {
     /// Remove inherited GIT_* variables before applying explicit env entries.
     pub remove_git_env: bool,
     pub stdin: Option<Vec<u8>>,
+    /// Execute this already-open file instead of resolving argv[0] again.
+    pub executable_file: Option<std::sync::Arc<File>>,
     /// Maximum captured bytes per stream. Exceeding either limit fails the command.
     pub stdout_limit: usize,
     pub stderr_limit: usize,
@@ -45,6 +47,7 @@ impl Default for CommandOptions {
             clear_env: false,
             remove_git_env: false,
             stdin: None,
+            executable_file: None,
             stdout_limit: 16 * 1024 * 1024,
             stderr_limit: 16 * 1024 * 1024,
         }
@@ -98,7 +101,7 @@ fn require_argv(argv: &[String]) -> Result<()> {
 }
 
 fn build_command(argv: &[String], options: &CommandOptions) -> Command {
-    let mut command = Command::new(&argv[0]);
+    let mut command = executable_command(&argv[0], options);
     command.args(&argv[1..]);
     apply_cwd(&mut command, options.cwd.as_deref());
     apply_env(&mut command, options);
@@ -107,6 +110,27 @@ fn build_command(argv: &[String], options: &CommandOptions) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    command
+}
+
+fn executable_command(program: &str, options: &CommandOptions) -> Command {
+    let Some(file) = &options.executable_file else {
+        return Command::new(program);
+    };
+    let fd = file.as_raw_fd();
+    let mut command = Command::new(format!("/proc/self/fd/{fd}"));
+    command.arg0(program);
+    // SAFETY: the child only performs fcntl on the descriptor kept alive by
+    // options through spawn. Keeping it across exec also supports shebang
+    // interpreters reopening /proc/self/fd/N; the parent retains CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     command
 }
 
