@@ -185,3 +185,24 @@ work still prevents a hard overall signal-delivery deadline.
 Together with the signal section, this records the TUI production unsafe sites.
 Remaining task-environment /proc discovery, descriptor cleanup and key API reviews
 are still pending. #46 remains open.
+
+### Task environment descriptor walk review
+
+| Site | Preconditions and conclusion |
+| --- | --- |
+| `register_process` getpgrp; `process_group` getpgid; `ancestor_is_trusted` geteuid | Scalar process/UID queries have no memory arguments. They provide observations, not atomic ownership proofs. Registration's marker/group/start-time reads remain a separate discovery concern. |
+| `open_component_raw`, `file_from_fd` | Parent File remains live; CString survives openat. Only normal relative components enter via component_name, rejecting parent/root components. O_DIRECTORY/O_NOFOLLOW/O_CLOEXEC prevents following that leaf and inheritance. Fresh nonnegative fd transfers once to File. |
+| `kind_at` zeroed stat and fstatat | Linux stat is valid zeroed integer storage and fully writable during the call. Its fields are read only on success. CString and borrowed directory remain live; AT_SYMLINK_NOFOLLOW inspects the leaf itself. |
+| `open_child_dir` openat and File transfer | Same borrowed parent/name lifetime and flags. Every successful fd gains exactly one File owner; absent/non-directory/symlink leaves return None without an owned fd. |
+| `unlink_at`, `unlink_at_dir` | Directory stays borrowed and CString outlives call; unlink flags distinguish files/links from directories. Leaf names come from directory entries, Path::file_name or internally generated quarantine names. The helpers do not themselves enforce single-component names; caller provenance is required. |
+| `make_dir_writable` fchmod | A pinned directory File supplied by directory-open helpers is retained through metadata and chmod. Only owner rwx bits are added; this changes permissions and is not a read-only check. |
+| cleanup `rename_noreplace` | Both CStrings and parent File remain live; identical pinned parent and RENAME_NOREPLACE avoid destination overwrite. Sources are leaf names and destinations internal quarantine names. This is an atomic rename, not an atomic transaction with journal persistence. |
+
+Creation, persistence, restoration, process registration, descriptor registration,
+lock release and recovery now state caller ownership, partial-failure and recovery
+contracts. Restore reconstructs metadata but deliberately cannot reconstruct live
+OS file descriptors. A follow-up must check alignment between restored open_files
+and the new empty in-memory file_handles list when new handles are registered and
+unregistered; this review does not yet establish that mixed lifecycle as correct.
+Landlock syscall layout and remaining public delivery/broker contracts still need
+an explicit inventory reconciliation. #46 remains open.

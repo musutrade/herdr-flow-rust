@@ -153,6 +153,12 @@ impl TaskEnvironment {
         &self.state_file
     }
 
+    /// Atomically replace this handle's durable document.
+    ///
+    /// Caller must retain task ownership and serialize mutations. This method
+    /// does not acquire/check that lock or roll back in-memory changes. An I/O
+    /// error after rename may leave the new document visible; inspect/recover
+    /// durable state before retrying a higher-level operation.
     pub fn persist(&self) -> Result<()> {
         let value = serde_json::to_value(self)?;
         util::atomic_write_json(&self.state_file, &value)
@@ -177,6 +183,9 @@ impl TaskEnvironment {
     }
 
     /// Release the per-task ownership lock so a retry can proceed.
+    /// Repeated calls are harmless. This does not destroy resources or release
+    /// registry claims; stop mutating this handle after relinquishing ownership.
+    /// Panics if its internal ownership mutex was poisoned.
     pub fn release_ownership(&self) {
         self.ownership_lock
             .lock()
@@ -274,7 +283,12 @@ impl TaskEnvironment {
     ///
     /// The process must lead its own process group (spawn with `setsid` or
     /// `setpgid(0, 0)`); otherwise descendants cannot be reclaimed reliably
-    /// and registration is refused.
+    /// and registration is refused. It must also carry this environment's
+    /// marker, normally inherited from `command`. This records cleanup metadata;
+    /// it does not take the caller's Child or assume responsibility for wait().
+    /// Keep the ownership lock while registering. /proc reads are observations,
+    /// not an atomic identity proof; disappearance can fail registration.
+    /// Persistence failure can leave the in-memory record appended.
     pub fn register_process(&mut self, pid: i32) -> Result<()> {
         if pid <= 1 {
             return Err(FlowError::progress(format!(
@@ -318,8 +332,16 @@ impl TaskEnvironment {
 
     /// Take ownership of an already-open descriptor.
     ///
-    /// Only the owner of a descriptor can close it, so this is the supported
-    /// way to guarantee a file does not outlive the environment.
+    /// Transfers one descriptor into this handle's local ownership. Releasing
+    /// it closes that descriptor; duplicate descriptors held elsewhere are
+    /// unaffected and the underlying file is not thereby deleted.
+    /// Caller must hold task ownership and ensure `handle` corresponds to `path`;
+    /// the function checks path containment, not descriptor/path identity.
+    /// Ownership of the supplied File transfers even on error: rejection or a
+    /// duplicate path drops it; persistence failure after insertion retains it
+    /// in this handle until release/drop. Duplicate paths do not add another fd.
+    /// Restoring metadata does not restore OS descriptors. Panics if the internal
+    /// descriptor mutex was poisoned.
     pub fn register_handle(&mut self, path: &Path, handle: File) -> Result<()> {
         let resolved = util::resolve_path(path);
         if !self.owns_path(&resolved) {
@@ -823,6 +845,14 @@ pub fn process_is_alive(entry: &RegisteredProcess) -> bool {
 /// 4. claim the roots in the index (unique ownership, resource limit);
 /// 5. materialise the roots and record their identities;
 /// 6. mark the document `active`.
+///
+/// Roots must be distinct/non-overlapping, vacant and outside the control tree;
+/// delivery targets must not overlap them. Existing ancestors must pass the
+/// ownership/mode checks. The returned handle retains the task lock; another
+/// create is not an idempotent lookup. Failures may leave recoverable metadata
+/// or roots despite best-effort rollback: use `recover_interrupted`, not blind
+/// deletion or repeated creation. Process confinement/cleanup depends on Linux
+/// /proc and Landlock support; successful creation alone does not test spawning.
 pub fn create(
     task_id: &str,
     workspace_root: &Path,
@@ -998,6 +1028,12 @@ fn rollback_creation(env: &TaskEnvironment) {
 ///
 /// Fails while another live handle owns the task, which prevents a restored
 /// handle from releasing descriptors or slots it does not own.
+/// Reads metadata without restarting processes, reopening registered files or
+/// completing interrupted cleanup. The returned handle owns a fresh lock and
+/// an empty in-memory descriptor list. Active/creating/destroying states may all
+/// be loaded; choose recovery based on the persisted state. Malformed/missing
+/// metadata fails without reconstructing it, and each call needs exclusive
+/// ownership rather than sharing an existing handle.
 pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
     let lock = acquire_task_lock(task_id)?;
@@ -1030,6 +1066,12 @@ fn read_environment(state_file: &Path) -> Result<TaskEnvironment> {
 }
 
 /// Recover an environment left behind by an interrupted create or destroy.
+///
+/// Returns true when cleanup was performed, false when neither an interrupted
+/// document nor a cleanup plan needs work. A live owner blocks recovery. This
+/// can kill owned processes and remove disposable roots; it does not resume task
+/// execution. Failed cleanup retains evidence/claims for retry, subject to the
+/// cleanup retry limit. Repeated successful recovery eventually returns false.
 pub fn recover_interrupted(task_id: &str) -> Result<bool> {
     registry::validate_task_id(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
@@ -1156,7 +1198,10 @@ fn ancestor_is_trusted(metadata: &std::fs::Metadata) -> bool {
     owner_ok && (metadata.mode() & 0o022 == 0 || root_sticky)
 }
 
-/// Verify no ancestor of `path` is a symlink or untrusted directory.
+/// Check existing ancestors of `path` for symlinks and untrusted ownership/mode.
+/// The leaf and missing ancestors are not checked. This is a point-in-time
+/// pathname check, not a descriptor pin or protection against later same-UID
+/// mutation; callers must preserve the trusted-directory deployment boundary.
 pub fn validate_ancestors(path: &Path) -> Result<()> {
     let mut cursor = path.to_path_buf();
     while let Some(parent) = cursor.parent() {
