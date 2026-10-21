@@ -106,3 +106,26 @@ root is renamed back before cleanup to preserve its registered inode identity.
 Existing task environment, delivery and runtime boundary tests also pass.
 This is not a claim of a reproduced production deadlock or a completed inventory:
 #46 remains open pending the remaining unsafe and API reviews.
+
+### Cleanup signal identity
+
+The two numeric kill sites in cleanup are replaced by pidfd_open and
+pidfd_send_signal. Every signal attempt requires a PID greater than one and a
+recorded start time, opens an owned CLOEXEC handle, then checks the recorded
+identity against /proc. After that check, PID recycling cannot retarget the
+handle. The syscall uses a live borrowed fd and null siginfo with zero flags;
+File owns the descriptor on all return paths. ESRCH is idempotent completion;
+unsupported pidfd syscalls, permission failures and other errors propagate and
+retain the cleanup plan/slot. There is no numeric-kill fallback.
+
+An isolated regression passes an intentionally stale start time to the signal
+stage: the old implementation killed its test-owned child; the new implementation
+leaves it alive. This models stale input at the signal boundary, not a reproduced
+kernel PID wraparound. Additional tests cover a retained handle after process
+exit, invalid signal errors and rejected missing/group identities. Existing
+cleanup tests cover actual marked-process termination and unrelated survivors.
+
+This does not make /proc discovery atomic: start-time values have clock-tick
+precision, and marker/parent discovery uses separate reads. Those ownership
+observation limits still need separate review; no universal process identity
+proof or completed #46 audit is claimed.
