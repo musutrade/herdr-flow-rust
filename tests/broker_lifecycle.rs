@@ -1,5 +1,7 @@
 //! Isolated broker processes and sockets; no real model or user task resources.
 pub mod common;
+#[path = "common/rpc_server.rs"]
+mod rpc_fixture;
 use herdr_flow::{task_env::MARKER_ENV, util};
 use serde_json::json;
 use std::{
@@ -223,4 +225,102 @@ fn losing_the_ownership_lock_stops_broker() {
         std::fs::read(root.join("broker.lock")).unwrap(),
         b"replacement"
     );
+}
+
+fn native_request(root: &Path) -> UnixStream {
+    let mut stream = UnixStream::connect(root.join("broker.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    writeln!(
+        stream,
+        "{}",
+        json!({"method":"thread/read","params":{"threadId":"s"}})
+    )
+    .unwrap();
+    stream
+}
+
+#[test]
+fn malformed_connections_are_followed_by_successful_native_requests() {
+    let (done, wait) = std::sync::mpsc::channel();
+    let server = rpc_fixture::Server::start(move |mut peer| {
+        peer.initialize();
+        for _ in 0..4 {
+            let request = peer.request();
+            assert_eq!(request["method"], "thread/read");
+            peer.json(&json!({"id":request["id"],"result":{"thread":{"id":"s"}}}));
+        }
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let dir = fixture();
+    let root = dir.path();
+    std::fs::hard_link(&server.path, root.join("server.sock")).unwrap();
+    let mut broker = spawn(root);
+    ready(root, &mut broker);
+    for bytes in [b"{invalid}\n".as_slice(), b"\n", b"{}", b""] {
+        let mut stream = UnixStream::connect(root.join("broker.sock")).unwrap();
+        stream.write_all(bytes).unwrap();
+        drop(stream);
+        let mut response = String::new();
+        BufReader::new(native_request(root))
+            .read_line(&mut response)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["thread"]["id"], "s");
+    }
+    done.send(()).unwrap();
+    server.finish();
+}
+
+struct RestorePermissions(std::path::PathBuf);
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[test]
+fn journal_write_failure_stops_without_replaying_and_can_recover() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let (observed, arrived) = std::sync::mpsc::channel();
+    let (respond, response) = std::sync::mpsc::channel();
+    let (done, wait) = std::sync::mpsc::channel();
+    let server = rpc_fixture::Server::start(move |mut peer| {
+        peer.initialize();
+        let request = peer.request();
+        observed.send(()).unwrap();
+        response.recv_timeout(Duration::from_secs(5)).unwrap();
+        peer.json(&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"completed"}}}));
+        peer.json(&json!({"id":request["id"],"result":{"thread":{"id":"s"}}}));
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The failed broker closed the native connection, without replaying it.
+        assert_eq!(peer.stream.read(&mut [0; 1]).unwrap(), 0);
+    });
+    let dir = fixture();
+    let root = dir.path();
+    std::fs::hard_link(&server.path, root.join("server.sock")).unwrap();
+    let journal = json!({"turns":{},"pending":{}});
+    util::atomic_write_json(&root.join("broker-events.json"), &journal).unwrap();
+    let mut broker = spawn(root);
+    ready(root, &mut broker);
+    let mut stream = native_request(root);
+    arrived.recv_timeout(Duration::from_secs(3)).unwrap();
+    let restore = RestorePermissions(root.to_path_buf());
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    respond.send(()).unwrap();
+    assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+    assert_eq!(exited(&mut broker).code(), Some(2));
+    assert_eq!(
+        util::read_json(&root.join("broker-events.json")).unwrap(),
+        journal
+    );
+    drop(restore);
+    done.send(()).unwrap();
+    server.finish();
+    let mut recovered = spawn(root);
+    ready(root, &mut recovered);
+    healthy(root);
 }
