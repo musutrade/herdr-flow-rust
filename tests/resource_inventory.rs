@@ -84,7 +84,11 @@ fn temp() -> TempDir {
 }
 
 fn private_dir(path: &Path) {
-    fs::DirBuilder::new().mode(0o700).create_all(path).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(path)
+        .unwrap();
 }
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -378,6 +382,11 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
                     .is_some_and(|entries| entries.iter().any(|entry| entry
                         .as_str()
                         .is_some_and(|line| line.contains(worktree.to_str().unwrap()))))));
+        assert_eq!(
+            before["worktrees"][0]["git_worktree_list"]["truncated"],
+            false
+        );
+        assert_eq!(before["worktrees"][0]["git_worktree_list"]["total"], 2);
         assert!(before["open_files"]
             .as_array()
             .unwrap()
@@ -461,6 +470,11 @@ fn stable_base_inventory_collects_and_preserves_ownership_across_two_rounds() {
                     .any(|entry| entry
                         .as_str()
                         .is_some_and(|line| line.contains(worktree.to_str().unwrap())))));
+        assert_eq!(
+            after["worktrees"][0]["git_worktree_list"]["truncated"],
+            false
+        );
+        assert_eq!(after["worktrees"][0]["git_worktree_list"]["total"], 1);
         assert!(
             outside.exists(),
             "collector must not delete outside observations"

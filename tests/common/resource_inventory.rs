@@ -367,7 +367,7 @@ fn process_observation(
                 record_json["status"] = json!("identity_changed");
                 return record_json;
             }
-            let mut fd_ok = true;
+            let fd_ok;
             let mut cwd_ok = true;
             let mut fd_vanished = 0usize;
             let mut fd_observed = 0usize;
@@ -452,6 +452,9 @@ fn process_observation(
                     cwd_ok = false;
                 }
             }
+            record_json["fd_vanished"] = json!(fd_vanished);
+            record_json["fd_observed"] = json!(fd_observed);
+            record_json["fd_truncated"] = json!(fd_truncated);
             let after_start = match proc_start(pid) {
                 Err(error) => {
                     errors.push(format!("process {pid} start after: {error}"));
@@ -466,9 +469,6 @@ fn process_observation(
                 Ok(Some(start)) => start,
             };
             record_json["start_after"] = json!(after_start);
-            record_json["fd_vanished"] = json!(fd_vanished);
-            record_json["fd_observed"] = json!(fd_observed);
-            record_json["fd_truncated"] = json!(fd_truncated);
             let complete = before_start == after_start && fd_ok && cwd_ok;
             record_json["complete"] = json!(complete);
             if complete {
@@ -530,14 +530,19 @@ fn worktree_observation(worktrees: &[WorktreeRegistration], errors: &mut Vec<Str
                         .args(["worktree", "list", "--porcelain"])
                         .output()
                     {
-                        Ok(output) if output.status.success() => Some(json!({
-                            "repo": repo.display().to_string(),
-                            "entries": String::from_utf8_lossy(&output.stdout)
+                        Ok(output) if output.status.success() => {
+                            let text = String::from_utf8_lossy(&output.stdout);
+                            let entries: Vec<_> = text
                                 .lines()
                                 .filter(|line| line.starts_with("worktree "))
-                                .take(64)
-                                .collect::<Vec<_>>()
-                        })),
+                                .collect();
+                            Some(json!({
+                                "repo": repo.display().to_string(),
+                                "total": entries.len(),
+                                "truncated": entries.len() > 64,
+                                "entries": entries.into_iter().take(64).collect::<Vec<_>>()
+                            }))
+                        }
                         Ok(output) => {
                             errors.push(format!(
                                 "git worktree list {}: {}",

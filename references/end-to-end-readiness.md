@@ -339,8 +339,9 @@ stable campaign base. It observes task identity, owned/runtime roots, registry,
 environment state and cleanup plans, slots, registered worktrees/open files,
 marked process pid/start/cwd/fd targets, shared-queue ownership counts, explicit
 exclusions, scoped base file/byte/allocated-block counts and a noisy filesystem
-free-byte observation. It never reads file contents, configuration, auth or
-credentials and never deletes an observed resource.
+free-byte observation. It reads queue structure to classify ownership, but does
+not capture file payloads, configuration, auth or credentials, and never deletes
+an observed resource.
 
 The synthetic two-round test in `tests/resource_inventory.rs` reuses one campaign
 base and shared queue, creates a real marked child with an outside open fd,
@@ -352,3 +353,15 @@ removed. This is collector validation only: `/proc` samples can miss short-lived
 unlinked files, known-root observations do not prove absence of global caches, and
 filesystem free bytes are not a leak proof. No live model or twenty-round claim is
 made by this batch.
+
+The fixture resets its synthetic queue records explicitly; that reset is not
+production lifecycle cleanup. It compares normalized shared queue contents and
+retains the pre-cleanup runtime/open-file/worktree paths for post-cleanup checks.
+The inventory subtree's usage is compared separately from the external fixture
+repository and registry; this does not establish whole-campaign disk stability.
+Queue and worktree key lists expose totals and truncation. Process discovery uses
+`marked_processes`, whose internal read errors are not surfaced, so a zero count
+is not proof of complete process discovery. Git enumeration currently uses
+`Command::output` without a timeout or output-byte limit against the explicitly
+selected fixture repository; the collector is not a general bounded subprocess
+runner. These limits must be addressed or accounted for before live campaigns.
