@@ -113,31 +113,37 @@ fn native_receipt_uses_durable_delivery_identity_after_watcher_moves_on() {
 #[test]
 #[ignore = "requires selected OpenCode 1.19.3 config/model and native shell permission"]
 fn installed_real_opencode_receiver_readiness_and_ack() {
-    run_native_receiver(false, false, false, false);
+    run_native_receiver(false, false, false, false, false);
 }
 
 #[test]
 #[ignore = "requires selected native model: real developer result and coordinator ACK/application"]
 fn installed_real_opencode_developer_result_is_applied_by_native_receiver() {
-    run_native_receiver(true, false, false, false);
+    run_native_receiver(true, false, false, false, false);
 }
 
 #[test]
 #[ignore = "requires real developer, independent reviewer and native coordinator application"]
 fn installed_real_opencode_independent_acceptance_is_applied_by_native_receiver() {
-    run_native_receiver(true, true, false, false);
+    run_native_receiver(true, true, false, false, false);
 }
 
 #[test]
 #[ignore = "requires accepted native candidate and external unmarked Local Git delivery"]
 fn installed_real_opencode_accepted_result_is_delivered_by_external_driver() {
-    run_native_receiver(true, true, true, false);
+    run_native_receiver(true, true, true, false, false);
 }
 
 #[test]
 #[ignore = "requires real failed review, repair, fresh review and external Local Git delivery"]
 fn installed_real_opencode_failed_review_is_repaired_and_delivered_by_external_driver() {
-    run_native_receiver(true, true, true, true);
+    run_native_receiver(true, true, true, true, false);
+}
+
+#[test]
+#[ignore = "requires confirmed external delivery and fresh unmarked supervisor restart"]
+fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() {
+    run_native_receiver(true, true, true, true, true);
 }
 
 fn run_native_receiver(
@@ -145,6 +151,7 @@ fn run_native_receiver(
     apply_acceptance: bool,
     apply_delivery: bool,
     apply_repair: bool,
+    apply_restart: bool,
 ) {
     assert!(
         !apply_delivery || apply_acceptance,
@@ -153,6 +160,10 @@ fn run_native_receiver(
     assert!(
         !apply_repair || (apply_acceptance && apply_delivery),
         "repair requires acceptance and external delivery"
+    );
+    assert!(
+        !apply_restart || (apply_repair && apply_delivery),
+        "restart requires repair/delivery"
     );
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
@@ -794,6 +805,23 @@ fn run_native_receiver(
             );
         }
     }
+    if apply_restart {
+        queue_child.kill().unwrap();
+        queue_child.wait().unwrap();
+        let artifact = delivery_artifact.as_ref().unwrap();
+        external_supervisor_restart(
+            env,
+            &q,
+            &formal_target,
+            &user_asset,
+            artifact,
+            delivery_expected.as_ref().unwrap(),
+            user_identity.unwrap(),
+            &mut server,
+            &mut guard_child,
+        );
+        return;
+    }
     if apply_delivery {
         // The native coordinator has finished both notifications. Stop the queue
         // watcher before the external driver takes the queue lock for delivery.
@@ -840,6 +868,195 @@ fn assert_target_untouched(
         fs::read_to_string(user_asset).unwrap(),
         "unrelated user asset"
     );
+}
+
+fn confirm_delivery(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    target: &Path,
+    user_asset: &Path,
+    artifact: &J,
+    expected: &str,
+    user_identity: (u64, u64),
+) -> J {
+    assert_target_untouched(target, user_asset, user_identity, expected);
+    let artifact_id = artifact["id"].as_str().unwrap();
+    let state = queue::load_queue(q).unwrap();
+    let mut spec = json!({
+        "adapter":"git",
+        "target":target.display().to_string(),
+        "ref":"refs/heads/main",
+        "expected":expected,
+        "authorization":"deliver"
+    });
+    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    let intent = delivery::prepare(env, q, &spec, &delivery::local::Local).unwrap();
+    assert_eq!(intent["artifact"]["id"], json!(artifact_id));
+    assert_target_untouched(target, user_asset, user_identity, expected);
+    let confirmed = delivery::execute(env, &delivery::local::Local).unwrap();
+    assert_eq!(confirmed["phase"], "confirmed");
+    assert_eq!(
+        confirmed["receipt"]["repository"],
+        json!(target.display().to_string())
+    );
+    assert_eq!(confirmed["receipt"]["ref"], "refs/heads/main");
+    assert_eq!(confirmed["receipt"]["commit"], json!(artifact_id));
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        artifact_id
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+    confirmed
+}
+
+fn cli_output(args: &[&str]) -> std::process::Output {
+    use std::io::Read;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_end(&mut stdout)
+                .unwrap();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_end(&mut stderr)
+                .unwrap();
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("delivery CLI timed out");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct ChildReaper<'a> {
+    server: &'a mut std::process::Child,
+    guard: &'a mut std::process::Child,
+    armed: bool,
+}
+impl<'a> ChildReaper<'a> {
+    fn new(server: &'a mut std::process::Child, guard: &'a mut std::process::Child) -> Self {
+        Self {
+            server,
+            guard,
+            armed: true,
+        }
+    }
+    fn kill(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+        let _ = self.guard.kill();
+        let _ = self.guard.wait();
+    }
+    fn wait(mut self) {
+        let _ = self.server.wait();
+        let _ = self.guard.wait();
+        self.armed = false;
+    }
+}
+impl Drop for ChildReaper<'_> {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+fn external_supervisor_restart(
+    env: super::OwnedEnvironment,
+    q: &Path,
+    target: &Path,
+    user_asset: &Path,
+    artifact: &J,
+    expected: &str,
+    user_identity: (u64, u64),
+    server: &mut std::process::Child,
+    guard_child: &mut std::process::Child,
+) {
+    let workspace = env.workspace_root.clone();
+    let temporary = env.temp_root.clone();
+    let state_file = env.state_file().to_path_buf();
+    let confirmed = confirm_delivery(
+        &mut env,
+        q,
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+    );
+    let artifact_id = artifact["id"].as_str().unwrap();
+    let intent_id = confirmed["id"].clone();
+    let receipt = confirmed["receipt"].clone();
+    let mut custody = env.into_handoff();
+    let mut reaper = ChildReaper::new(server, guard_child);
+
+    let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
+    if !reconcile.status.success() {
+        reaper.kill();
+        custody.cleanup();
+        panic!(
+            "fresh reconcile failed: {}",
+            String::from_utf8_lossy(&reconcile.stderr)
+        );
+    }
+    let reconciled: J = serde_json::from_slice(&reconcile.stdout)
+        .unwrap_or_else(|error| panic!("reconcile output invalid: {error}"));
+    assert_eq!(reconciled["id"], intent_id);
+    assert_eq!(reconciled["receipt"], receipt);
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+
+    let finish = cli_output(&["delivery", "finish", "--task", "project"]);
+    if !finish.status.success() {
+        reaper.kill();
+        custody.cleanup();
+        panic!(
+            "fresh finish failed: {}",
+            String::from_utf8_lossy(&finish.stderr)
+        );
+    }
+    reaper.wait();
+    assert!(!workspace.exists());
+    assert!(!temporary.exists());
+    assert!(!state_file.exists());
+    assert!(!is_registered("project").unwrap());
+    assert!(!cleanup_state_path("project").unwrap().exists());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    assert!(!q.exists());
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        artifact_id
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+    custody.disarm();
 }
 
 // Trusted, unmarked external driver. The native coordinator only approved the

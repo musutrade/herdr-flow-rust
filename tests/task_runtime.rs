@@ -5,38 +5,113 @@ use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path, process::Command};
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct OwnedEnvironment(TaskEnvironment);
+struct OwnedEnvironment {
+    env: Option<TaskEnvironment>,
+    cleanup_on_drop: bool,
+}
 impl std::ops::Deref for OwnedEnvironment {
     type Target = TaskEnvironment;
     fn deref(&self) -> &TaskEnvironment {
-        &self.0
+        self.env.as_ref().unwrap()
     }
 }
 impl std::ops::DerefMut for OwnedEnvironment {
     fn deref_mut(&mut self) -> &mut TaskEnvironment {
-        &mut self.0
+        self.env.as_mut().unwrap()
     }
 }
 impl Drop for OwnedEnvironment {
     fn drop(&mut self) {
-        if is_registered(&self.task_id).unwrap_or(false) {
-            if let Err(error) = destroy_environment(&self.0) {
-                eprintln!("test cleanup failed: {error}");
+        if !self.cleanup_on_drop {
+            return;
+        }
+        if let Some(env) = self.env.as_ref() {
+            if is_registered(&env.task_id).unwrap_or(false) {
+                if let Err(error) = destroy_environment(env) {
+                    eprintln!("test cleanup failed: {error}");
+                }
             }
         }
     }
 }
+impl OwnedEnvironment {
+    // Test-only custody transfer: release the inner lock, suppress this
+    // wrapper's destructive Drop, and arm a guard that can finish a confirmed
+    // delivery (or destroy an owned environment) if the handoff fails.
+    fn into_handoff(mut self) -> HandoffGuard {
+        self.cleanup_on_drop = false;
+        let env = self.env.take().expect("live environment handle");
+        let task_id = env.task_id.clone();
+        env.release_ownership();
+        HandoffGuard {
+            task_id,
+            armed: true,
+        }
+    }
+}
+struct HandoffGuard {
+    task_id: String,
+    armed: bool,
+}
+impl HandoffGuard {
+    fn cleanup(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if !is_registered(&self.task_id).unwrap_or(false) {
+            return;
+        }
+        let mut env = match restore_environment(&self.task_id) {
+            Ok(env) => env,
+            Err(error) => {
+                eprintln!("handoff cleanup could not restore environment: {error}");
+                return;
+            }
+        };
+        let phase = env.delivery["phase"].as_str().unwrap_or_default();
+        if phase == "confirmed" || phase == "cleaning" {
+            if let Err(error) = delivery::finish(&mut env) {
+                eprintln!("handoff cleanup finish failed: {error}");
+            }
+        }
+        if is_registered(&self.task_id).unwrap_or(false) {
+            if let Err(error) = destroy_environment(&env) {
+                eprintln!("handoff cleanup destroy failed: {error}");
+            }
+        }
+        if cleanup_state_path(&self.task_id)
+            .map(|path| path.exists())
+            .unwrap_or(false)
+        {
+            if let Err(error) = resume_delivery_cleanup(&self.task_id) {
+                eprintln!("handoff cleanup plan resume failed: {error}");
+            }
+        }
+    }
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for HandoffGuard {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
 fn environment_with(root: &Path, task_id: &str, targets: Vec<DeliveryTarget>) -> OwnedEnvironment {
     std::env::set_var("HERDR_TASK_ENV_ROOT", root.join("registry"));
-    OwnedEnvironment(
-        create_environment(
-            task_id,
-            &root.join("workspace"),
-            targets,
-            &root.join("temporary"),
-        )
-        .unwrap(),
-    )
+    OwnedEnvironment {
+        env: Some(
+            create_environment(
+                task_id,
+                &root.join("workspace"),
+                targets,
+                &root.join("temporary"),
+            )
+            .unwrap(),
+        ),
+        cleanup_on_drop: true,
+    }
 }
 fn environment(root: &Path) -> OwnedEnvironment {
     environment_with(root, "runtime-test", vec![])

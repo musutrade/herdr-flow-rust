@@ -291,3 +291,25 @@ records/resolutions, and unchanged failed report bytes. Live1 passed in 196.22s
 before the release-evidence assertions were added; final evidence uses live2.
 The selected global configuration bytes were unchanged under both external
 runners. No product isolation or permission policy was changed.
+
+## Confirmed delivery external-supervisor restart
+
+The opt-in restart scenario reuses the real native repair/approval flow and stops
+the queue watcher before delivery. The trusted driver prepares and executes the
+Local Git delivery exactly once to `confirmed`, then transfers custody through a
+test-only handoff guard instead of dropping an environment that would be
+destroyed. The inner ownership lock is released; the guard suppresses normal
+destructive Drop only for the handoff window and can restore/finish or destroy an
+owned environment if the handoff fails. No unsafe operation or `mem::forget` is
+used.
+
+Fresh unmarked CLI processes restore the environment and run delivery
+`reconcile`, then `finish`; neither process runs `execute` again. Confirmed
+reconcile returns the persisted intent/receipt, while the test independently
+checks the formal Git target B and the user asset dev/inode/bytes before and
+after the handoff. The same single intent and receipt must survive, and finish
+must remove owned roots, registry/state, queue task and slot while preserving the
+target and user asset. Server/guard children are quiesced by finish and reaped by
+the parent; child failures are killed/reaped before fallback restore/finish.
+This is a disposable local delivery restart proof, not a general crash-recovery
+guarantee, supervisor daemon, or twenty-task acceptance.
