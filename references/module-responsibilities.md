@@ -50,3 +50,25 @@ that a source move fixes malformed-input behavior.
 #47 remains open: this first boundary and candidate list do not claim completion
 of the remaining dependency and compatibility reviews. #38 real-workflow
 acceptance is outside this source refactor.
+
+## Second batch: TUI wire observation
+
+After the frame codec batch, isolate `WireObserver` and its close/binary frame
+rejection helpers in private `codex/tui/wire.rs`. Re-export `WireObserver` from
+`codex::tui`; `new` and `feed` signatures remain unchanged. The full moved block
+is byte-for-byte unchanged. This is the narrow wire decoding boundary from the
+TUI candidate above, not a move of session persistence or OS ownership.
+
+Dependency review: the observer owns header/upgrade/decoder state and borrows the
+same `Rc<RefCell<SessionObserver>>`. It calls only the existing public `request`
+and `response` methods; no private visibility needs widening. Parent forwarding
+state stores `Option<WireObserver>` and constructs one per direction. No socket,
+child, signal, lock or marker persistence code moves. Upgrade detection, frame
+iteration order, mutable borrow duration and close/binary error strings remain
+unchanged. Parent still needs `protocol_error` and `MAX_MESSAGE` for its own
+validation and forwarding buffer bound.
+
+Existing `tui_bridge` tests exercise split handshake/frame observations and
+close/binary rejection through the preserved public path; the full validation
+gates remain required. Shared session state and persistence extraction remain
+deferred: this small boundary does not justify a broader TUI state-machine move.
