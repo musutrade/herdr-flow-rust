@@ -656,3 +656,107 @@ fn malformed_removal_plan_preserves_shared_entries_and_recovers_without_redelive
     delivery::finish(&mut f.env).unwrap();
     f.clean();
 }
+
+// This is a protocol-fixture continuity check, not twenty real agent tasks.
+// Reuse one control/queue directory so TempDir teardown cannot hide growth.
+fn rearm_file_delivery(f: &mut Fixture, round: usize) {
+    let target = f.dir.path().join(format!("customer-{round}"));
+    f.env = create_environment(
+        "job",
+        &f.dir.path().join("work"),
+        vec![DeliveryTarget::new(target.clone(), "formal".into())],
+        &f.dir.path().join("tmp"),
+    )
+    .unwrap();
+    let source = f.env.workspace_root.join("A");
+    std::fs::write(&source, "A").unwrap();
+    let fresh = accepted(
+        json!({"adapter":"file-sha256","id":util::pyjson::sha256_hex(b"A"),"location":source}),
+    );
+    let mut state = queue::load_queue(&f.queue).unwrap();
+    for collection in ["tasks", "waits", "events", "deliveries"] {
+        for (key, value) in fresh[collection].as_object().unwrap() {
+            state[collection][key] = value.clone();
+        }
+    }
+    f.spec = json!({"adapter":"file","target":target,"authorization":"publish","state_version":state["tasks"]["job"]["state_version"]});
+    queue::save(&f.queue, &mut state).unwrap();
+}
+
+fn retained_inventory(root: &Path, formal: &[PathBuf]) -> Vec<(PathBuf, u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![root.to_path_buf()];
+    let mut paths = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if formal.contains(&path) {
+                continue;
+            }
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path.clone());
+            }
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            // Queue contents are compared after removing only updated_at below.
+            let bytes = if metadata.is_file() && relative != Path::new("shared-queue/queue.json") {
+                metadata.len()
+            } else {
+                0
+            };
+            paths.push((relative, bytes, metadata.blocks()));
+        }
+    }
+    paths.sort();
+    paths
+}
+
+#[test]
+fn twenty_protocol_deliveries_reuse_control_without_retained_task_state() {
+    let mut f = Fixture::new(false);
+    let mut formal = vec![f.dir.path().join("customer")];
+    let user_asset = f.dir.path().join("user-asset");
+    std::fs::write(&user_asset, "user-owned").unwrap();
+    let mut baseline_paths = Vec::new();
+    let mut baseline_queue = J::Null;
+    for round in 0..20 {
+        if round != 0 {
+            rearm_file_delivery(&mut f, round);
+            formal.push(f.dir.path().join(format!("customer-{round}")));
+        }
+        f.prepare();
+        if round % 3 == 1 {
+            f.env.release_ownership();
+            f.env = restore_environment("job").unwrap();
+        }
+        delivery::execute(&mut f.env, &delivery::local::Local).unwrap();
+        if round % 3 == 2 {
+            f.env.release_ownership();
+            f.env = restore_environment("job").unwrap();
+            assert!(delivery::execute(&mut f.env, &delivery::local::Local).is_err());
+        }
+        delivery::finish(&mut f.env).unwrap();
+        f.clean();
+        for target in &formal {
+            assert_eq!(std::fs::read_to_string(target).unwrap(), "A");
+        }
+        assert_eq!(std::fs::read_to_string(&user_asset).unwrap(), "user-owned");
+        let paths = retained_inventory(f.dir.path(), &formal);
+        println!(
+            "round={round} formal={} retained_entries={} retained_blocks={}",
+            formal.len(),
+            paths.len(),
+            paths.iter().map(|(_, _, blocks)| blocks).sum::<u64>()
+        );
+        let mut state = queue::load_queue(&f.queue).unwrap();
+        state.as_object_mut().unwrap().remove("updated_at");
+        if round == 0 {
+            baseline_paths = paths;
+            baseline_queue = state;
+        } else {
+            assert_eq!(paths, baseline_paths, "non-delivery paths grew at {round}");
+            assert_eq!(state, baseline_queue, "shared state changed at {round}");
+        }
+    }
+}
