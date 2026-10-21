@@ -688,7 +688,7 @@ impl Client {
     }
 
     fn attach_stream(&mut self) -> Result<()> {
-        let stream = UnixStream::connect(&self.socket_path)
+        let stream = crate::util::unix_socket::connect(std::path::Path::new(&self.socket_path))
             .map_err(|error| rpc_error(format!("WebSocket connection failed: {error}")))?;
         super::peer::verify(&stream)?;
         self.stream = Some(stream);

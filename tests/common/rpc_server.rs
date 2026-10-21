@@ -163,9 +163,12 @@ impl Peer {
         let mut bytes = vec![0x80 | opcode];
         if payload.len() < 126 {
             bytes.push(payload.len() as u8);
-        } else {
+        } else if payload.len() <= u16::MAX as usize {
             bytes.push(126);
             bytes.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            bytes.push(127);
+            bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         }
         bytes.extend_from_slice(payload);
         self.stream.write_all(&bytes).unwrap();

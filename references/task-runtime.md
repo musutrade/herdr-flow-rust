@@ -142,3 +142,42 @@ handling.
 Formal reviewer reports and their four continuation outcomes use the
 [independent acceptance protocol](independent-acceptance.md). Native collectors
 register the bound report separately from execution completion.
+
+### Broker 请求、故障与恢复边界
+
+Broker 每条 Unix 连接只收一帧以 LF 结束的 JSON；请求 JSON 最多 1 MiB
+（不含 LF），整体读取期限 15 秒。空帧、错误 JSON、超长/未结束帧、读超时、
+早断开和响应写失败只结束该连接。方法白名单或 params 对象校验失败可返回
+错误，不建立原生连接。持续滴流不能重置读取期限。
+
+客户端读取响应的预算为原生 RPC 的 16 MiB 加 1 KiB 封套空间，允许合法响应
+大于请求上限；读期限 30 秒，请求写期限 10 秒。服务端响应写期限 10 秒。
+所有期限均覆盖整个帧，超限不截断后继续解析。Broker 仍同步串行处理；原生 RPC 的握手与调用分别使用已有 10 秒期限；
+Unix connect 非阻塞，监听队列满时直接报错。客户端断开不证明原生操作没有执行，不得重放
+`turn/start` 或自动重新创建 session；先依据现有 creation/turn journal 查询。
+
+原生连接故障或结果不明、事件持久化失败、任务 instance/当前 socket 归属变化
+属于服务级故障，停止 broker。`broker-events.turns/pending` 必须是对象，分别
+最多 64 项；已有损坏 journal 在执行原生操作前被拒绝，合法空对象保留。
+退出尽力写单个 `broker-status.json` 的错误类别并移除自己持有的 socket；
+无法写盘时仍保留原始非零退出。状态只覆盖当前运行，不追加历史或请求内容。
+
+整个 broker 生命周期持有 `broker.lock`。`broker-owner.json` 绑定任务 instance、
+PID、进程启动时间和 socket 的 device/inode。启动器等待当前子进程的 running
+状态，不把成功 spawn 当成 broker 已可用。正常错误退出后可重新启动；SIGKILL
+留下的 socket 仅在独占锁空闲、旧 owner 身份已失效、socket 身份匹配且不存在
+活跃 listener 时回收。活跃服务、其他 instance、符号链接、普通文件和不明
+归属的旧版 socket 均拒绝替换；需检查已有资源，不能另建任务绕过。退出不删除
+已被替换的 socket，新 broker 同样必须遵守该锁。任务内其他同 UID 进程不得
+绕过锁修改 broker 文件；该协议不是同 UID 恶意进程之间的隔离机制。
+
+错误传播沿用现有 watcher 契约：queue/guard 通过 `watch_service::run` 的错误
+收尾记录不健康状态；全局持久化错误向上返回。CI observer 的 `WatchState`
+只对只读观察按错误次数退避，并受整体 deadline 限制；persist 失败立即返回。
+不把这些错误改成忽略或重试有副作用操作。状态字段修复的任务保持未完成，
+清理失败保留槽位，修复后沿原状态恢复。
+
+隔离回归在 `tests/broker_lifecycle.rs`（真实 broker 子进程）和 broker transport
+单元测试中。可设置 `HERDR_TEST_RELEASE_BIN` 为对应 release 二进制路径重跑
+生命周期回归，验证 `panic=abort` 下的存活、退出和重启；这些协议测试不等同于
+#38 的真实模型全流程验收。

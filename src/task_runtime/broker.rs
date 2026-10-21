@@ -2,66 +2,95 @@
 //! a first turn discards an unpersisted fresh thread in Codex 0.163.
 use super::*;
 use crate::codex::rpc::Client;
+mod owner;
+mod transport;
 use std::{
-    io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     time::Duration,
 };
 
 pub fn serve(root: &Path) -> Result<()> {
-    let listener = prepare_listener(root)?;
+    let owner = owner::Owner::acquire(root)?;
+    let result = serve_owned(root, &owner);
+    if let Err(error) = &result {
+        // Best effort only: a full disk must not hide the original error.
+        let _ = util::atomic_write_json(
+            &root.join("broker-status.json"),
+            &json!({"phase":"failed", "error_kind":error.kind.type_name()}),
+        );
+    }
+    result
+}
+fn serve_owned(root: &Path, owner: &owner::Owner) -> Result<()> {
+    validate_stored_journal(root)?;
     let mut connection = None;
     loop {
-        match listener.accept() {
-            Ok((stream, _)) => handle(root, stream, &mut connection)?,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.into()),
-        }
+        owner.verify()?;
+        accept_one(root, owner, &mut connection)?;
         if let Some(client) = connection.as_mut() {
             observe(root, client)?;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
-fn prepare_listener(root: &Path) -> Result<UnixListener> {
-    let runtime = util::read_state_json(root, "runtime.json")?;
-    ensure(
-        std::env::var(crate::task_env::MARKER_ENV).ok().as_deref() == runtime["instance"].as_str(),
-        "broker requires its task environment identity",
-    )?;
-    let path = root.join("broker.sock");
-    ensure(
-        !path.exists(),
-        "broker socket already exists; inspect previous process",
-    )?;
-    let listener = UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
-    Ok(listener)
+
+fn accept_one(
+    root: &Path,
+    owner: &owner::Owner,
+    connection: &mut Option<super::native::DirectClient>,
+) -> Result<()> {
+    match owner.listener.accept() {
+        Ok((stream, _)) => handle(root, stream, connection, owner),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn handle(
     root: &Path,
     mut stream: UnixStream,
     connection: &mut Option<super::native::DirectClient>,
+    owner: &owner::Owner,
 ) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line)?;
-    ensure(line.len() <= 1024 * 1024, "broker request too large")?;
-    let request: J = serde_json::from_str(&line)?;
-    let result = execute(root, connection, &request);
+    let request = match transport::read(
+        &mut stream,
+        transport::REQUEST_LIMIT,
+        Duration::from_secs(15),
+    ) {
+        Ok(request) => request,
+        Err(_) => return Ok(()), // A malformed or abandoned frame owns only this connection.
+    };
+    owner.verify()?;
+    let result = match request_method(&request) {
+        Ok(_) => execute(root, connection, &request),
+        Err(error) => {
+            let _ = respond(&mut stream, Err(error));
+            return Ok(());
+        }
+    };
+    // Native uncertainty or journal failure stops the service, never replaying
+    // an operation whose effect may already have happened.
+    if let Err(error) = &result {
+        if error.rpc_code.is_none() {
+            return result.map(|_| ());
+        }
+    }
+    let _ = respond(&mut stream, result);
+    Ok(())
+}
+fn respond(stream: &mut UnixStream, result: Result<J>) -> Result<()> {
     let response = match result {
         Ok(value) => json!({"result":value}),
         Err(error) => json!({"error":{"message":error.message,"code":error.rpc_code}}),
     };
-    writeln!(stream, "{response}")?;
-    Ok(())
+    transport::write(
+        stream,
+        &response,
+        transport::RESPONSE_LIMIT,
+        Duration::from_secs(10),
+    )
 }
-fn execute(
-    root: &Path,
-    connection: &mut Option<super::native::DirectClient>,
-    request: &J,
-) -> Result<J> {
+fn request_method(request: &J) -> Result<String> {
     let method = required(request, "method")?;
     ensure(
         [
@@ -74,6 +103,20 @@ fn execute(
         .contains(&method.as_str()),
         "unsupported broker operation",
     )?;
+    ensure(
+        request["params"].is_object(),
+        "broker params must be an object",
+    )?;
+    Ok(method)
+}
+
+fn execute(
+    root: &Path,
+    connection: &mut Option<super::native::DirectClient>,
+    request: &J,
+) -> Result<J> {
+    let method = request_method(request)?;
+    validate_stored_journal(root)?;
     if connection.is_none() {
         *connection = Some(super::native::direct_client(root)?);
     }
@@ -87,27 +130,41 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
     // frames before reporting the disconnected transport to the supervisor.
     let transport = client.drain(0.001).map(|_| ());
     let events = client.pop_events();
-    if events.is_empty() && root.join("broker-events.json").exists() {
-        return transport;
-    }
     let mut journal = if root.join("broker-events.json").exists() {
         util::read_state_json(root, "broker-events.json")?
     } else {
         json!({"turns":{},"pending":{}})
     };
+    validate_journal(&journal)?;
+    if events.is_empty() && root.join("broker-events.json").exists() {
+        return transport;
+    }
     // Events buffered while awaiting a response must also survive a restart.
     for event in events {
-        record(&mut journal, &event);
+        record(&mut journal, &event)?;
+        validate_journal(&journal)?;
     }
-    ensure(
-        journal["turns"].as_object().unwrap().len() <= 64
-            && journal["pending"].as_object().unwrap().len() <= 64,
-        "native event journal reached its bound",
-    )?;
     util::atomic_write_json(&root.join("broker-events.json"), &journal)?;
     transport
 }
-fn record(journal: &mut J, event: &J) {
+fn validate_stored_journal(root: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(root.join("broker-events.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => validate_journal(&util::read_state_json(root, "broker-events.json")?),
+    }
+}
+fn validate_journal(journal: &J) -> Result<()> {
+    for field in ["turns", "pending"] {
+        let map = journal[field]
+            .as_object()
+            .ok_or_else(|| FlowError::guard(format!("broker-events.{field} must be an object")))?;
+        ensure(map.len() <= 64, "native event journal reached its bound")?;
+    }
+    Ok(())
+}
+fn record(journal: &mut J, event: &J) -> Result<()> {
+    validate_journal(journal)?;
     let params = &event["params"];
     match event["method"].as_str() {
         Some("turn/started" | "turn/completed") => {
@@ -124,16 +181,22 @@ fn record(journal: &mut J, event: &J) {
         }
         _ => {}
     }
+    Ok(())
 }
 
 pub(super) fn call(root: &Path, method: &str, params: &J) -> Result<J> {
-    let mut stream = UnixStream::connect(root.join("broker.sock"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    writeln!(stream, "{}", json!({"method":method,"params":params}))?;
-    let mut text = String::new();
-    BufReader::new(stream).read_line(&mut text)?;
-    let value: J = serde_json::from_str(&text)?;
+    let mut stream = util::unix_socket::connect(&root.join("broker.sock"))?;
+    transport::write(
+        &mut stream,
+        &json!({"method":method,"params":params}),
+        transport::REQUEST_LIMIT,
+        Duration::from_secs(10),
+    )?;
+    let value = transport::read(
+        &mut stream,
+        transport::RESPONSE_LIMIT,
+        Duration::from_secs(30),
+    )?;
     if let Some(error) = value.get("error") {
         return Err(
             FlowError::rpc(error["message"].as_str().unwrap_or("broker request failed"))
@@ -145,6 +208,7 @@ pub(super) fn call(root: &Path, method: &str, params: &J) -> Result<J> {
 
 pub(super) fn turn(root: &Path, state: &J, id: &J) -> Result<Option<J>> {
     let journal = util::read_state_json(root, "broker-events.json")?;
+    validate_journal(&journal)?;
     let entry = &journal["turns"][id.as_str().unwrap_or_default()];
     if entry.is_null() {
         return Ok(None);

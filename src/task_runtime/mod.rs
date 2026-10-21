@@ -295,18 +295,46 @@ pub(super) fn required(value: &J, key: &str) -> Result<String> {
 /// Re-establish only the transport process; creation/turn journals still forbid
 /// replay. The caller must verify the existing session before resuming work.
 pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
-    ensure(
-        !root.join("broker.sock").exists(),
-        "broker already exists; inspect exact process",
-    )?;
+    // The child owns the exclusive broker lock and validates any stale socket.
+    // Existing creation/turn journals remain untouched during transport restart.
     let binary = model::string(spec, "driver_binary")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
     let mut cmd = command(env, root, &binary)?;
     cmd.args(["task-runtime-broker", "--state-dir"]).arg(root);
     let mut child = spawn_broker(root, cmd)?;
-    register_child(env, &mut child)
+    register_child(env, &mut child)?;
+    await_broker(root, &mut child)
 }
+fn await_broker(root: &Path, child: &mut Child) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Err(FlowError::guard(
+                "broker startup failed; inspect broker.log, do not replay native operations",
+            ));
+        }
+        if broker_ready(root, child.id()) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            util::process::terminate_child(child);
+            return Err(FlowError::guard("broker startup deadline exceeded"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+fn broker_ready(root: &Path, pid: u32) -> bool {
+    let Some(start_ticks) = util::process::process_start_ticks(pid) else {
+        return false;
+    };
+    util::read_state_json(root, "broker-status.json").is_ok_and(|status| {
+        status["pid"] == pid
+            && status["phase"] == "running"
+            && status["start_ticks"].as_str() == Some(start_ticks.as_str())
+    })
+}
+
 fn spawn_broker(root: &Path, mut cmd: Command) -> Result<Child> {
     let log = std::fs::File::create(root.join("broker.log"))?;
     Ok(cmd
@@ -314,4 +342,43 @@ fn spawn_broker(root: &Path, mut cmd: Command) -> Result<Child> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .spawn()?)
+}
+
+#[cfg(test)]
+mod broker_start_tests {
+    use super::*;
+    #[test]
+    fn readiness_requires_current_process_and_startup_failure_is_reported() {
+        let dir = crate::util::fs::test_tempdir();
+        let mut child = Command::new("true").spawn().unwrap();
+        assert!(await_broker(dir.path(), &mut child)
+            .unwrap_err()
+            .message
+            .contains("startup failed"));
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        util::atomic_write_json(&dir.path().join("broker-status.json"), &json!({
+            "pid":child.id(),"phase":"running","start_ticks":util::process::process_start_ticks(child.id())
+        })).unwrap();
+        let result = await_broker(dir.path(), &mut child);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        result.unwrap();
+    }
+    #[test]
+    fn stale_readiness_times_out_and_reaps_the_spawned_process() {
+        let dir = crate::util::fs::test_tempdir();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        util::atomic_write_json(
+            &dir.path().join("broker-status.json"),
+            &json!({
+                "pid":child.id(),"phase":"running","start_ticks":"0"
+            }),
+        )
+        .unwrap();
+        assert!(await_broker(dir.path(), &mut child)
+            .unwrap_err()
+            .message
+            .contains("deadline"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
 }
