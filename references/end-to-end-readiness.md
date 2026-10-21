@@ -284,3 +284,10 @@ unchanged through failure, repair and final acceptance, then exactly B is the
 confirmed formal ref/receipt with the user asset preserved. Finish removes owned
 roots/registry/state/queue and reaps processes. This remains a disposable fixture
 proof, not customer publication, repair/restart breadth or twenty-task acceptance.
+
+Final local repair live2 passed in 267.08s, including applied release evidence
+matching each actual stopped/reaped worker receipt and its session, all gap
+records/resolutions, and unchanged failed report bytes. Live1 passed in 196.22s
+before the release-evidence assertions were added; final evidence uses live2.
+The selected global configuration bytes were unchanged under both external
+runners. No product isolation or permission policy was changed.
