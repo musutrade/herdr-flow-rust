@@ -370,6 +370,11 @@ pub fn lock_is_free(path: &Path) -> bool {
 
 /// Try to take an exclusive flock without blocking. Returns true on success
 /// and false when another owner holds the lock.
+///
+/// Borrows `fd`; the caller keeps it open for the call and retains ownership.
+/// Success leaves the lock held on its open file description until explicit
+/// unlock or final close. Duplicated descriptors share that lock. This helper
+/// neither returns an RAII guard nor prevents concurrent changes through aliases.
 pub fn flock_try_exclusive(fd: RawFd) -> Result<bool> {
     // SAFETY: caller passes a live descriptor; flock takes only scalars.
     let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
@@ -384,6 +389,11 @@ pub fn flock_try_exclusive(fd: RawFd) -> Result<bool> {
 }
 
 /// Take an exclusive blocking flock on an already-open file descriptor.
+///
+/// Borrows `fd` without closing it. Success leaves the lock held; the caller
+/// must release it by unlocking or closing the final shared description.
+/// There is no timeout; do not hold conflicting application locks while waiting.
+/// Errors do not transfer ownership and do not imply any state transaction ran.
 pub fn flock_exclusive(fd: RawFd) -> Result<()> {
     // SAFETY: caller must ensure fd is valid and live during this call.
     let result = unsafe { libc::flock(fd, libc::LOCK_EX) };

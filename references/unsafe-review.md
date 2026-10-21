@@ -65,3 +65,37 @@ memory-corruption vulnerability.
 No examples in this batch access real user directories, credentials or services.
 Inventory generation reads source; process regressions use isolated temporary
 roots and children created by the tests.
+
+## Directory descriptor and follow-up source review
+
+`open_dir_fd` has one production caller: the TUI bridge immediately transfers
+its newly owned raw descriptor into a File, opens the lock relative to it, and
+retains that File in the parent until cleanup. No child-side directory-fd use
+was found. The previous open flags omitted CLOEXEC; an isolated child exec
+confirmed it could still identify the original temporary directory through
+`/proc/self/fd/N`. The open now sets O_CLOEXEC atomically, and that same regression
+passes. Its public contract states the raw ownership transfer and the limited
+leaf-symlink check; it does not claim ancestor/owner validation on its own.
+
+Additional source blocks reviewed:
+
+| Source / operations | Preconditions and conclusion |
+| --- | --- |
+| `util/unix_socket.rs` (4) | Zeroed sockaddr_un has valid scalar/array fields; path bytes reject NUL and reserve a terminator; supplied sockaddr size matches storage. socket creates a fresh CLOEXEC/nonblocking fd, converted once to UnixStream; connect borrows it and failures drop the owner. Existing backlog/path/recovery tests apply. |
+| `util/fs.rs` (7) | Four flock sites pass scalar flags and borrow live descriptors; FileLock Drop unlocks before its File closes. Three geteuid sites have no memory preconditions. Raw flock helpers leave ownership and lock release with caller; duplicate fd descriptions share locks. |
+| `codex/rpc.rs` (2) | geteuid has no caller memory preconditions; poll receives one initialized slot while the stream remains borrowed. Timeouts are clamped before conversion; EINTR handling does not read uninitialized storage. |
+| `task_env/registry.rs` (1) | geteuid compares owner without pointer arguments. This call's memory safety does not make the surrounding registry mutation a transaction; callers still need registry locks. |
+| `util/process.rs`: directory open and readiness write/close | CString outlives open and success transfers one raw fd; directory exec inheritance fixed above. Readiness writes borrow the remaining serialized slice for its exact length, then close the transferred raw fd once; watch_service and CI notifier take their Option before calling. Raw API requires a dedicated fd and is best-effort, not an acknowledgment. |
+
+### Newly identified post-fork concern (not resolved by this batch)
+
+The callbacks installed by `TaskEnvironment::process_command`, runtime server
+setup and delivery writer setup call `confine_renames_to` after fork. That helper
+opens paths through Rust OpenOptions, and its unsupported-ABI error uses
+formatting/owned error construction. Delivery's `same_parent` error also uses
+an owned error. These paths do not satisfy the existing claim that the callback
+only makes syscalls without allocations. No production deadlock is claimed as
+reproduced. Preparation must move before fork, leaving only prepared-descriptor
+confinement syscalls and allocation-free OS errors in the child. Do not mark
+these pre_exec sites reviewed-safe until that change and targeted validation
+are complete. #46 remains open.
