@@ -61,3 +61,23 @@ resources and are retained for review under the ongoing development handoff.
 No actual twenty-task result, autonomous coordinator, or fully upgraded legacy
 resource set is claimed by this document. These remain explicit next acceptance
 work rather than boxes inferred from unit-test counts.
+
+## Owned production watcher bootstrap
+
+`tests/task_runtime.rs::production_foreground_watchers_are_owned_and_reclaimed`
+starts the production guard and queue watchers in foreground mode through
+`TaskEnvironment::command`. The harness retains each `Child`, registers its
+exact PID, and checks that production `watch_service::health` identifies that
+child. It does not fabricate `watch.json`, acquire the watcher locks itself, or
+recover a detached process by reading a PID file. Guard registration and the
+queue enable path use the HTTP fixture's session binding. Enable retries only
+`StateBusy`, with a 15-second deadline, because the real guard watcher can hold
+its state lock during observation.
+
+Environment destruction must terminate and reap the server and both watcher
+children, remove workspace/temp roots and release the registry slot. This
+validates the existing foreground lifecycle path without adding a new watcher
+API. The HTTP peer is still synthetic; this regression proves neither native
+model execution nor model-generated readiness/ACK. The real receiver test must
+use these production watcher processes with a fresh native session and retain
+native approval behavior.

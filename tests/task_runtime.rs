@@ -549,3 +549,89 @@ fn fixture_transport_rejects_an_unexpected_response_shape() {
 
 #[path = "common/acceptance_live.rs"]
 mod acceptance_live;
+
+fn owned_foreground_watcher(
+    env: &mut TaskEnvironment,
+    kind: &str,
+    root: &Path,
+) -> std::process::Child {
+    let log = fs::File::create(root.join("foreground.log")).unwrap();
+    let mut child = env
+        .command(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args([kind, "watch", "--state-dir"])
+        .arg(root)
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    if let Err(error) = env.register_process(child.id() as i32) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("watcher registration: {error}");
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let status = child.try_wait().unwrap();
+        assert!(status.is_none(), "watcher exited: {status:?}");
+        let health = herdr_flow::watch_service::health(root);
+        if health["healthy"] == true {
+            assert_eq!(health["pid"], child.id());
+            return child;
+        }
+        assert!(std::time::Instant::now() < deadline, "{health}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn production_foreground_watchers_are_owned_and_reclaimed() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let mut env = environment(temp.path());
+    let cwd = env.workspace_root.join("receiver");
+    fs::create_dir(&cwd).unwrap();
+    let root = task_runtime::prepare(&env, "receiver-server").unwrap();
+    let binary = fixture_binary(&root, &cwd, 0);
+    let mut server = task_runtime::launch(
+        &mut env,
+        &root,
+        &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,
+            "model":{"providerID":"openai","id":"fixture"}}),
+    )
+    .unwrap();
+    let port = fixture_ready(&root, &mut server);
+    let guard = env.temp_root.join("guard");
+    // Real registration and watcher processes; only the native HTTP peer is synthetic.
+    herdr_flow::opencode::session::register(
+        &guard,
+        &json!({"endpoint":format!("http://127.0.0.1:{port}"),"cwd":cwd,
+            "session":"sescoordinator","model":{"providerID":"openai","id":"fixture"}}),
+    )
+    .unwrap();
+    let mut guard_child = owned_foreground_watcher(&mut env, "opencode", &guard);
+    let q = env.temp_root.join("queue");
+    let mut state = queue::init(&q, Some(&guard), 10).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match queue::enable(&q, &mut state, &herdr_flow::herdr::receiver_factory) {
+            Ok(()) => break,
+            Err(error) if error.kind == herdr_flow::error::ErrorKind::StateBusy => {
+                assert!(std::time::Instant::now() < deadline, "{error}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("enable failed: {error}"),
+        }
+    }
+    let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+    for child in [&server, &guard_child, &queue_child] {
+        assert!(env.owns_process(child.id() as i32));
+    }
+    destroy_environment(&env).unwrap();
+    for child in [&mut server, &mut guard_child, &mut queue_child] {
+        assert!(!child.wait().unwrap().success());
+    }
+    assert!(!env.workspace_root.exists());
+    assert!(!env.temp_root.exists());
+    assert!(!is_registered(&env.task_id).unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+}
