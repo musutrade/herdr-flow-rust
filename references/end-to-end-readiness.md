@@ -266,8 +266,10 @@ registers work under the queue lock and runs native workers; every ACK, verdict
 application and continuation remains native-coordinator work.
 
 `accept-first` records a real grounded failure and an immutable verdict. The
-driver then registers the recorded repair continuation with the failed gap's
-activity/id/evidence, using candidate A as input. The repair worker produces and
+driver then registers the recorded repair continuation with the failed gaps'
+activity/ids/evidence, using the incomplete candidate as input. The coordinator
+reads the actual bounded per-development release receipt; no static release
+status is supplied. The repair worker produces and
 commits B; the coordinator applies that development output. The driver selects B
 and registers `accept-final` on a separate reviewer snapshot. The fresh reviewer
 must resolve the exact prior gap with `activity`, `gap`, `evidence` and

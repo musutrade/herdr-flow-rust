@@ -205,6 +205,8 @@ fn run_native_receiver(
     // state must live inside that boundary, not in a sibling of the runtime.
     let q = root.join("queue");
     let guard = root.join("guard");
+    let developer_release = root.join("developer-release.json");
+    let repair_release = root.join("repair-native-release.json");
     let mut evidence_paths = vec![
         root.join("server.log"),
         guard.join("foreground.log"),
@@ -282,7 +284,7 @@ fn run_native_receiver(
     }
     if apply_repair {
         instruction_text = format!(
-            "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. For development tasks review and repair-native, apply the collector output object unchanged with acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=\"native worker stopped after terminal collection\", and next_action={{kind:complete}}. For acceptance tasks accept-first and accept-final, read the task's registered immutable verdict.id and the actual report conclusion; use the exact event and verdict=the registered verdict.id, and set next_action kind from the actual conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Do not fabricate JSON or edit queue/watch files. Finish each turn after readiness; the next notification will reopen the same session."
+            "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session."
         );
     }
     fs::write(&instructions, instruction_text).unwrap();
@@ -395,7 +397,7 @@ fn run_native_receiver(
         let (worker, result) =
             acceptance_live::native(&mut env, &q, &development_cwd, "review", review_instruction);
         assert_ne!(worker["session"], registered["session"]);
-        util::atomic_write_json(&root.join("developer-release.json"),
+        util::atomic_write_json(&developer_release,
             &json!({"session":worker["session"],"runtime":worker_root,"status":"server stopped and reaped after terminal collection"})).unwrap();
         Some(result)
     } else {
@@ -548,13 +550,15 @@ fn run_native_receiver(
                 &q,
                 &guard,
                 &registered,
-                development_artifact,
-                reviewer_root.as_ref().unwrap(),
-                "accept-first",
-                "reviewer-checkout",
-                "Independently inspect the exact candidate against the original requirement. This candidate is deliberately incomplete for the bounded repair fixture. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks, grounded gaps and evidence. Do not assume the conclusion; derive it yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet.",
-                &["review", "accept-first"],
-                false,
+                ReviewSpec {
+                    artifact: development_artifact,
+                    reviewer_root: reviewer_root.as_ref().unwrap(),
+                    activity: "accept-first",
+                    checkout: "reviewer-checkout",
+                    instruction: "Independently inspect the exact candidate against the original requirement. This candidate is deliberately incomplete for the bounded repair fixture. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks, grounded gaps and evidence. Do not assume the conclusion; derive it yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet.",
+                    expected_waits: &["review", "accept-first"],
+                    expect_pass: false,
+                },
             );
             if apply_delivery {
                 assert_target_untouched(
@@ -567,21 +571,25 @@ fn run_native_receiver(
             let failed_report =
                 failed_state["tasks"]["accept-first"]["verdict"]["envelope"]["report"].clone();
             let failed_verdict = failed_state["tasks"]["accept-first"]["verdict"].clone();
-            let failed_gap = failed_report["gaps"].as_array().unwrap()[0].clone();
-            let failed_gap_id = failed_gap["id"].as_str().unwrap();
-            let gap_key = json!(["accept-first", failed_gap_id]).to_string();
+            let failed_gaps = failed_report["gaps"].as_array().unwrap().clone();
+            assert!(!failed_gaps.is_empty(), "failed acceptance has no gaps");
+            assert_eq!(failed_state["tasks"]["accept-first"]["phase"], "blocked");
             assert_eq!(
                 failed_state["tasks"]["accept-first"]["lineage"]["input"],
                 development_artifact["id"]
             );
-            assert_eq!(
-                failed_state["tasks"]["project"]["open_gaps"][gap_key.as_str()]["activity"],
-                "accept-first"
-            );
-            assert_eq!(
-                failed_state["tasks"]["project"]["open_gaps"][gap_key.as_str()]["gap"],
-                json!(failed_gap_id)
-            );
+            for gap in &failed_gaps {
+                let gap_id = gap["id"].as_str().unwrap();
+                let gap_key = json!(["accept-first", gap_id]).to_string();
+                assert_eq!(
+                    failed_state["tasks"]["project"]["open_gaps"][gap_key.as_str()]["activity"],
+                    "accept-first"
+                );
+                assert_eq!(
+                    failed_state["tasks"]["project"]["open_gaps"][gap_key.as_str()]["gap"],
+                    json!(gap_id)
+                );
+            }
             assert!(failed_state["tasks"]["project"]["approved"].is_null());
 
             let (repair_output, repair_session) = native_repair_stage(
@@ -591,6 +599,7 @@ fn run_native_receiver(
                 &registered,
                 development_artifact,
                 repair_root.as_ref().unwrap(),
+                &repair_release,
                 &failed_report,
             );
             if apply_delivery {
@@ -601,21 +610,28 @@ fn run_native_receiver(
                     delivery_expected.as_ref().unwrap(),
                 );
             }
+            let gap_list = failed_gaps
+                .iter()
+                .map(|gap| gap["id"].as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(", ");
             let final_instruction = format!(
-                "Independently inspect the exact repaired candidate against the original requirement. The failed accept-first activity has open gap {failed_gap_id}. Include a factual resolutions entry with activity=accept-first, gap={failed_gap_id}, evidence from the repaired candidate, and a nonempty explanation; resolve every parent.open_gaps entry. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks and evidence. Derive the conclusion yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet."
+                "Independently inspect the exact repaired candidate against the original requirement. The failed accept-first activity has open gaps {gap_list}. Include a factual resolutions entry for each gap with activity=accept-first, the exact gap id, evidence from the repaired candidate, and a nonempty explanation; resolve every parent.open_gaps entry. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks and evidence. Derive the conclusion yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet."
             );
             let final_state = native_review_stage(
                 &mut env,
                 &q,
                 &guard,
                 &registered,
-                &repair_output,
-                final_reviewer_root.as_ref().unwrap(),
-                "accept-final",
-                "final-reviewer-checkout",
-                &final_instruction,
-                &["review", "accept-first", "repair-native", "accept-final"],
-                true,
+                ReviewSpec {
+                    artifact: &repair_output,
+                    reviewer_root: final_reviewer_root.as_ref().unwrap(),
+                    activity: "accept-final",
+                    checkout: "final-reviewer-checkout",
+                    instruction: &final_instruction,
+                    expected_waits: &["review", "accept-first", "repair-native", "accept-final"],
+                    expect_pass: true,
+                },
             );
             if apply_delivery {
                 assert_target_untouched(
@@ -636,27 +652,30 @@ fn run_native_receiver(
                 json!({}),
                 "open gaps were not resolved"
             );
-            let resolution = final_report["resolutions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|resolution| {
-                    resolution["activity"] == "accept-first"
-                        && resolution["gap"] == json!(failed_gap_id)
-                })
-                .expect("final report lacks the accept-first gap resolution");
-            assert!(
-                resolution["evidence"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "gap resolution lacks evidence"
-            );
-            assert!(
-                resolution["explanation"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "gap resolution lacks explanation"
-            );
+            for gap in &failed_gaps {
+                let gap_id = gap["id"].as_str().unwrap();
+                let resolution = final_report["resolutions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|resolution| {
+                        resolution["activity"] == "accept-first"
+                            && resolution["gap"] == json!(gap_id)
+                    })
+                    .unwrap_or_else(|| panic!("final report lacks resolution for gap {gap_id}"));
+                assert!(
+                    resolution["evidence"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty()),
+                    "gap {gap_id} resolution lacks evidence"
+                );
+                assert!(
+                    resolution["explanation"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty()),
+                    "gap {gap_id} resolution lacks explanation"
+                );
+            }
             let development_id = development_artifact["id"].as_str().unwrap();
             let repair_id = repair_output["id"].as_str().unwrap();
             let parent = &final_state["tasks"]["project"];
@@ -957,19 +976,32 @@ fn assert_stage_shape(state: &J, waits: &[&str], coordinator: &J) {
     }
 }
 
+struct ReviewSpec<'a> {
+    artifact: &'a J,
+    reviewer_root: &'a Path,
+    activity: &'a str,
+    checkout: &'a str,
+    instruction: &'a str,
+    expected_waits: &'a [&'a str],
+    expect_pass: bool,
+}
+
 fn native_review_stage(
     env: &mut TaskEnvironment,
     q: &Path,
     guard: &Path,
     coordinator: &J,
-    artifact: &J,
-    reviewer_root: &Path,
-    activity_name: &str,
-    checkout_name: &str,
-    reviewer_instruction: &str,
-    expected_waits: &[&str],
-    expect_pass: bool,
+    spec: ReviewSpec<'_>,
 ) -> J {
+    let ReviewSpec {
+        artifact,
+        reviewer_root,
+        activity: activity_name,
+        checkout: checkout_name,
+        instruction: reviewer_instruction,
+        expected_waits,
+        expect_pass,
+    } = spec;
     acceptance_live::change(
         q,
         json!({"kind":"candidate","candidate":artifact["id"],"reason":"real independent acceptance"}),
@@ -1054,21 +1086,32 @@ fn native_repair_stage(
     coordinator: &J,
     old_artifact: &J,
     repair_root: &Path,
+    release: &Path,
     failed_report: &J,
 ) -> (J, J) {
-    let gap = failed_report["gaps"].as_array().unwrap()[0].clone();
-    let gap_id = gap["id"].as_str().unwrap();
-    let mut activity =
-        acceptance_live::activity("repair-native", "development", &old_artifact["id"]);
-    activity["kind"] = json!("continue");
-    activity["intent"] = json!("accept-first");
-    activity["authorization"] = json!("develop");
-    activity["action"] = json!("development");
-    activity["resolution"] = json!(format!(
-        "repair the recorded accept-first gap {gap_id}: {}",
-        gap["evidence"].as_str().unwrap_or("grounded failed review")
-    ));
-    acceptance_live::change(q, activity);
+    let gaps = failed_report["gaps"].as_array().unwrap();
+    assert!(!gaps.is_empty(), "failed acceptance has no gaps");
+    let resolution = gaps
+        .iter()
+        .map(|gap| {
+            format!(
+                "repair accept-first gap {}: {}",
+                gap["id"].as_str().unwrap(),
+                gap["evidence"].as_str().unwrap_or("grounded failed review")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let activity = acceptance_live::activity("repair-native", "development", &old_artifact["id"]);
+    let spec = json!({
+        "kind":"continue",
+        "intent":"accept-first",
+        "authorization":"develop",
+        "action":"development",
+        "resolution":resolution,
+        "activity":activity
+    });
+    acceptance_live::change(q, spec);
     let cwd = acceptance_live::clone_snapshot(env, old_artifact, "repair-checkout");
     let (repair, collected) = acceptance_live::native(
         env,
@@ -1078,6 +1121,15 @@ fn native_repair_stage(
         "Repair the recorded failed acceptance gap against the original requirement. Change file to exactly version B and commit locally. Do not write an acceptance verdict or commit acceptance metadata. Stay within this checkout; do not inspect sibling directories, coordinator instructions, or operator repositories.",
     );
     assert_ne!(repair["session"], coordinator["session"]);
+    util::atomic_write_json(
+        release,
+        &json!({
+            "session":repair["session"],
+            "runtime":repair_root,
+            "status":"server stopped and reaped after terminal collection"
+        }),
+    )
+    .unwrap();
     let state = wait_for_stage(q, guard, coordinator, "repair-native");
     assert_stage_shape(
         &state,
@@ -1112,6 +1164,15 @@ fn native_repair_stage(
     let report = util::read_json(Path::new(signal["evidence"].as_str().unwrap())).unwrap();
     assert_eq!(report["session"], repair["session"]);
     let output = collected["output"].clone();
+    assert_ne!(output["id"], old_artifact["id"]);
+    assert_eq!(report["output"], output);
+    assert_eq!(
+        git(
+            Path::new(output["location"].as_str().unwrap()),
+            &["show", &format!("{}:file", output["id"].as_str().unwrap())]
+        ),
+        "version B"
+    );
     assert_eq!(
         state["tasks"]["project"]["artifacts"][output["id"].as_str().unwrap()]["object"],
         output
