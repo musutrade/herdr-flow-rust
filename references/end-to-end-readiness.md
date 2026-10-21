@@ -155,3 +155,38 @@ matching receipt; a watcher advancing to `waiting_for_events` cannot erase the
 receipt. This corrects the test without weakening production confinement.
 Writable queue/guard are disposable coordinator-owned test state; production
 isolation policy is unchanged.
+
+## Native developer result application
+
+The opt-in `installed_real_opencode_developer_result_is_applied_by_native_receiver`
+regression uses distinct real developer and coordinator sessions. The driver
+registers a disposable task, launches the developer, collects its real Git output,
+and stops/reaps that server. Production watchers notify the coordinator, which
+must ACK and invoke `queue task-apply` itself. The driver never ACKs or applies
+that result. Native completed tool records, persistent receipt identity, the
+complete applied artifact object, and the exact event/result/producer-report
+chain are checked; the parent must remain unapproved.
+
+The explicit directory opt-in additionally permits the exact disposable worker
+runtime and two fixture checkouts so the coordinator can inspect actual evidence.
+It grants no access to operator repositories. Production native confinement is
+unchanged: the coordinator's writable roots remain its own runtime and cwd.
+The test does not add a new negative write probe for sibling directories.
+
+Queue watcher health is required before dispatch. Driver preflight retries are
+bounded and stop once the corresponding creation/dispatch journal exists.
+Inside OpenCode runtime dispatch, queue-lock contention after `dispatch.json`
+is retried only while `submission.json` is demonstrably absent. The adapter
+writes that submission journal before its single native POST. Existing journals,
+other errors and exhausted retry budgets stop without replay; the dispatch
+marker is never deleted to authorize another attempt.
+
+This is a developer-result/application boundary check, not independent acceptance,
+customer delivery, a real repair cycle, or twenty completed real tasks. Previous
+failures remain retained, including the fixed fixture clock and report-path
+assertion mistakes and native approval stops.
+
+The final local OpenCode 1.19.3 run passed this single scenario in 45.26 seconds,
+including server/watcher reaping, absent owned roots and zero occupied slots.
+The external runner also verified the selected configuration file was unchanged
+byte-for-byte. Earlier failed runs are not counted as successful scenarios.

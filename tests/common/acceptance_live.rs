@@ -42,7 +42,64 @@ fn ready(port: u16) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
-fn native(
+// Receiver preflight may be briefly unavailable while its real watcher starts.
+// This outer helper cannot resume an existing runtime dispatch journal. Lock
+// contention inside that journal is handled by native::dispatch itself using
+// the adapter's submission journal as its no-resend boundary.
+fn retry_unstarted(
+    root: &Path,
+    journal: &str,
+    mut action: impl FnMut() -> herdr_flow::Result<J>,
+) -> herdr_flow::Result<J> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match action() {
+            Err(error)
+                if !root.join(journal).exists()
+                    && (error.kind == herdr_flow::error::ErrorKind::StateBusy
+                        || error.message
+                            == "coordinator receiver must be ready before dispatch")
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[test]
+fn native_driver_retries_busy_only_before_a_creation_or_dispatch_journal() {
+    let temp = temp();
+    let mut calls = 0;
+    let result = retry_unstarted(temp.path(), "dispatch.json", || {
+        calls += 1;
+        if calls == 1 {
+            Err(herdr_flow::FlowError::new(
+                herdr_flow::error::ErrorKind::StateBusy,
+                "fixture busy",
+            ))
+        } else {
+            Ok(json!({"ok":true}))
+        }
+    })
+    .unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(calls, 2);
+    calls = 0;
+    assert!(retry_unstarted(temp.path(), "dispatch.json", || {
+        calls += 1;
+        fs::write(temp.path().join("dispatch.json"), "uncertain").unwrap();
+        Err(herdr_flow::FlowError::new(
+            herdr_flow::error::ErrorKind::StateBusy,
+            "fixture busy after journal",
+        ))
+    })
+    .is_err());
+    assert_eq!(calls, 1);
+}
+
+pub(super) fn native(
     env: &mut TaskEnvironment,
     q: &Path,
     cwd: &Path,
@@ -50,7 +107,7 @@ fn native(
     instruction: &str,
 ) -> (J, J) {
     let root = task_runtime::prepare(env, name).unwrap();
-    fs::create_dir_all(root.join("config/opencode")).unwrap();
+    common::create_dir_all(root.join("config/opencode")).unwrap();
     fs::copy(
         std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap(),
         root.join("config/opencode/opencode.json"),
@@ -68,16 +125,30 @@ fn native(
     let mut child = task_runtime::launch(env, &root, &spec).unwrap();
     ready(spec["port"].as_u64().unwrap() as u16);
     let instruction=format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
-    let state = task_runtime::native::create(
-        env,
-        &root,
-        &json!({"queue_dir":q,"wait":name,"instruction":instruction}),
-    )
+    let state = retry_unstarted(&root, "creation.json", || {
+        task_runtime::native::create(
+            env,
+            &root,
+            &json!({"queue_dir":q,"wait":name,"instruction":instruction}),
+        )
+    })
     .unwrap();
-    task_runtime::native::dispatch(env, &root).unwrap();
+    retry_unstarted(&root, "dispatch.json", || {
+        task_runtime::native::dispatch(env, &root)
+    })
+    .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let result = loop {
-        let r = task_runtime::native::collect(env, &root).unwrap_or_else(|error| {
+        let collected = task_runtime::native::collect(env, &root);
+        if collected
+            .as_ref()
+            .is_err_and(|error| error.kind == herdr_flow::error::ErrorKind::StateBusy)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let r = collected.unwrap_or_else(|error| {
             panic!(
                 "native collection: {error}; report={}",
                 fs::read_to_string(cwd.join(".herdr-verdict.json")).unwrap_or_default()
