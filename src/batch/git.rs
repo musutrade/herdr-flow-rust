@@ -125,6 +125,7 @@ pub fn run(
         clear_env: false,
         remove_git_env: true,
         stdin: data.map(ToOwned::to_owned),
+        ..Default::default()
     };
     let output = util::process::run_command(&argv, &options).map_err(|error| {
         if error.kind == ErrorKind::Timeout {

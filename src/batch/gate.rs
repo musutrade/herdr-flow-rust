@@ -215,6 +215,8 @@ fn call_options(stdin: Vec<u8>) -> util::process::CommandOptions {
         cwd: Some(std::path::PathBuf::from("/")),
         timeout: Duration::from_secs(45),
         stdin: Some(stdin),
+        stdout_limit: 65_536,
+        stderr_limit: 65_536,
         ..Default::default()
     }
 }

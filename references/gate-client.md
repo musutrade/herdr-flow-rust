@@ -59,3 +59,25 @@ is never replayed automatically.
 
 The tests' stdio script is a fixture, not a trusted GateHouse implementation.
 Production adapter compatibility and live deployment remain #98 integration work.
+
+### Captured process output budget
+
+The verifier's stdout and stderr each have a 65,536-byte budget enforced during
+collection. Exceeding either budget stops the owned process group and fails
+verification; partial JSON is never parsed as a receipt. The existing operation
+must be preserved and uncertain publication queried before any retry. Diagnostics
+identify the stream and budget without including captured verifier content.
+
+The shared `CommandOptions` capture boundary defaults to 16 MiB per stream
+(32 MiB combined payload), plus fixed read buffers and allocation overhead. Git
+snapshot/diff/object operations, Herdr CLI responses and GitHub API responses use
+this default; their data-dependent output has no intrinsic small maximum, so a
+larger response now fails explicitly instead of growing memory without a bound.
+A caller with a documented larger legitimate payload can set finite
+`stdout_limit` and `stderr_limit` values. Zero permits only an empty stream;
+exactly the configured number of bytes is accepted. Neither stream can consume
+the other's budget. `run_command` reports `OutputLimitExceeded`; domain adapters
+may wrap it in their existing failure category. This is not an automatic retry
+signal. Timeout, fair pipe servicing and owned-group cleanup remain in effect.
+This budget covers captured commands, not detached command logs or native RPC
+streams, which have separate lifecycle/protocol contracts.
