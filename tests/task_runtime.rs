@@ -1,5 +1,5 @@
 //! Owned runtime boundary tests; live tests require installed native binaries.
-use herdr_flow::{model::J, progress, queue, task_env::*, task_runtime};
+use herdr_flow::{delivery, model::J, progress, queue, task_env::*, task_runtime};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path, process::Command};
@@ -26,16 +26,26 @@ impl Drop for OwnedEnvironment {
         }
     }
 }
-fn environment(root: &Path) -> OwnedEnvironment {
+fn environment_with(root: &Path, task_id: &str, targets: Vec<DeliveryTarget>) -> OwnedEnvironment {
     std::env::set_var("HERDR_TASK_ENV_ROOT", root.join("registry"));
     OwnedEnvironment(
         create_environment(
-            "runtime-test",
+            task_id,
             &root.join("workspace"),
-            vec![],
+            targets,
             &root.join("temporary"),
         )
         .unwrap(),
+    )
+}
+fn environment(root: &Path) -> OwnedEnvironment {
+    environment_with(root, "runtime-test", vec![])
+}
+fn environment_project(root: &Path, target: &Path) -> OwnedEnvironment {
+    environment_with(
+        root,
+        "project",
+        vec![DeliveryTarget::new(target.to_path_buf(), "git".into())],
     )
 }
 fn temp() -> tempfile::TempDir {
@@ -90,7 +100,8 @@ fn setup_in_queue(
     let mut state = queue::load_queue(q).unwrap();
     progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"verify file",
         "basis":{"original":[if role=="development" {"change file to version B and commit locally"} else {"file must contain version A"}],"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
-        "authorization":[{"id":"verify","action":"review","source":"user"}]}),now).unwrap();
+        "authorization":[{"id":"verify","action":"review","source":"user"},
+            {"id":"deliver","action":"delivery","source":"explicit disposable native delivery test"}]}),now).unwrap();
     if role == "development" {
         state["tasks"]["project"]["requirements"]["1"]["authorization"]["develop"] =
             json!({"action":"development","source":"explicit disposable native development test"});

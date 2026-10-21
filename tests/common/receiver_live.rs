@@ -113,25 +113,44 @@ fn native_receipt_uses_durable_delivery_identity_after_watcher_moves_on() {
 #[test]
 #[ignore = "requires selected OpenCode 1.19.3 config/model and native shell permission"]
 fn installed_real_opencode_receiver_readiness_and_ack() {
-    run_native_receiver(false, false);
+    run_native_receiver(false, false, false);
 }
 
 #[test]
 #[ignore = "requires selected native model: real developer result and coordinator ACK/application"]
 fn installed_real_opencode_developer_result_is_applied_by_native_receiver() {
-    run_native_receiver(true, false);
+    run_native_receiver(true, false, false);
 }
 
 #[test]
 #[ignore = "requires real developer, independent reviewer and native coordinator application"]
 fn installed_real_opencode_independent_acceptance_is_applied_by_native_receiver() {
-    run_native_receiver(true, true);
+    run_native_receiver(true, true, false);
 }
 
-fn run_native_receiver(apply_development: bool, apply_acceptance: bool) {
+#[test]
+#[ignore = "requires accepted native candidate and external unmarked Local Git delivery"]
+fn installed_real_opencode_accepted_result_is_delivered_by_external_driver() {
+    run_native_receiver(true, true, true);
+}
+
+fn run_native_receiver(apply_development: bool, apply_acceptance: bool, apply_delivery: bool) {
+    assert!(
+        !apply_delivery || apply_acceptance,
+        "delivery requires the native acceptance stage"
+    );
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
-    let mut env = environment(temp.path());
+    let formal_target = temp.path().join("formal.git");
+    let user_asset = temp.path().join("user-owned.txt");
+    if apply_delivery {
+        fs::write(&user_asset, "unrelated user asset").unwrap();
+    }
+    let mut env = if apply_delivery {
+        environment_project(temp.path(), &formal_target)
+    } else {
+        environment(temp.path())
+    };
     let cwd = env.workspace_root.join("receiver");
     fs::create_dir(&cwd).unwrap();
     let root = task_runtime::prepare(&env, "real-receiver").unwrap();
@@ -280,6 +299,32 @@ fn run_native_receiver(apply_development: bool, apply_acceptance: bool) {
         }
     }
     let development_cwd = apply_development.then(|| setup_in_queue(&env, "development", &q).1);
+    let mut delivery_expected = None;
+    if apply_delivery {
+        let source = env.workspace_root.join("source");
+        let base = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                formal_target.to_str().unwrap(),
+            ],
+        );
+        // setup_in_queue does not impose a source branch name; seed the exact
+        // formal ref used by Local delivery regardless of the clone's HEAD.
+        git(
+            &formal_target,
+            &["update-ref", "refs/heads/main", base.as_str()],
+        );
+        assert_eq!(git(&formal_target, &["rev-parse", "refs/heads/main"]), base);
+        assert_eq!(
+            fs::read_to_string(&user_asset).unwrap(),
+            "unrelated user asset"
+        );
+        delivery_expected = Some(base);
+    }
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     let development_result = if let Some(development_cwd) = development_cwd {
         git(&development_cwd, &["config", "user.name", "Native fixture"]);
@@ -468,13 +513,106 @@ fn run_native_receiver(apply_development: bool, apply_acceptance: bool) {
             );
         }
     }
-    destroy_environment(&env).unwrap();
-    for child in [&mut server, &mut guard_child, &mut queue_child] {
-        child.wait().unwrap();
+    if apply_delivery {
+        // The native coordinator has finished both notifications. Stop the queue
+        // watcher before the external driver takes the queue lock for delivery.
+        let _ = queue_child.kill();
+        let _ = queue_child.wait();
+        let artifact = &development_result.as_ref().unwrap()["output"];
+        external_driver_delivery(
+            &mut env,
+            &q,
+            &formal_target,
+            &user_asset,
+            artifact,
+            delivery_expected.as_ref().unwrap(),
+        );
+        for child in [&mut server, &mut guard_child] {
+            child.wait().unwrap();
+        }
+    } else {
+        destroy_environment(&env).unwrap();
+        for child in [&mut server, &mut guard_child, &mut queue_child] {
+            child.wait().unwrap();
+        }
     }
     assert!(!env.workspace_root.exists());
     assert!(!env.temp_root.exists());
     assert_eq!(occupied_slots().unwrap(), 0);
+}
+
+// Trusted, unmarked external driver. The native coordinator only approved the
+// continuation; this process owns the environment and the Local executor.
+fn external_driver_delivery(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    target: &Path,
+    user_asset: &Path,
+    artifact: &J,
+    expected: &str,
+) {
+    let artifact_id = artifact["id"].as_str().unwrap();
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        expected
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+    let state = queue::load_queue(q).unwrap();
+    let mut spec = json!({
+        "adapter":"git",
+        "target":target.display().to_string(),
+        "ref":"refs/heads/main",
+        "expected":expected,
+        "authorization":"deliver"
+    });
+    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    let intent = delivery::prepare(env, q, &spec, &delivery::local::Local).unwrap();
+    assert_eq!(intent["artifact"]["id"], json!(artifact_id));
+    // Preparation is not delivery: the exact seeded target must be unchanged.
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        expected
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+
+    let confirmed = delivery::execute(env, &delivery::local::Local).unwrap();
+    assert_eq!(confirmed["phase"], "confirmed");
+    assert_eq!(
+        confirmed["receipt"]["repository"],
+        json!(target.display().to_string())
+    );
+    assert_eq!(confirmed["receipt"]["ref"], "refs/heads/main");
+    assert_eq!(confirmed["receipt"]["commit"], json!(artifact_id));
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        artifact_id
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+
+    delivery::finish(env).unwrap();
+    assert!(!env.workspace_root.exists());
+    assert!(!env.temp_root.exists());
+    assert!(!env.state_file().exists());
+    assert!(!is_registered("project").unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    assert!(!q.exists());
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/main"]).as_str(),
+        artifact_id
+    );
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
 }
 
 // Driver registers work and collects native evidence; only the coordinator ACKs/applies.
