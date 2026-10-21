@@ -108,9 +108,15 @@ review/repair, customer delivery or the complete external-cache inventory.
 
 `tests/legacy_resources.rs` persists a legacy queue task and a real undelivered
 file in an already-registered environment. It checks that invalid migration
-requirements leave the record and file intact, and that successful queue migration
-followed by environment restore retains the same instance, one occupied slot,
-old authorization and file contents without a new approval. A path to an unrelated
+requirements leave the queue bytes, registry, environment document, root identities
+and file intact. Successful queue migration also leaves those resources unchanged:
+resource references in the legacy record are opaque to migration. A separate
+restore check rejects concurrent ownership, then retains the registered instance,
+roots and state-file identity after the original handle is dropped. The new
+requirement explicitly receives caller-supplied authorization from the existing
+user agreement; migration does not infer it from the preserved old record. Its
+endpoint matches the registered formal output, while acceptance evidence,
+candidate and delivery target remain unset. A path to an unrelated
 user asset in the old record remains outside the disposable boundary. An explicit
 fixture copy followed by environment destruction preserves that user asset and
 the registered formal output while removing the owned roots and registry entry.
