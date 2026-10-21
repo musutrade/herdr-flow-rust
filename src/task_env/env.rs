@@ -11,7 +11,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -197,6 +197,11 @@ impl TaskEnvironment {
     /// The child is placed in its own session so it leads its own process
     /// group, and it inherits the environment marker. Only processes started
     /// this way (or descended from them) can be registered and reclaimed.
+    /// Paths and the Landlock ruleset are prepared in the parent when building
+    /// the command; only restriction syscalls run after fork. Roots must exist
+    /// at construction time. Preparation failure is deferred to `spawn` as an
+    /// OS error (EOPNOTSUPP when the kernel lacks the required ABI), so callers
+    /// must check spawn's Result. The parent is not confined by preparation.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         self.process_command(program, true)
     }
@@ -213,18 +218,23 @@ impl TaskEnvironment {
         // Keep temporary files inside the disposable boundary as well.
         command.env("TMPDIR", &self.temp_root);
         let roots = vec![self.workspace_root.clone(), self.temp_root.clone()];
-        // SAFETY: pre_exec runs in the child after fork and before exec; it
-        // only performs syscalls and owns no Rust allocations that outlive it.
+        let prepared = confine.then(|| {
+            PreparedConfinement::new(&roots)
+                .map_err(|error| error.raw_os_error().unwrap_or(libc::EOPNOTSUPP))
+        });
+        // SAFETY: paths, rules and errors are prepared before fork. The child
+        // borrows the prepared fd and only calls setsid/prctl/restrict_self;
+        // errors are constructed from scalar errno values without allocation.
         unsafe {
             use std::os::unix::process::CommandExt as _;
             command.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if confine {
-                    confine_renames_to(&roots)
-                } else {
-                    Ok(())
+                match &prepared {
+                    Some(Ok(policy)) => policy.apply(),
+                    Some(Err(errno)) => Err(std::io::Error::from_raw_os_error(*errno)),
+                    None => Ok(()),
                 }
             });
         }
@@ -551,15 +561,27 @@ struct LandlockPathBeneathAttr {
 /// assets), cannot truncate state files, and cannot rename or remove the roots
 /// themselves. This makes both the cleanup metadata and the parent directory
 /// entry something the task cannot rewrite.
-pub(crate) fn confine_renames_to(roots: &[PathBuf]) -> std::io::Result<()> {
-    set_no_new_privs().and_then(|()| {
-        required_landlock_abi().and_then(|abi| {
-            let handled = handled_access(abi);
-            create_landlock_ruleset(handled).and_then(|ruleset| {
-                add_root_rules(ruleset, handled, roots).and_then(|()| restrict_self(ruleset))
-            })
-        })
-    })
+pub(crate) struct PreparedConfinement {
+    ruleset: File,
+}
+
+impl PreparedConfinement {
+    /// Prepare all paths, rules and fallible allocations in the parent.
+    pub(crate) fn new(roots: &[PathBuf]) -> std::io::Result<Self> {
+        let handled = handled_access(required_landlock_abi()?);
+        let fd = create_landlock_ruleset(handled)?;
+        // SAFETY: successful creation returns one fresh CLOEXEC ruleset fd;
+        // transfer ownership once so every preparation error closes it.
+        let ruleset = unsafe { File::from_raw_fd(fd) };
+        add_root_rules(ruleset.as_raw_fd(), handled, roots)?;
+        Ok(Self { ruleset })
+    }
+
+    /// Apply only in the fork child: no allocation, locks, or path lookup.
+    pub(crate) fn apply(&self) -> std::io::Result<()> {
+        set_no_new_privs()?;
+        restrict_self(self.ruleset.as_raw_fd())
+    }
 }
 
 fn add_root_rules(ruleset: i32, handled: u64, roots: &[PathBuf]) -> std::io::Result<()> {
@@ -681,11 +703,10 @@ fn add_rule_syscall(ruleset: i32, rule: &LandlockPathBeneathAttr) -> std::io::Re
 }
 
 fn restrict_self(ruleset: i32) -> std::io::Result<()> {
-    // SAFETY: ruleset is live; restrict_self consumes no ownership.
+    // SAFETY: the PreparedConfinement File remains borrowed and live; the
+    // syscall consumes no ownership. CLOEXEC closes the child copy on exec.
     let result = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) };
     let error = std::io::Error::last_os_error();
-    // SAFETY: ruleset is still owned here and is not used afterwards.
-    unsafe { libc::close(ruleset) };
     if result == 0 {
         Ok(())
     } else {
