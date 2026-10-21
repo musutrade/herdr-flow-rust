@@ -33,6 +33,83 @@ impl Drop for FailureEvidence {
     }
 }
 
+// Explicit opt-in applies only to the disposable copy, never the selected file.
+fn allow_owned_external_directory(config: &mut J, root: &Path) {
+    let root = root.canonicalize().unwrap();
+    let path = root.to_str().unwrap();
+    assert!(!path.contains(['*', '?']), "owned path must be literal");
+    let permissions = config
+        .as_object_mut()
+        .unwrap()
+        .entry("permission")
+        .or_insert_with(|| json!({}));
+    let permissions = permissions
+        .as_object_mut()
+        .expect("scoped permission opt-in requires an object permission policy");
+    let external = permissions
+        .entry("external_directory")
+        .or_insert_with(|| json!({}));
+    let external = external
+        .as_object_mut()
+        .expect("scoped permission opt-in requires an object external_directory policy");
+    external.insert(path.into(), json!("allow"));
+    external.insert(format!("{path}/**"), json!("allow"));
+}
+
+#[test]
+fn scoped_external_permission_preserves_other_rules_and_selected_config() {
+    let temp = temp();
+    let selected = json!({"permission":{"bash":"ask","external_directory":{"*":"ask","/unrelated/**":"deny"}},"model":"unchanged"});
+    let mut copy = selected.clone();
+    allow_owned_external_directory(&mut copy, temp.path());
+    assert_eq!(copy["permission"]["bash"], "ask");
+    assert_eq!(copy["permission"]["external_directory"]["*"], "ask");
+    assert_eq!(
+        copy["permission"]["external_directory"]["/unrelated/**"],
+        "deny"
+    );
+    let root = temp.path().canonicalize().unwrap();
+    assert_eq!(
+        copy["permission"]["external_directory"][root.to_str().unwrap()],
+        "allow"
+    );
+    assert_eq!(
+        copy["permission"]["external_directory"][format!("{}/**", root.display())],
+        "allow"
+    );
+    assert_eq!(copy["model"], selected["model"]);
+    assert_eq!(
+        selected["permission"]["external_directory"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+fn acknowledged_delivery<'a>(state: &'a J, session: &str) -> Option<&'a str> {
+    let deliveries = state["deliveries"].as_object()?;
+    if deliveries.len() != 1 {
+        return None;
+    }
+    let (id, delivery) = deliveries.iter().next()?;
+    (delivery["phase"] == "acknowledged" && delivery["session"] == session).then_some(id.as_str())
+}
+
+#[test]
+fn native_receipt_uses_durable_delivery_identity_after_watcher_moves_on() {
+    let mut state = json!({"delivery_status":"waiting_for_events","deliveries":{
+        "receipt":{"phase":"acknowledged","session":"sesreceiver"}}});
+    assert_eq!(
+        acknowledged_delivery(&state, "sesreceiver"),
+        Some("receipt")
+    );
+    assert_eq!(acknowledged_delivery(&state, "other"), None);
+    state["delivery_status"] = json!("acknowledged");
+    state["deliveries"]["receipt"]["phase"] = json!("submitted");
+    assert_eq!(acknowledged_delivery(&state, "sesreceiver"), None);
+}
+
 #[test]
 #[ignore = "requires selected OpenCode 1.19.3 config/model and native shell permission"]
 fn installed_real_opencode_receiver_readiness_and_ack() {
@@ -42,8 +119,10 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
     let cwd = env.workspace_root.join("receiver");
     fs::create_dir(&cwd).unwrap();
     let root = task_runtime::prepare(&env, "real-receiver").unwrap();
-    let q = env.temp_root.join("queue");
-    let guard = env.temp_root.join("guard");
+    // Native launch restricts writes to this runtime root and cwd. Coordinator
+    // state must live inside that boundary, not in a sibling of the runtime.
+    let q = root.join("queue");
+    let guard = root.join("guard");
     let _failure_evidence = FailureEvidence(vec![
         root.join("server.log"),
         guard.join("foreground.log"),
@@ -54,8 +133,11 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
     ]);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
-    // Copy existing permission policy unchanged. A native approval blocks this
-    // bounded test; neither the test nor another agent may approve it for us.
+    // Only an explicit operator opt-in may widen the disposable copy's directory
+    // permission. All other native approvals still block this bounded test.
+    if std::env::var("HERDR_LIVE_ALLOW_OWNED_EXTERNAL_DIR").as_deref() == Ok("1") {
+        allow_owned_external_directory(&mut config, &root);
+    }
     let instructions = cwd.join("receiver-instructions.md");
     let binary = util::shell_quote(env!("CARGO_BIN_EXE_herdr-flow"));
     let queue_path = util::shell_quote(q.to_str().unwrap());
@@ -154,9 +236,14 @@ fn installed_real_opencode_receiver_readiness_and_ack() {
             );
         }
         let state = queue::load_queue(&q).unwrap();
-        if state["delivery_status"] == "acknowledged" {
+        if let Some(delivery) =
+            acknowledged_delivery(&state, registered["session"].as_str().unwrap())
+        {
             if let Ok(readiness) = util::read_json(&q.join("readiness.json")) {
-                if readiness["active_wakeup"] == true {
+                if readiness["active_wakeup"] == true
+                    && readiness["last_confirmed_receipt"]["delivery"] == delivery
+                    && readiness["last_confirmed_receipt"]["session"] == registered["session"]
+                {
                     if let Ok(submission) = util::read_json(&guard.join("submission.json")) {
                         if submission["phase"] == "complete" {
                             break;
