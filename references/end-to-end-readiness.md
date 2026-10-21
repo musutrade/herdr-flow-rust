@@ -103,3 +103,26 @@ configuration. Bounded local failure diagnostics are retained separately from
 the disposable environment, excluding the selected config/auth files. Passing
 this one receipt test would still not prove twenty real tasks, independent
 review/repair, customer delivery or the complete external-cache inventory.
+
+## Legacy queue with an existing registered environment
+
+`tests/legacy_resources.rs` persists a legacy queue task and a real undelivered
+file in an already-registered environment. It checks that invalid migration
+requirements leave the queue bytes, registry, environment document, root identities
+and file intact. Successful queue migration also leaves those resources unchanged:
+resource references in the legacy record are opaque to migration. A separate
+restore check rejects concurrent ownership, then retains the registered instance,
+roots and state-file identity after the original handle is dropped. The new
+requirement explicitly receives caller-supplied authorization from the existing
+user agreement; migration does not infer it from the preserved old record. Its
+endpoint matches the registered formal output, while acceptance evidence,
+candidate and delivery target remain unset. A path to an unrelated
+user asset in the old record remains outside the disposable boundary. An explicit
+fixture copy followed by environment destruction preserves that user asset and
+the registered formal output while removing the owned roots and registry entry.
+
+This covers legacy queue records referring to a current, positively identified
+environment registration. It does not import arbitrary historical environment
+schemas or adopt unregistered resources. The fixture copy is not product delivery
+or independent acceptance, and no native session is used. Ownership that cannot
+be established from actual registration/recovery evidence remains unresolved.
