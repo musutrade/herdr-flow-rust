@@ -331,3 +331,24 @@ owned roots/registry/queue/slots before fixture teardown. The selected OpenCode
 config bytes were unchanged. Stable coverage and Rust 1.85 all-target tests each
 passed 473 tests with 11 ignored; the absolute CRAP threshold of 10 had no
 violations. These results do not close #38 or #32.
+
+## Bounded resource inventory collector
+
+`tests/common/resource_inventory.rs` is a test-only, metadata-only collector for a
+stable campaign base. It observes task identity, owned/runtime roots, registry,
+environment state and cleanup plans, slots, registered worktrees/open files,
+marked process pid/start/cwd/fd targets, shared-queue ownership counts, explicit
+exclusions, scoped base file/byte/allocated-block counts and a noisy filesystem
+free-byte observation. It never reads file contents, configuration, auth or
+credentials and never deletes an observed resource.
+
+The synthetic two-round test in `tests/resource_inventory.rs` reuses one campaign
+base and shared queue, creates a real marked child with an outside open fd,
+registers a real Git worktree and open file, and excludes exact formal/user/config
+paths. It checks nonempty observations before cleanup, empty owned roots/processes/
+worktrees/open files and zero slots afterwards, retained unrelated queue entries,
+and a stable base between rounds. Unknown outside paths are reported, never
+removed. This is collector validation only: `/proc` samples can miss short-lived or
+unlinked files, known-root observations do not prove absence of global caches, and
+filesystem free bytes are not a leak proof. No live model or twenty-round claim is
+made by this batch.
