@@ -10,7 +10,7 @@ fn persistent_connection_records_exact_turns_and_never_answers_approval() {
         peer.initialize();
         let request = peer.request();
         assert_eq!(request["method"], "thread/read");
-        peer.json(&json!({"id":request["id"],"result":{"thread":{"id":"s"}}}));
+        peer.json(&json!({"id":request["id"],"result":{"thread":{"id":"s"},"large":"x".repeat(2 * 1024 * 1024)}}));
         received.recv_timeout(Duration::from_secs(10)).unwrap();
         peer.json(&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"completed"}}}));
         peer.json(&json!({"id":91,"method":"item/commandExecution/requestApproval","params":{"threadId":"s","turnId":"t"}}));
@@ -36,6 +36,7 @@ fn persistent_connection_records_exact_turns_and_never_answers_approval() {
     }
     let result = call(&root, "thread/read", &json!({"threadId":"s"})).unwrap();
     assert_eq!(result["thread"]["id"], "s");
+    assert_eq!(result["large"].as_str().unwrap().len(), 2 * 1024 * 1024);
     release.send(()).unwrap();
     assert!(task.join().unwrap().is_err());
     server.finish();

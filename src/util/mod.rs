@@ -11,3 +11,5 @@ pub use pyjson::*;
 pub use time::*;
 
 pub use crate::model::{self, get, get_mut, object, object_mut, set, J};
+
+pub(crate) mod unix_socket;
