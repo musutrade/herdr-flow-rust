@@ -1038,3 +1038,38 @@ The snapshot is removed only after that sample passes, so this sample proves the
 asserted owned-root/registry cleanup, not an exact formal-output-only base listing.
 The outer disposable fixture is removed at teardown; the snapshot is preserved
 only on a failed assertion through the bounded development failure evidence path.
+
+## Submitted native worker recovery through fresh CLI collection
+
+The opt-in
+`installed_real_opencode_submitted_worker_is_collected_by_fresh_cli`
+scenario uses the real development-only coordinator flow. It creates one actual
+OpenCode worker session, binds it, and dispatches the immutable packet exactly
+once through the existing native start path. It checks the exact session, packet
+hash, queue id, wait binding, runtime endpoint/cwd and submitted message/context
+before recovery.
+
+The test releases only the parent environment ownership; the original native
+server remains alive. A fresh plain CLI process runs `task-runtime collect` and
+repeats only after a known `StateBusy` message or a nonterminal submission phase,
+until the journal is `signalled`. It never calls parent `native::collect`,
+dispatches again, creates or relaunches a session, edits a journal, or ACKs/applies
+from the driver. The resulting submission retains the same session, message id and
+context; creation, dispatch and runtime journals are unchanged; the session
+history shows one matching user prompt and one terminal reply. The existing
+coordinator ACKs/applies the single event through the normal receiver path.
+
+A test-only reversible custody guard reacquires the exact environment instance on
+success with bounded lock retries. On error/panic it reacquires the same instance
+without erasing failed state, leaving bounded journals available for failure
+evidence; it does not reuse the delivery `HandoffGuard`, whose cleanup contract is
+deliberately different. The worker child remains under RAII and is stopped and
+reaped only after collection; selected config and final roots/slots must be
+unchanged/zero. A focused no-model control covers same-instance reacquisition and
+failure-state preservation, with explicit teardown after the control.
+
+This is not a crash or server-restart proof, and it does not cover a dispatch
+interruption after `dispatch.json` but before `submission.json`: no supported API
+can prove that the POST was not sent, so that boundary remains fail-closed.
+Worker takeover, coordinator process restart, a second POST and invention of a
+replacement session are not claimed. #38/#32 remain OPEN.

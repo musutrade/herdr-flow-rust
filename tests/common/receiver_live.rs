@@ -240,6 +240,40 @@ fn installed_real_opencode_developer_result_is_applied_by_native_receiver() {
 }
 
 #[test]
+#[ignore = "requires a real submitted OpenCode worker recovered by fresh CLI collection without resend"]
+fn installed_real_opencode_submitted_worker_is_collected_by_fresh_cli() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
+        apply_worker_recovery: true,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
 #[ignore = "requires real OpenCode 1.19.3 config/model and native shell permission; ACK/stall same-session recovery"]
 fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -264,6 +298,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -297,6 +332,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -330,6 +366,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -363,6 +400,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -396,6 +434,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -429,6 +468,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -462,6 +502,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -495,6 +536,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_missing_report: true,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -535,6 +577,7 @@ fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supe
         apply_missing_report: false,
         apply_unknown_delivery: true,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -587,6 +630,7 @@ fn installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: true,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -622,6 +666,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -1009,6 +1054,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_missing_report: false,
             apply_unknown_delivery: false,
             apply_cleanup_recovery: false,
+            apply_worker_recovery: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1185,6 +1231,7 @@ struct ReceiverSpec<'a> {
     apply_missing_report: bool,
     apply_unknown_delivery: bool,
     apply_cleanup_recovery: bool,
+    apply_worker_recovery: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1221,6 +1268,7 @@ fn run_native_receiver(
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1247,6 +1295,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_missing_report,
         apply_unknown_delivery,
         apply_cleanup_recovery,
+        apply_worker_recovery,
         unavailable_dependency,
         base,
         formal_target,
@@ -1418,11 +1467,33 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "cleanup recovery requires the native repair/restart delivery fixture"
     );
+    assert!(
+        !apply_worker_recovery
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && !apply_unknown_delivery
+                && !apply_cleanup_recovery
+                && unavailable_dependency.is_none()),
+        "worker recovery requires isolated native development"
+    );
     let selected_config_before = (apply_concurrent
         || apply_approval_block
         || apply_missing_report
         || apply_unknown_delivery
-        || apply_cleanup_recovery)
+        || apply_cleanup_recovery
+        || apply_worker_recovery)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1552,6 +1623,22 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         evidence_paths.extend([
             worker_root.join("server.log"),
             worker_root.join("submission.json"),
+        ]);
+    }
+    if apply_worker_recovery {
+        evidence_paths.extend([
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("creation.json"),
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("dispatch.json"),
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("runtime.json"),
         ]);
     }
     if let Some(reviewer_root) = &reviewer_root {
@@ -2658,22 +2745,32 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         } else {
             review_instruction.to_string()
         };
-        let (worker, result) = match development_adapter {
-            DevelopmentAdapter::OpenCode => acceptance_live::native(
+        let (worker, result) = if apply_worker_recovery {
+            recover_submitted_worker(
                 &mut env,
                 &q,
                 &development_cwd,
                 "review",
                 &review_instruction,
-            ),
-            DevelopmentAdapter::Codex => acceptance_live::native_codex(
-                &mut env,
-                &q,
-                &development_cwd,
-                worker_root.as_ref().unwrap(),
-                "review",
-                &review_instruction,
-            ),
+            )
+        } else {
+            match development_adapter {
+                DevelopmentAdapter::OpenCode => acceptance_live::native(
+                    &mut env,
+                    &q,
+                    &development_cwd,
+                    "review",
+                    &review_instruction,
+                ),
+                DevelopmentAdapter::Codex => acceptance_live::native_codex(
+                    &mut env,
+                    &q,
+                    &development_cwd,
+                    worker_root.as_ref().unwrap(),
+                    "review",
+                    &review_instruction,
+                ),
+            }
         };
         assert_ne!(worker["session"], registered["session"]);
         let worker_report = match development_adapter {
@@ -3331,6 +3428,17 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         return;
     }
+    if apply_worker_recovery {
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("worker-recovery config snapshot"),
+            "selected OpenCode configuration changed during worker-recovery scenario"
+        );
+    }
     if apply_delivery {
         // The native coordinator has finished both notifications. Stop the queue
         // watcher before the external driver takes the queue lock for delivery.
@@ -3362,6 +3470,311 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     assert!(!env.workspace_root.exists());
     assert!(!env.temp_root.exists());
     assert_eq!(occupied_slots().unwrap(), 0);
+}
+
+struct WorkerCustody {
+    task_id: String,
+    instance_id: String,
+    armed: bool,
+}
+
+impl WorkerCustody {
+    fn release(env: &mut TaskEnvironment) -> Self {
+        assert!(env.owns_lock(), "worker custody requires owned environment");
+        let task_id = env.task_id.clone();
+        let instance_id = env.instance_id.clone();
+        env.release_ownership();
+        Self {
+            task_id,
+            instance_id,
+            armed: true,
+        }
+    }
+
+    fn resume(&mut self) -> TaskEnvironment {
+        assert!(self.armed, "worker custody already resolved");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match restore_environment(&self.task_id) {
+                Ok(env) => {
+                    assert_eq!(
+                        env.instance_id, self.instance_id,
+                        "worker custody instance changed"
+                    );
+                    self.armed = false;
+                    return env;
+                }
+                Err(error)
+                    if error.kind == herdr_flow::error::ErrorKind::StateBusy
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("worker custody resume failed: {error}"),
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match restore_environment(&self.task_id) {
+                Ok(env) => {
+                    if env.instance_id != self.instance_id {
+                        eprintln!(
+                            "worker custody instance changed; preserving {}",
+                            self.task_id
+                        );
+                    }
+                    return;
+                }
+                Err(error)
+                    if error.kind == herdr_flow::error::ErrorKind::StateBusy
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    eprintln!("worker custody could not reacquire: {error}");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WorkerCustody {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn worker_submission_files(root: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root.join("submissions"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect()
+}
+
+fn worker_collect_busy(stderr: &str) -> bool {
+    stderr.contains("wait queue busy; retry after current poll")
+        || stderr.contains("OpenCode submission is busy")
+}
+
+fn collect_worker_with_fresh_cli(root: &Path, message: &str) -> J {
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        let output = cli_output(&[
+            "task-runtime",
+            "collect",
+            "--task",
+            "project",
+            "--state-dir",
+            root.to_str().expect("worker root UTF-8"),
+        ]);
+        if output.status.success() {
+            let journal: J = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| panic!("fresh worker collect output invalid: {error}"));
+            if journal["phase"] == "signalled" {
+                assert_eq!(journal["message_id"], json!(message));
+                return journal;
+            }
+            assert!(
+                matches!(
+                    journal["phase"].as_str(),
+                    Some("sending" | "submitted" | "running")
+                ),
+                "fresh worker collect returned unexpected phase: {}",
+                journal["phase"]
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                worker_collect_busy(&stderr),
+                "fresh worker collect failed: {}",
+                stderr
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fresh worker collection deadline for {message}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn recover_submitted_worker(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+) -> (J, J) {
+    let mut turn = acceptance_live::native_start(env, q, cwd, name, instruction);
+    let root = turn.root.clone();
+    let instance_id = env.instance_id.clone();
+    let state: J = util::read_json(root.join("state.json")).unwrap();
+    let creation_before = util::read_json(root.join("creation.json")).unwrap();
+    let dispatch_before = fs::read(root.join("dispatch.json")).unwrap();
+    let runtime_before = fs::read(root.join("runtime.json")).unwrap();
+    let submission_before = util::read_json(root.join("submission.json")).unwrap();
+    let session = submission_before["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("worker submission session")
+        .to_string();
+    let message = submission_before["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("worker submission message")
+        .to_string();
+    let context = submission_before["context"].clone();
+    assert_eq!(submission_before["phase"], "submitted");
+    assert_eq!(state["session"], json!(session));
+    assert_eq!(state["adapter"], "opencode");
+    assert_eq!(state["cwd"], json!(cwd.to_str().expect("worker cwd UTF-8")));
+    assert_eq!(creation_before["phase"], "bound");
+    assert_eq!(creation_before["session"], json!(session));
+    assert_eq!(creation_before["wait"], json!(name));
+    assert_eq!(creation_before["queue_dir"], json!(q));
+    let packet_sha = creation_before["packet_sha256"].clone();
+    let dispatch: J = serde_json::from_slice(&dispatch_before).unwrap();
+    assert_eq!(dispatch["phase"], "sending");
+    assert_eq!(dispatch["session"], json!(session));
+    assert_eq!(dispatch["packet_sha256"], packet_sha);
+    let runtime: J = serde_json::from_slice(&runtime_before).unwrap();
+    assert_eq!(runtime["instance"], json!(instance_id));
+    assert_eq!(
+        runtime["cwd"],
+        json!(cwd.to_str().expect("worker cwd UTF-8"))
+    );
+    assert_eq!(
+        turn.endpoint,
+        format!(
+            "http://127.0.0.1:{}",
+            runtime["port"].as_u64().expect("worker runtime port")
+        )
+    );
+    let queue_before = queue::load_queue(q).unwrap();
+    let queue_id = queue_before["id"].clone();
+    let wait_before = queue_before["waits"][name].clone();
+    let binding = progress::binding(&wait_before).unwrap();
+    assert_eq!(wait_before["producer"]["session"], json!(session));
+    assert_eq!(
+        queue_before["tasks"][wait_before["task"].as_str().unwrap()]["writer"]["producer"]
+            ["session"],
+        json!(session)
+    );
+    assert_eq!(context["queue_id"], queue_id);
+    assert_eq!(context["queue_dir"], json!(q));
+    assert_eq!(context["wait"], json!(name));
+    assert_eq!(context["binding"], binding);
+    assert_eq!(context["producer_identity"]["session"], json!(session));
+    assert_eq!(
+        context["producer_identity"]["cwd"],
+        json!(cwd.to_str().expect("worker cwd UTF-8"))
+    );
+    assert_eq!(worker_submission_files(&root).len(), 1);
+
+    let mut custody = WorkerCustody::release(env);
+    let result = collect_worker_with_fresh_cli(&root, &message);
+
+    let submission_after = util::read_json(root.join("submission.json")).unwrap();
+    assert_eq!(submission_after, result);
+    assert_eq!(submission_after["phase"], "signalled");
+    assert_eq!(submission_after["session"], json!(session));
+    assert_eq!(submission_after["message_id"], json!(message));
+    assert_eq!(submission_after["context"], context);
+    assert_eq!(
+        util::read_json(root.join("state.json")).unwrap()["session"],
+        json!(session)
+    );
+    assert_eq!(
+        util::read_json(root.join("creation.json")).unwrap(),
+        creation_before
+    );
+    assert_eq!(
+        fs::read(root.join("dispatch.json")).unwrap(),
+        dispatch_before
+    );
+    assert_eq!(util::read_json(root.join("runtime.json")).unwrap(), runtime);
+    assert_eq!(worker_submission_files(&root).len(), 1);
+    let queue_after = queue::load_queue(q).unwrap();
+    assert_eq!(queue_after["id"], queue_id);
+    let events: Vec<_> = queue_after["events"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, event)| event["wait"] == name)
+        .collect();
+    assert_eq!(events.len(), 1, "one worker event expected");
+    assert_eq!(events[0].1["outcome"], "complete");
+
+    let rows = session_rows(&turn.client, &turn.endpoint, &session, cwd);
+    let user_rows = rows
+        .as_array()
+        .expect("worker session rows")
+        .iter()
+        .filter(|row| row["info"]["role"] == "user" && row["info"]["id"] == json!(message))
+        .count();
+    assert_eq!(user_rows, 1, "one matching user prompt expected");
+    exact_terminal_completion_millis(&rows, &result, cwd, "worker recovery");
+    assert_eq!(result["outcome"], "complete");
+
+    turn.stop();
+    let resumed = custody.resume();
+    assert_eq!(resumed.instance_id, instance_id);
+    *env = resumed;
+    (state, result)
+}
+
+#[test]
+fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let root = temp.path();
+    std::env::set_var("HERDR_TASK_ENV_ROOT", root.join("registry"));
+
+    let mut env = create_environment(
+        "worker-custody-success",
+        &root.join("success-workspace"),
+        vec![],
+        &root.join("success-temporary"),
+    )
+    .unwrap();
+    let instance_id = env.instance_id.clone();
+    let mut custody = WorkerCustody::release(&mut env);
+    let resumed = custody.resume();
+    assert_eq!(resumed.instance_id, instance_id);
+    destroy_environment(&resumed).unwrap();
+    assert!(!is_registered("worker-custody-success").unwrap());
+    assert!(!root.join("success-workspace").exists());
+
+    let mut env = create_environment(
+        "worker-custody-failure",
+        &root.join("failure-workspace"),
+        vec![],
+        &root.join("failure-temporary"),
+    )
+    .unwrap();
+    let instance_id = env.instance_id.clone();
+    let custody = WorkerCustody::release(&mut env);
+    drop(custody);
+    assert!(is_registered("worker-custody-failure").unwrap());
+    let restored = restore_environment("worker-custody-failure").unwrap();
+    assert_eq!(restored.instance_id, instance_id);
+    destroy_environment(&restored).unwrap();
+    assert!(!is_registered("worker-custody-failure").unwrap());
+    assert!(!root.join("failure-workspace").exists());
+    assert!(!root.join("failure-temporary").exists());
 }
 
 fn exact_original_event(state: &J) -> Option<(String, J)> {
