@@ -465,13 +465,19 @@ The same shared runner supports an opt-in fixed twenty-round campaign on one
 outer base: rounds 1..20 are normal except rounds 5, 10, 15 and 20, which use
 failed review, repair, fresh acceptance and confirmed restart. Every round uses
 fresh formal/user paths and a recreated queue under the disposable runtime. A
-bounded `campaign-summary.json` records at most twenty entries (normal or
-repair/restart, completed status, expected artifact/output identity, elapsed time
-and cleanup counts); report files remain a bounded rolling pair. The summary is
-also listed as bounded failure evidence. A failed round fails the campaign
-immediately and retains bounded failure evidence; there is no retry, skip or
-failed-round completion count. This twenty-round fixture has not
-been run here; it makes no twenty-success, whole-campaign disk-stability,
+A bounded `campaign-summary.json` starts with zero records and records at most
+twenty completed entries (normal or repair/restart, expected artifact/output
+identity, actual before/after marked-process counts and incompleteness flags,
+compact base file/byte/block observations, roots/state/cleanup/registry/queue
+observations, elapsed time and measured report count/bytes). Records are appended
+only after all round validation succeeds; a validation failure leaves the prior
+completed count and cannot create a completed record. Report files remain a
+bounded rolling pair; summary size is capped at 256KiB. An outer campaign
+failure guard retains the rolling reports and summary when validation or a later
+round fails, in addition to the per-round bounded logs. A failed round fails the
+campaign immediately and retains bounded failure evidence; there is no retry,
+skip or failed-round completion count. This twenty-round fixture has not been run
+here; it makes no twenty-success, whole-campaign disk-stability,
 persistent-shared-queue or global-cache claim.
 
 Observed validation (2026-10-22): the final two-round live run passed in 284.23s.

@@ -200,6 +200,20 @@ fn twenty_round_schedule_and_summary_bounds_are_fixed() {
     let document = summary_document(&records);
     assert_eq!(document["records"].as_array().unwrap().len(), 20);
     assert!(serde_json::to_vec(&document).unwrap().len() <= 256 * 1024);
+
+    // Synthetic boundary checks: no failed record, no 21st record, no oversized summary.
+    let completed = json!({"completed": true});
+    let mut bounded = Vec::new();
+    assert!(append_summary_record(&mut bounded, completed.clone()).is_ok());
+    assert!(append_summary_record(&mut bounded, json!({"completed": false})).is_err());
+    for _ in 1..20 {
+        append_summary_record(&mut bounded, completed.clone()).unwrap();
+    }
+    assert_eq!(bounded.len(), 20);
+    assert!(append_summary_record(&mut bounded, completed).is_err());
+    let oversized = json!({"completed": true, "padding": "x".repeat(300 * 1024)});
+    let mut oversized_records = Vec::new();
+    assert!(append_summary_record(&mut oversized_records, oversized).is_err());
 }
 
 fn user_identity(path: &Path) -> (u64, u64) {
@@ -232,7 +246,7 @@ fn sorted_names(path: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn assert_report_pair(base: &Path) {
+fn report_pair_metadata(base: &Path) -> (usize, u64) {
     let names = sorted_names(base).unwrap();
     let reports: Vec<&str> = names
         .iter()
@@ -244,11 +258,46 @@ fn assert_report_pair(base: &Path) {
         vec!["inventory-after.json", "inventory-before.json"],
         "reports must be one rolling pair"
     );
-    for report in reports {
+    let mut bytes = 0u64;
+    for report in &reports {
         let path = base.join(report);
         let len = fs::metadata(&path).unwrap().len();
         assert!(len > 0 && len <= 1024 * 1024, "unbounded report {report}");
+        bytes += len;
     }
+    (reports.len(), bytes)
+}
+
+fn compact_base(report: &J) -> J {
+    let base = &report["base_usage"];
+    json!({
+        "entries": base["entries"],
+        "files": base["files"],
+        "dirs": base["dirs"],
+        "symlinks": base["symlinks"],
+        "bytes": base["bytes"],
+        "allocated_blocks_512": base["allocated_blocks_512"],
+        "excluded_files": base["excluded_files"],
+        "excluded_bytes": base["excluded_bytes"],
+        "excluded_allocated_blocks_512": base["excluded_allocated_blocks_512"],
+        "truncated": base["truncated"],
+    })
+}
+
+fn incomplete_processes(report: &J) -> usize {
+    report["processes"]["records"]
+        .as_array()
+        .map(|records| {
+            records
+                .iter()
+                .filter(|record| record["complete"] != true)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn summary_bytes(records: &[J]) -> Vec<u8> {
+    serde_json::to_vec_pretty(&summary_document(records)).unwrap()
 }
 
 fn control_footprint(path: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
@@ -380,9 +429,25 @@ fn summary_document(records: &[J]) -> J {
     json!({"schema": 1, "max_records": 20, "records": records})
 }
 
+fn append_summary_record(records: &mut Vec<J>, record: J) -> Result<(), String> {
+    if record["completed"] != true {
+        return Err("only completed records may be appended".to_string());
+    }
+    let mut candidate = records.clone();
+    candidate.push(record);
+    if candidate.len() > 20 {
+        return Err("summary exceeds twenty records".to_string());
+    }
+    if summary_bytes(&candidate).len() > 256 * 1024 {
+        return Err("summary exceeds 256KiB".to_string());
+    }
+    *records = candidate;
+    Ok(())
+}
+
 fn write_summary(path: &Path, records: &[J]) {
     assert!(records.len() <= 20, "summary exceeds twenty records");
-    let bytes = serde_json::to_vec_pretty(&summary_document(records)).unwrap();
+    let bytes = summary_bytes(records);
     assert!(bytes.len() <= 256 * 1024, "summary exceeds 256KiB");
     fs::write(path, bytes).unwrap();
 }
@@ -415,6 +480,12 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
         .flat_map(|round| [round.formal.clone(), round.user.clone()])
         .collect();
     let summary_path = base.join("campaign-summary.json");
+    write_summary(&summary_path, &[]).unwrap();
+    let _campaign_evidence = FailureEvidence(vec![
+        base.join("inventory-before.json"),
+        base.join("inventory-after.json"),
+        summary_path.clone(),
+    ]);
     let mut completed: Vec<CompletedRound> = Vec::new();
     let mut records: Vec<J> = Vec::new();
     let mut control: Option<Vec<String>> = None;
@@ -434,44 +505,32 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             excluded: &excluded,
         });
         let elapsed_ms = started.as_millis().min(u128::from(u64::MAX)) as u64;
-        let commit = git(&round.formal, &["rev-parse", "refs/heads/main"]);
+
+        let before: J =
+            serde_json::from_slice(&fs::read(base.join("inventory-before.json")).unwrap()).unwrap();
+        let after: J =
+            serde_json::from_slice(&fs::read(base.join("inventory-after.json")).unwrap()).unwrap();
+        assert_eq!(before["expected_identity"], after["expected_identity"]);
+        let expected_artifact = before["expected_identity"]["candidate"]
+            .as_str()
+            .expect("missing expected artifact");
+        let actual_ref = git(&round.formal, &["rev-parse", "refs/heads/main"]);
+        assert_eq!(actual_ref, expected_artifact);
         let identity = user_identity(&round.user);
         completed.push(CompletedRound {
             formal: round.formal.clone(),
             user: round.user.clone(),
-            commit: commit.clone(),
+            commit: actual_ref.clone(),
             identity,
         });
         for prior in &completed {
             assert_round_output(&prior.formal, &prior.user, &prior.commit, prior.identity);
         }
-        let slots = occupied_slots().unwrap();
-        assert_eq!(slots, 0);
-        assert!(!is_registered("project").unwrap());
-        records.push(json!({
-            "index": round.index,
-            "scenario": if round.repair { "repair_restart" } else { "normal" },
-            "completed": true,
-            "formal_target": round.formal.display().to_string(),
-            "user_asset": round.user.display().to_string(),
-            "expected_artifact": commit.clone(),
-            "output": {"ref": "refs/heads/main", "commit": commit, "content": "version B"},
-            "user_identity": {
-                "dev": identity.0,
-                "ino": identity.1,
-                "bytes": fs::metadata(&round.user).unwrap().len(),
-            },
-            "elapsed_ms": elapsed_ms,
-            "cleanup": {
-                "owned_roots": 0,
-                "registry_slots": slots,
-                "reports": 2,
-                "completed_rounds": records.len() + 1,
-            }
-        }));
-        write_summary(&summary_path, &records);
-        assert_summary(&summary_path, records.len());
-        assert_report_pair(base);
+
+        let before_marked = before["processes"]["count"].as_u64().unwrap_or(0);
+        let after_marked = after["processes"]["count"].as_u64().unwrap_or(0);
+        assert_eq!(after_marked, 0);
+        let (report_count, report_bytes) = report_pair_metadata(base);
         let names: Vec<String> = rounds[..=position]
             .iter()
             .map(|round| format!("round-{}", round.index))
@@ -483,7 +542,74 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
         } else {
             control = Some(current);
         }
+        let slots = occupied_slots().unwrap();
+        assert_eq!(slots, 0);
+        assert!(!is_registered("project").unwrap());
+        let owned_roots = ["workspace", "temp"]
+            .iter()
+            .filter(|root| after["roots"][root]["exists"] == true)
+            .count();
+        assert_eq!(owned_roots, 0);
+
+        let record = json!({
+            "index": round.index,
+            "scenario": if round.repair { "repair_restart" } else { "normal" },
+            "completed": true,
+            "expected_artifact": expected_artifact,
+            "output": {
+                "ref": "refs/heads/main",
+                "commit": actual_ref,
+                "content": "version B",
+            },
+            "user_identity": {
+                "dev": identity.0,
+                "ino": identity.1,
+                "bytes": fs::metadata(&round.user).unwrap().len(),
+            },
+            "elapsed_ms": elapsed_ms,
+            "inventory": {
+                "before": {
+                    "marked": before_marked,
+                    "process_truncated": before["processes"]["truncated"],
+                    "incomplete_processes": incomplete_processes(&before),
+                    "base": compact_base(&before),
+                },
+                "after": {
+                    "marked": after_marked,
+                    "process_truncated": after["processes"]["truncated"],
+                    "incomplete_processes": incomplete_processes(&after),
+                    "base": compact_base(&after),
+                },
+                "roots": after["roots"],
+                "runtime_roots": after["runtime_roots"],
+                "open_files": after["open_files"],
+                "worktrees": after["worktrees"],
+                "state_exists": after["state"]["exists"],
+                "cleanup_exists": after["cleanup"]["exists"],
+                "registry": {
+                    "registered": after["registry"]["registered"],
+                    "entry_null": after["registry"]["entry"].is_null(),
+                    "slots": after["registry"]["occupied_slots"],
+                },
+                "queue_absent": after["queue_entries"]["error"].is_string(),
+            },
+            "cleanup": {
+                "owned_roots": owned_roots,
+                "registry_slots": slots,
+                "reports": report_count,
+                "report_bytes": report_bytes,
+                "completed_rounds": records.len() + 1,
+            }
+        });
+        append_summary_record(&mut records, record).unwrap();
+        write_summary(&summary_path, &records);
+        assert_summary(&summary_path, records.len());
     }
+    assert_eq!(
+        records.len(),
+        rounds.len(),
+        "campaign did not complete all rounds"
+    );
     assert!(!is_registered("project").unwrap());
     assert_eq!(occupied_slots().unwrap(), 0);
 }
