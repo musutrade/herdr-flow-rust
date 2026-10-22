@@ -948,3 +948,26 @@ The selected bounded diagnostic covers the later reviewer tool/reply and
 coordinator readiness checks. It is written after the stage wait and initial
 application/event/parent assertions; earlier failures retain the registered raw
 paths, not that selected metadata snapshot.
+
+## Native accepted delivery with injected lost observation
+
+The opt-in
+`installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supervisor`
+scenario extends the real native acceptance and external Local Git delivery
+fixture. A test-only `Executor` delegates Local preflight and performs the actual
+Local mutation exactly once, then returns an injected `Unknown` observation
+instead of observing the endpoint. The target is therefore at accepted artifact B
+while the persisted intent remains `unknown` with no receipt. This is a
+test-injected lost observation, not a provider/network crash or a fabricated
+confirmation.
+
+Before custody transfer the test records a truthful `before_unknown` inventory
+with a null receipt and unknown observation metadata; it does not call the
+confirmed-result inventory API or invent a receipt. A fresh unmarked CLI process
+then runs `delivery reconcile` with the real Local observer, which confirms the
+actual B target and receipt, followed by `finish`. No execute path is invoked after
+restart. Assertions bind the exact intent/artifact/request/ref and confirmed
+receipt, target commit/content, unchanged user asset, one wrapper execution, and
+absent owned roots/registry/state/queue/slots. The existing confirmed restart
+scenario remains separate and unchanged. The scenario has not yet been run; no
+model-success or general external-failure claim is made. #38/#32 remain OPEN.

@@ -79,10 +79,7 @@ impl NativeInventory {
         report
     }
 
-    pub fn before(&self, confirmed: &J) -> J {
-        assert_eq!(confirmed["phase"], "confirmed");
-        assert!(confirmed["id"].as_str().is_some_and(|id| !id.is_empty()));
-        assert_eq!(confirmed["artifact"]["id"], confirmed["receipt"]["commit"]);
+    fn queue_keys(&self) -> J {
         let state: J =
             serde_json::from_slice(&fs::read(self.queue.join("queue.json")).unwrap()).unwrap();
         let mut keys = json!({});
@@ -93,8 +90,33 @@ impl NativeInventory {
                 .keys()
                 .collect::<Vec<_>>());
         }
+        keys
+    }
+
+    pub fn before(&self, confirmed: &J) -> J {
+        assert_eq!(confirmed["phase"], "confirmed");
+        assert!(confirmed["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert_eq!(confirmed["artifact"]["id"], confirmed["receipt"]["commit"]);
         let expected = json!({"candidate": confirmed["artifact"]["id"],
-            "intent": confirmed["id"], "receipt": confirmed["receipt"], "queue_keys": keys});
+            "intent": confirmed["id"], "receipt": confirmed["receipt"],
+            "queue_keys": self.queue_keys()});
+        self.before_expected(expected)
+    }
+
+    pub fn before_unknown(&self, journal: &J) -> J {
+        assert_eq!(journal["phase"], "unknown");
+        assert!(journal["receipt"].is_null());
+        assert!(journal["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(journal["artifact"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        let expected = json!({"candidate": journal["artifact"]["id"],
+            "intent": journal["id"], "receipt": J::Null,
+            "observation": "unknown", "queue_keys": self.queue_keys()});
+        self.before_expected(expected)
+    }
+
+    fn before_expected(&self, expected: J) -> J {
         let r = self.report("before", &expected);
         let structural_errors: Vec<_> = r["errors"]
             .as_array()

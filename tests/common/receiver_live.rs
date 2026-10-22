@@ -1,8 +1,13 @@
 //! Opt-in real receiver proof; the driver never acknowledges or ticks the queue.
 use super::*;
-use herdr_flow::{opencode::session, util};
+use herdr_flow::{
+    delivery::{Executor, Observation},
+    opencode::session,
+    util,
+};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 struct FailureEvidence(Vec<std::path::PathBuf>);
@@ -257,6 +262,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -288,6 +294,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -319,6 +326,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -350,6 +358,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -381,6 +390,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -412,6 +422,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_concurrent: true,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -443,6 +454,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_concurrent: false,
         apply_approval_block: true,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -474,6 +486,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: true,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -486,6 +499,39 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
 #[ignore = "requires real developer, independent reviewer and native coordinator application"]
 fn installed_real_opencode_independent_acceptance_is_applied_by_native_receiver() {
     run_native_receiver(true, true, false, false, false);
+}
+
+#[test]
+#[ignore = "requires actual native acceptance and external Local delivery; injected lost observation then fresh reconcile/finish"]
+fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supervisor() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("formal.git");
+    let user_asset = base.join("user-owned.txt");
+    let excluded = vec![formal_target.clone(), user_asset.clone()];
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: true,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: true,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &excluded,
+    });
 }
 
 #[test]
@@ -531,6 +577,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -916,6 +963,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_concurrent: false,
             apply_approval_block: false,
             apply_missing_report: false,
+            apply_unknown_delivery: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1090,6 +1138,7 @@ struct ReceiverSpec<'a> {
     apply_concurrent: bool,
     apply_approval_block: bool,
     apply_missing_report: bool,
+    apply_unknown_delivery: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1124,6 +1173,7 @@ fn run_native_receiver(
         apply_concurrent: false,
         apply_approval_block: false,
         apply_missing_report: false,
+        apply_unknown_delivery: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1148,6 +1198,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_concurrent,
         apply_approval_block,
         apply_missing_report,
+        apply_unknown_delivery,
         unavailable_dependency,
         base,
         formal_target,
@@ -1279,6 +1330,25 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && !apply_approval_block
                 && unavailable_dependency.is_none()),
         "missing-report execution_problem requires isolated OpenCode mode"
+    );
+    assert!(
+        !apply_unknown_delivery
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && apply_acceptance
+                && apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && unavailable_dependency.is_none()),
+        "unknown delivery requires native development/acceptance and external delivery"
     );
     let selected_config_before = (apply_concurrent || apply_approval_block || apply_missing_report)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
@@ -3094,6 +3164,27 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             notifications,
         )
     });
+    if apply_unknown_delivery {
+        queue_child.kill().unwrap();
+        queue_child.wait().unwrap();
+        let artifact = delivery_artifact.as_ref().unwrap();
+        external_unknown_delivery(
+            env,
+            &q,
+            &mut server,
+            &mut guard_child,
+            DeliverySpec {
+                q: &q,
+                target: formal_target,
+                user_asset,
+                artifact,
+                expected: delivery_expected.as_ref().unwrap(),
+                user_identity: user_identity.unwrap(),
+                inventory: inventory.expect("unknown delivery requires inventory"),
+            },
+        );
+        return;
+    }
     if apply_restart {
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
@@ -5479,6 +5570,35 @@ fn external_supervisor_restart(
     custody.disarm();
 }
 
+struct LostObservation {
+    executions: AtomicUsize,
+}
+
+impl Default for LostObservation {
+    fn default() -> Self {
+        Self {
+            executions: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Executor for LostObservation {
+    fn preflight(&self, intent: &J) -> herdr_flow::Result<()> {
+        delivery::local::Local.preflight(intent)
+    }
+
+    fn execute(&self, intent: &J) -> herdr_flow::Result<()> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        delivery::local::Local.execute(intent)
+    }
+
+    fn observe(&self, _: &J) -> herdr_flow::Result<Observation> {
+        Ok(Observation::Unknown(
+            "test-injected lost observation after one Local execution".into(),
+        ))
+    }
+}
+
 // Trusted, unmarked external driver. The native coordinator only approved the
 // continuation; this process owns the environment and the Local executor.
 struct DeliverySpec<'a> {
@@ -5489,6 +5609,107 @@ struct DeliverySpec<'a> {
     expected: &'a str,
     user_identity: (u64, u64),
     inventory: super::native_inventory::NativeInventory,
+}
+
+fn external_unknown_delivery(
+    mut env: super::OwnedEnvironment,
+    q: &Path,
+    server: &mut std::process::Child,
+    guard_child: &mut std::process::Child,
+    spec: DeliverySpec<'_>,
+) {
+    let DeliverySpec {
+        q: delivery_queue,
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+        inventory,
+    } = spec;
+    assert_eq!(delivery_queue, q);
+    let workspace = env.workspace_root.clone();
+    let temporary = env.temp_root.clone();
+    let state_file = env.state_file().to_path_buf();
+    let artifact_id = artifact["id"].as_str().unwrap();
+    let user_before = fs::read(user_asset).unwrap();
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), expected);
+    let state = queue::load_queue(q).unwrap();
+    let mut request = json!({
+        "adapter":"git",
+        "target":target.display().to_string(),
+        "ref":"refs/heads/main",
+        "expected":expected,
+        "authorization":"deliver"
+    });
+    request["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    let intent = delivery::prepare(&mut env, q, &request, &delivery::local::Local).unwrap();
+    let intent_id = intent["id"].clone();
+    assert_eq!(intent["artifact"]["id"], artifact_id);
+    let executor = LostObservation::default();
+    let unknown = delivery::execute(&mut env, &executor).unwrap();
+    let mut reaper = ChildReaper::new(server, guard_child);
+    let mut custody = env.into_handoff();
+    assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
+    assert_eq!(unknown["phase"], "unknown");
+    assert!(unknown["receipt"].is_null());
+    assert_eq!(unknown["id"], intent_id);
+    assert_eq!(unknown["artifact"]["id"], artifact_id);
+    assert_eq!(unknown["request"], request);
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), artifact_id);
+    assert_eq!(fs::read(user_asset).unwrap(), user_before);
+    let expected_unknown = inventory.before_unknown(&unknown);
+
+    let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
+    if !reconcile.status.success() {
+        reaper.kill();
+        custody.cleanup();
+        panic!(
+            "fresh unknown reconcile failed: {}",
+            String::from_utf8_lossy(&reconcile.stderr)
+        );
+    }
+    let confirmed: J = serde_json::from_slice(&reconcile.stdout)
+        .unwrap_or_else(|error| panic!("unknown reconcile output invalid: {error}"));
+    assert_eq!(confirmed["phase"], "confirmed");
+    assert_eq!(confirmed["id"], intent_id);
+    assert_eq!(confirmed["artifact"]["id"], artifact_id);
+    assert_eq!(confirmed["request"], request);
+    assert_eq!(confirmed["receipt"]["commit"], artifact_id);
+    assert_eq!(
+        confirmed["receipt"]["repository"],
+        json!(target.display().to_string())
+    );
+    assert_eq!(confirmed["receipt"]["ref"], "refs/heads/main");
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), artifact_id);
+    assert_eq!(fs::read(user_asset).unwrap(), user_before);
+
+    let finish = cli_output(&["delivery", "finish", "--task", "project"]);
+    if !finish.status.success() {
+        reaper.kill();
+        custody.cleanup();
+        panic!(
+            "fresh unknown finish failed: {}",
+            String::from_utf8_lossy(&finish.stderr)
+        );
+    }
+    reaper.wait();
+    assert!(!workspace.exists());
+    assert!(!temporary.exists());
+    assert!(!state_file.exists());
+    assert!(!is_registered("project").unwrap());
+    assert!(!cleanup_state_path("project").unwrap().exists());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    assert!(!q.exists());
+    assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
+    assert_eq!(fs::read(user_asset).unwrap(), user_before);
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
+    inventory.after(&confirmed);
+    custody.disarm();
+    let _ = expected_unknown;
 }
 
 fn external_driver_delivery(
