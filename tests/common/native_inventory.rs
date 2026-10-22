@@ -1,4 +1,4 @@
-//! Observations for one real confirmed-restart fixture, not a campaign proof.
+//! Observations for one real delivery/restart round; campaign proof is separate.
 use super::resource_inventory::{collect, InventorySpec};
 use herdr_flow::{
     model::J,
@@ -22,6 +22,8 @@ pub struct NativeInventory {
     worktrees: Vec<WorktreeRegistration>,
     open_files: Vec<PathBuf>,
     excluded: Vec<PathBuf>,
+    expected_tasks: Vec<String>,
+    notifications: usize,
 }
 
 impl NativeInventory {
@@ -29,13 +31,12 @@ impl NativeInventory {
         env: &TaskEnvironment,
         queue: &Path,
         base: &Path,
-        mut excluded: Vec<PathBuf>,
+        excluded: Vec<PathBuf>,
         runtimes: Vec<PathBuf>,
+        mut expected_tasks: Vec<String>,
+        notifications: usize,
     ) -> Self {
-        excluded.extend([
-            base.join("inventory-before.json"),
-            base.join("inventory-after.json"),
-        ]);
+        expected_tasks.sort();
         Self {
             base: base.into(),
             queue: queue.into(),
@@ -48,6 +49,8 @@ impl NativeInventory {
             worktrees: env.worktree_registrations.clone(),
             open_files: env.open_files.clone(),
             excluded,
+            expected_tasks,
+            notifications,
         }
     }
 
@@ -119,7 +122,10 @@ impl NativeInventory {
         assert_eq!(r["roots"]["temp"]["exists"], true);
         assert_eq!(r["state"]["exists"], true);
         assert_eq!(r["cleanup"]["exists"], false);
-        assert_eq!(r["runtime_roots"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            r["runtime_roots"].as_array().unwrap().len(),
+            self.runtimes.len()
+        );
         assert!(r["runtime_roots"]
             .as_array()
             .unwrap()
@@ -127,18 +133,18 @@ impl NativeInventory {
             .all(|v| v["exists"] == true));
         assert!(r["processes"]["count"].as_u64().unwrap() > 0);
         let q = &r["queue_entries"];
-        assert_eq!(
-            q["owned"]["tasks"]["keys"],
-            json!([
-                "accept-final",
-                "accept-first",
-                "project",
-                "repair-native",
-                "review"
-            ])
-        );
-        for (section, count) in [("tasks", 5), ("waits", 4), ("events", 4), ("deliveries", 4)] {
-            assert_eq!(q["owned"][section]["total"], count, "owned {section}");
+        assert_eq!(q["owned"]["tasks"]["keys"], json!(self.expected_tasks));
+        for (section, count) in [
+            ("tasks", self.expected_tasks.len()),
+            ("waits", self.notifications),
+            ("events", self.notifications),
+            ("deliveries", self.notifications),
+        ] {
+            assert_eq!(
+                q["owned"][section]["total"],
+                json!(count),
+                "owned {section}"
+            );
             assert_eq!(q["owned"][section]["truncated"], false);
             assert_eq!(
                 q["owned"][section]["keys"], expected["queue_keys"][section],

@@ -385,14 +385,15 @@ run was performed for this collector-only batch, and #38/#32 remain open.
 
 ## Resource observations during a native confirmed restart
 
-The existing opt-in confirmed-restart scenario now records two metadata reports:
-after actual Local delivery confirmation and before custody transfer, then after
-fresh CLI finish and child reaping, before fixture teardown. Captured paths cover
-all five native runtime roots and the actual environment registrations; ordinary
+The existing opt-in delivery/restart scenarios now record two metadata reports:
+after actual Local delivery confirmation and before finish (and before custody
+transfer in the restart path), then after finish and child reaping, before fixture
+teardown. Captured paths cover the actual runtime roots (three for the normal
+round, five for repair/restart) and the actual environment registrations; ordinary
 clones are not invented as registered worktrees. The live snapshot checks the
-exact parent/role task set and four owned waits/events/deliveries, with no mixed,
-unknown or unrelated queue entries. Existing candidate, receipt, target and user
-asset identity assertions still run.
+scenario-specific parent/role task set and owned waits/events/deliveries, with no
+mixed, unknown or unrelated queue entries. Existing candidate, receipt, target and
+user asset identity assertions still run.
 
 The post-finish snapshot requires absent owned roots/state/cleanup/queue and
 registered paths, zero occupied slots and zero matching marked processes. Only
@@ -402,10 +403,11 @@ errors/truncation remain visible in the report; only structural observation
 errors fail the pre-handoff snapshot. Reports save the actual confirmed candidate,
 intent/receipt and queue IDs; collector keys must match those production IDs.
 Registry absence means this task's entry is absent, not deletion of the shared
-registry file or root. Reports are capped at 1 MiB each
-and stored in the disposable fixture root, excluded from usage totals. Existing
+registry file or root. Reports use one rolling before/after pair, capped at 1 MiB
+each; they remain counted in fixture usage rather than being silently excluded.
+The fixture checks that the pair is bounded and does not grow per round. Existing
 failure diagnostics retain at most 64 KiB per report, potentially a partial JSON
-report. Successful runs remove reports with fixture teardown.
+report. Successful runs leave the pair until fixture teardown.
 
 Outside FD/cwd targets and per-process completeness remain observations, not
 proof of global absence. Reads may update atime; symlink targets are not traversed
@@ -420,3 +422,51 @@ path cleanup assertions passed. Selected OpenCode configuration bytes were
 unchanged. An earlier run passed in 240.01s before the expected-identity report
 checks were tightened; the final claim uses the later run. Neither run counts as
 a twenty-task campaign or proof of complete process/global-cache discovery.
+
+## Two-round shared-base campaign fixture
+
+The opt-in two-round test uses one outer `TempDir`/base for both actual native
+rounds. `base/workspace`, `base/temporary` and `base/registry` are reused; each
+round's task environment is created only after the previous finish cleanup has
+removed those disposable paths. Round 1 uses normal independent acceptance and
+external Local delivery; round 2 uses failed review, repair, fresh passing review
+and the confirmed external-supervisor restart. The shared queue path lives under
+the recreated disposable runtime and is recreated per round; this is not evidence
+of a persistent shared queue.
+
+Each round records a live pre-finish snapshot and a post-finish snapshot after
+all server/guard children have been reaped. The inventory test observes the
+actual runtime set (three roots for the normal round, five for the repair/restart
+round), derives expected task/notification counts from the scenario (normal three
+tasks/two notifications; repair five/four), and compares exact production queue
+IDs. Both transcripts use the same rolling before/after report pair; the fixture
+asserts exactly two bounded report entries after both rounds. Formal targets and
+user assets are created per round under the outer base and retained. Exclusions
+enumerate every round's formal target and user asset exactly, cumulatively; no
+broad prefix is used (reports are counted, not excluded). After each round and at
+the final check, every prior target ref/commit, user device/inode/bytes and
+content are checked again.
+
+The outer base, retained formal/user outputs and reports live until final
+assertions; there is no per-round `TempDir` teardown. After each round the fixture
+enumerates base and shared-registry entries with fallible `read_dir` calls,
+rejects unexpected retained entries, requires the exact rolling report pair,
+round formal/user entries and allowed registry files, and requires the registry
+index plus envs/plans/locks to contain no retained task state. A normalized
+path/type footprint of the shared registry must be equal after round 1 and round
+2, while workspace/temporary roots must remain absent. The non-live negative
+control adds an unexpected retained file and verifies the retained-control check
+rejects it. Reports are counted separately from the exact formal/user exclusions;
+no broad exclusion hides retained control. Registry file byte sizes and lock
+contents are not compared; this is a normalized-state/path check. This is two observed rounds, not a
+twenty-round campaign, a whole-campaign disk-stability proof, or a claim of
+persistent shared queue or global-cache absence.
+
+Observed validation (2026-10-22): the final two-round live run passed in 284.23s.
+Each round sampled two marked processes before finish and zero matching processes
+after finish/reaping; per-round retained-control and final prior-output checks
+passed. The selected OpenCode configuration remained byte-identical. The first
+attempt completed round 1 but failed in round 2 because the developer wrote
+`INCOMPLETE` instead of the required literal `version INCOMPLETE`; its bounded
+failure evidence was retained. The prompt was clarified without relaxing the
+assertion, and the complete campaign was rerun successfully.
