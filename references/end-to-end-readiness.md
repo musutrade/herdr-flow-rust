@@ -443,24 +443,36 @@ IDs. Both transcripts use the same rolling before/after report pair; the fixture
 asserts exactly two bounded report entries after both rounds. Formal targets and
 user assets are created per round under the outer base and retained. Exclusions
 enumerate every round's formal target and user asset exactly, cumulatively; no
-broad prefix is used (reports are counted, not excluded). After each round and at
-the final check, every prior target ref/commit, user device/inode/bytes and
-content are checked again.
+broad prefix is used (reports and the bounded summary are counted separately).
+After each round and at the final check, every prior target ref/commit, user
+device/inode/bytes and content are checked again.
 
-The outer base, retained formal/user outputs and reports live until final
+The outer base, retained formal/user outputs, summary and reports live until final
 assertions; there is no per-round `TempDir` teardown. After each round the fixture
 enumerates base and shared-registry entries with fallible `read_dir` calls,
 rejects unexpected retained entries, requires the exact rolling report pair,
-round formal/user entries and allowed registry files, and requires the registry
-index plus envs/plans/locks to contain no retained task state. A normalized
-path/type footprint of the shared registry must be equal after round 1 and round
-2, while workspace/temporary roots must remain absent. The non-live negative
-control adds an unexpected retained file and verifies the retained-control check
-rejects it. Reports are counted separately from the exact formal/user exclusions;
-no broad exclusion hides retained control. Registry file byte sizes and lock
-contents are not compared; this is a normalized-state/path check. This is two observed rounds, not a
-twenty-round campaign, a whole-campaign disk-stability proof, or a claim of
-persistent shared queue or global-cache absence.
+round formal/user entries, the bounded campaign summary and allowed registry
+files, and requires the registry index plus envs/plans/locks to contain no
+retained task state. A normalized path/type footprint of the shared registry must
+be equal after each round, while workspace/temporary roots must remain absent. The
+non-live negative control adds an unexpected retained file and verifies the
+retained-control check rejects it. Reports are counted separately from the exact
+formal/user exclusions; no broad exclusion hides retained control. Registry file
+byte sizes and lock contents are not compared; this is a normalized-state/path
+check.
+
+The same shared runner supports an opt-in fixed twenty-round campaign on one
+outer base: rounds 1..20 are normal except rounds 5, 10, 15 and 20, which use
+failed review, repair, fresh acceptance and confirmed restart. Every round uses
+fresh formal/user paths and a recreated queue under the disposable runtime. A
+bounded `campaign-summary.json` records at most twenty entries (normal or
+repair/restart, completed status, expected artifact/output identity, elapsed time
+and cleanup counts); report files remain a bounded rolling pair. The summary is
+also listed as bounded failure evidence. A failed round fails the campaign
+immediately and retains bounded failure evidence; there is no retry, skip or
+failed-round completion count. This twenty-round fixture has not
+been run here; it makes no twenty-success, whole-campaign disk-stability,
+persistent-shared-queue or global-cache claim.
 
 Observed validation (2026-10-22): the final two-round live run passed in 284.23s.
 Each round sampled two marked processes before finish and zero matching processes
