@@ -1068,8 +1068,9 @@ reaped only after collection; selected config and final roots/slots must be
 unchanged/zero. A focused no-model control covers same-instance reacquisition and
 failure-state preservation, with explicit teardown after the control.
 
-This is not a crash or server-restart proof, and it does not cover a dispatch
-interruption after `dispatch.json` but before `submission.json`: no supported API
+This scenario has not yet been run as a live model acceptance. It is not a crash
+or server-restart proof, and it does not cover a dispatch interruption after
+`dispatch.json` but before `submission.json`: no supported API
 can prove that the POST was not sent, so that boundary remains fail-closed.
 Worker takeover, coordinator process restart, a second POST and invention of a
 replacement session are not claimed. #38/#32 remain OPEN.
