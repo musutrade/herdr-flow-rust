@@ -908,3 +908,26 @@ each passed 489 tests, zero failed and 21 ignored. Formatting, lint policy, Clip
 and rustdoc passed. CRAP checked 4800 functions at 77.2% line coverage with zero
 violations of the absolute threshold 10. Permission-pattern negative controls
 and escaped/multibyte diagnostic-bound regressions passed in both suites.
+
+## Native completed turn without a verdict report
+
+The opt-in `installed_real_opencode_missing_verdict_is_restored_by_native_receiver`
+scenario uses one real OpenCode reviewer on fixed artifact A. The reviewer is
+explicitly instructed to inspect A with a direct `git show HEAD:file` and then
+finish the turn without writing `.herdr-verdict.json`. This is a prompt-induced
+missing-report execution result, not provider truncation, a general partial-output
+recovery claim, or an acceptance conclusion.
+
+The actual production collector still signals the completed native turn with no
+registered verdict. The same real coordinator ACKs the exact delivery, reads the
+child/event evidence, and applies an application with no verdict/report/output/
+acceptance fields, `execution_problem` naming the missing report, and
+`next_action.kind=restore`. The test requires the exact event/signal/submission
+chain, one successful task-apply with only lock-busy failed attempts, post-apply
+readiness, parent `approved=null`, null parent verdict, blocked child with empty
+pending, and a planned restore continuation bound to the exact event. Requirement,
+candidate, round, revision, authorization and source/reviewer snapshots remain
+unchanged; exactly one event/delivery exists and no new activity, real restore,
+delivery or user decision occurs. Bounded native/child cleanup and failure evidence
+are retained. The scenario has not yet been run; no model-success claim is made.
+#38/#32 remain OPEN.

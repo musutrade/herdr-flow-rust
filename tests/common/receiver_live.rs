@@ -256,6 +256,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -286,6 +287,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -316,6 +318,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -346,6 +349,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -376,6 +380,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_ambiguous: true,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -406,6 +411,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_ambiguous: false,
         apply_concurrent: true,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -436,6 +442,38 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: true,
+        apply_missing_report: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real OpenCode reviewer and coordinator for a prompt-induced completed turn without verdict report"]
+fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -492,6 +530,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -876,6 +915,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_ambiguous: false,
             apply_concurrent: false,
             apply_approval_block: false,
+            apply_missing_report: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1049,6 +1089,7 @@ struct ReceiverSpec<'a> {
     apply_ambiguous: bool,
     apply_concurrent: bool,
     apply_approval_block: bool,
+    apply_missing_report: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1082,6 +1123,7 @@ fn run_native_receiver(
         apply_ambiguous: false,
         apply_concurrent: false,
         apply_approval_block: false,
+        apply_missing_report: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1105,6 +1147,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_ambiguous,
         apply_concurrent,
         apply_approval_block,
+        apply_missing_report,
         unavailable_dependency,
         base,
         formal_target,
@@ -1219,7 +1262,25 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "approval block requires isolated OpenCode mode"
     );
-    let selected_config_before = (apply_concurrent || apply_approval_block)
+    assert!(
+        !apply_missing_report
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && unavailable_dependency.is_none()),
+        "missing-report execution_problem requires isolated OpenCode mode"
+    );
+    let selected_config_before = (apply_concurrent || apply_approval_block || apply_missing_report)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1279,7 +1340,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "develop-b".to_string(),
             "project".to_string(),
         ]
-    } else if apply_approval_block {
+    } else if apply_approval_block || apply_missing_report {
         vec!["project".to_string(), "review".to_string()]
     } else {
         vec![
@@ -1290,7 +1351,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     };
     let notifications = if apply_repair {
         4
-    } else if apply_ambiguous || apply_approval_block {
+    } else if apply_ambiguous || apply_approval_block || apply_missing_report {
         1
     } else {
         2
@@ -1299,7 +1360,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         vec!["source", "reviewer-checkout"]
     } else if apply_concurrent {
         vec!["source", "accept-a", "develop-b"]
-    } else if apply_approval_block {
+    } else if apply_approval_block || apply_missing_report {
         vec!["source", "acceptance"]
     } else {
         vec!["source", "development", "reviewer-checkout"]
@@ -1313,19 +1374,23 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> =
-        if apply_development || apply_ambiguous || apply_concurrent || apply_approval_block {
-            artifact_names
-                .iter()
-                .map(|name| {
-                    let path = env.workspace_root.join(name);
-                    common::create_dir_all(&path).unwrap();
-                    path
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let artifact_roots: Vec<_> = if apply_development
+        || apply_ambiguous
+        || apply_concurrent
+        || apply_approval_block
+        || apply_missing_report
+    {
+        artifact_names
+            .iter()
+            .map(|name| {
+                let path = env.workspace_root.join(name);
+                common::create_dir_all(&path).unwrap();
+                path
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Native launch restricts writes to this runtime root and cwd. Coordinator
     // state must live inside that boundary, not in a sibling of the runtime.
     let q = root.join("queue");
@@ -1486,6 +1551,15 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             queue_path = queue_path
         );
     }
+    if apply_missing_report {
+        let application = cwd.join("missing-report-application.json");
+        instruction_text = format!(
+            "Authorized disposable coordinator test. Do not delegate or create sessions. Exactly one real native acceptance execution for task review will arrive after completing without .herdr-verdict.json. Use the exact OPENCODE_SESSION_ID from the notification for every herdr-flow command. First execute its exact queue ack command and require success; ACK is receipt only. Read current queue.json, task review state_version, its exact pending event and the exact collector evidence, and verify the fixed report path is absent. Write an application JSON at {application} with task=review, current state_version, that exact event, execution_problem EXACTLY \"native reviewer completed without .herdr-verdict.json\", no verdict, report, output or acceptance fields, and next_action={{kind:restore, owner:native coordinator, reason:execution result completed without the required report, condition:existing authorization}}. Do not invent an acceptance conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once; failed attempts are acceptable only with explicit lock-busy evidence, otherwise stop and do not retry. Then run {binary} queue readiness --state-dir {queue_path}, require active_wakeup=true, and finish. Run ACK, task-apply and readiness in separate direct bash invocations with no echo/wrappers/OR-true and preserve actual exits. Do not run task-lineage, continue, revise, restore work, deliver, create a new activity, or alter the artifact, requirement, candidate, verdict or evidence. The application schema above is complete; write only your application JSON in cwd. No repository search is authorized.",
+            application = application.display(),
+            binary = binary,
+            queue_path = queue_path
+        );
+    }
     if apply_repair {
         instruction_text = format!(
             "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; if absent wait bounded15seconds for the driver to stop/reap and publish it, then require matching collector session and stopped/reaped status. Do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session.",
@@ -1612,6 +1686,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     let concurrent_artifact =
         apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
     let approval_cwd = apply_approval_block.then(|| setup_in_queue(&env, "acceptance", &q).1);
+    let missing_cwd = apply_missing_report.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
@@ -2165,6 +2240,177 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert!(!env.workspace_root.exists());
         assert!(!env.temp_root.exists());
         assert!(!sentinel.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
+    if let Some(cwd) = missing_cwd.as_ref() {
+        let source = env.workspace_root.join("source");
+        let source_head = git(&source, &["rev-parse", "HEAD"]);
+        let source_file = git(&source, &["show", "HEAD:file"]);
+        let reviewer_head = git(cwd, &["rev-parse", "HEAD"]);
+        let reviewer_file = git(cwd, &["show", "HEAD:file"]);
+        let report_path = cwd.join(".herdr-verdict.json");
+        let application_path = cwd.join("missing-report-application.json");
+        assert!(!report_path.exists());
+        let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
+        let wait_before = queue::load_queue(&q).unwrap()["waits"]["review"].clone();
+        let runtime_root = task_runtime::prepare(&env, "review").unwrap();
+        failure_evidence.0.push(runtime_root.join("server.log"));
+        failure_evidence.0.push(runtime_root.join("creation.json"));
+        failure_evidence.0.push(runtime_root.join("dispatch.json"));
+        failure_evidence
+            .0
+            .push(runtime_root.join("submission.json"));
+        failure_evidence.0.push(report_path.clone());
+        failure_evidence.0.push(application_path.clone());
+        let instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD with `git show HEAD:file` in a separate direct bash invocation; preserve its actual exit and output. Then finish your turn without writing .herdr-verdict.json and without claiming acceptance passed/failed. This is an explicit disposable missing-report probe, not a product verdict. Do not edit tracked files, commit, approve, answer a question, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let mut turn = acceptance_live::native_prepare(&mut env, &q, cwd, "review", instruction);
+        acceptance_live::native_dispatch(&env, &turn);
+        let submission = util::read_json(&turn.root.join("submission.json")).unwrap();
+        let message = submission["message_id"]
+            .as_str()
+            .expect("missing-report submission message id");
+        failure_evidence.0.push(
+            turn.root
+                .join("submissions")
+                .join(format!("{message}.json")),
+        );
+        assert!(!report_path.exists());
+        let result = acceptance_live::native_finish(&env, &mut turn);
+        assert!(!report_path.exists(), "reviewer wrote a verdict report");
+        assert!(result["report"]
+            .as_str()
+            .is_some_and(|report| !report.trim().is_empty()));
+        let state = wait_for_stage(&q, &guard, &registered, "review");
+        assert_stage_shape(&state, &["review"], &registered);
+        let application = util::read_json(&application_path).unwrap();
+        let event = state["events"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|event| event["wait"] == "review")
+            .unwrap();
+        let event_id = event["id"].as_str().unwrap();
+        let task = &state["tasks"]["review"];
+        let parent = &state["tasks"]["project"];
+        assert_ne!(result["session"], registered["session"]);
+        assert_eq!(application["task"], "review");
+        assert_eq!(application["event"], event_id);
+        assert_eq!(
+            application["state_version"].as_u64().unwrap() + 1,
+            task["state_version"].as_u64().unwrap()
+        );
+        assert_eq!(
+            application["execution_problem"],
+            "native reviewer completed without .herdr-verdict.json"
+        );
+        assert_eq!(application["next_action"]["kind"], "restore");
+        assert!(application.get("verdict").is_none());
+        assert!(application.get("report").is_none());
+        assert!(application.get("output").is_none());
+        assert!(application.get("acceptance").is_none());
+        assert_eq!(result["session"], submission["session"]);
+        assert_eq!(result["message_id"], message);
+        assert_eq!(result["context"]["queue_id"], state["id"]);
+        assert_eq!(result["context"]["queue_dir"], json!(q));
+        assert_eq!(result["context"]["wait"], "review");
+        let binding = progress::binding(&wait_before).unwrap();
+        assert_eq!(result["context"]["binding"], binding);
+        assert_eq!(event["outcome"], "complete");
+        assert_eq!(event["binding"], binding);
+        assert_eq!(task["epoch"], wait_before["epoch"]);
+        assert_eq!(task["assignment"], wait_before["assignment"]);
+        assert_eq!(
+            state["waits"]["review"]["assignment"],
+            wait_before["assignment"]
+        );
+        assert_eq!(task["lineage"]["round"], wait_before["lineage"]["round"]);
+        assert_eq!(
+            task["lineage"]["revision"],
+            wait_before["lineage"]["revision"]
+        );
+        let signal = util::read_json(Path::new(
+            event["evidence"].as_str().expect("event evidence"),
+        ))
+        .unwrap();
+        assert_eq!(signal["wait"], "review");
+        assert_eq!(signal["outcome"], "complete");
+        let submission_path = turn
+            .root
+            .join("submissions")
+            .join(format!("{message}.json"));
+        assert_eq!(signal["evidence"], json!(submission_path));
+        let actual_submission = util::read_json(&submission_path).unwrap();
+        assert_eq!(actual_submission, result);
+        assert_eq!(actual_submission["reply_id"], result["reply_id"]);
+        assert!(parent["approved"].is_null());
+        assert!(parent["verdicts"]["review"].is_null());
+        assert_eq!(parent["continuation"]["action"]["kind"], "restore");
+        assert_eq!(
+            parent["continuation"]["execution_problem"],
+            "native reviewer completed without .herdr-verdict.json"
+        );
+        assert_eq!(parent["continuation"]["phase"], "planned");
+        assert_eq!(parent["continuation"]["verdict"], J::Null);
+        assert_eq!(parent["continuation"]["binding"], event["binding"]);
+        assert_eq!(parent["requirements"], parent_before["requirements"]);
+        assert_eq!(parent["candidate"], parent_before["candidate"]);
+        assert_eq!(
+            parent["requirement_revision"],
+            parent_before["requirement_revision"]
+        );
+        assert_eq!(
+            parent["acceptance_round"],
+            parent_before["acceptance_round"]
+        );
+        assert_eq!(task["phase"], "blocked");
+        assert_eq!(task["pending"], json!([]));
+        assert_eq!(task["candidate"], parent["candidate"]);
+        let task_names: std::collections::BTreeSet<_> = state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(task_names, ["project", "review"].into_iter().collect());
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]), source_head);
+        assert_eq!(git(&source, &["show", "HEAD:file"]), source_file);
+        assert_eq!(git(cwd, &["rev-parse", "HEAD"]), reviewer_head);
+        assert_eq!(git(cwd, &["show", "HEAD:file"]), reviewer_file);
+        let rows = session_rows(
+            &client,
+            &endpoint,
+            registered["session"].as_str().unwrap(),
+            &cwd,
+        );
+        let commands = tool_commands(&rows, registered["session"].as_str().unwrap());
+        assert_missing_report_application_commands(
+            &q,
+            &state,
+            &registered,
+            event_id,
+            &application_path,
+            &commands,
+        );
+        assert_eq!(state["events"].as_object().unwrap().len(), 1);
+        assert_eq!(state["deliveries"].as_object().unwrap().len(), 1);
+        assert!(!report_path.exists());
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("missing-report config snapshot"),
+            "selected OpenCode configuration changed during missing-report scenario"
+        );
+        turn.stop();
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
         assert_eq!(occupied_slots().unwrap(), 0);
         return;
     }
@@ -5426,6 +5672,72 @@ fn assert_ambiguous_application_commands(
                 && !command.command.contains("queue task-revise")
         }),
         "ambiguity phase must stop without revision or continuation"
+    );
+}
+
+fn assert_missing_report_application_commands(
+    q: &Path,
+    state: &J,
+    coordinator: &J,
+    event_id: &str,
+    application: &Path,
+    commands: &[ToolCommand],
+) {
+    let session = coordinator["session"]
+        .as_str()
+        .expect("coordinator session");
+    let delivery = delivery_for_event(state, session, event_id).expect("acceptance delivery");
+    let ack = commands
+        .iter()
+        .find(|command| {
+            command.success
+                && command.command.contains("queue ack")
+                && exact_path_argument(&command.command, "--delivery", Path::new(delivery.0))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .expect("exact missing-report ACK");
+    let applies: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.success
+                && command.command.contains("queue task-apply")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    assert_eq!(applies.len(), 1, "one successful missing-report apply");
+    let apply = applies[0];
+    assert!(exact_path_argument(&apply.command, "--spec", application));
+    let readiness = commands
+        .iter()
+        .find(|command| {
+            command.success
+                && command.command.contains("queue readiness")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .expect("successful missing-report readiness");
+    for command in [ack, apply, readiness] {
+        assert!(command.start > 0 && command.start != i64::MAX);
+        assert!(command.end >= command.start && command.end != i64::MAX);
+    }
+    assert!(ack.end <= apply.start);
+    assert!(apply.end <= readiness.start);
+    for command in commands.iter().filter(|command| {
+        !command.success
+            && command.command.contains("queue task-apply")
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }) {
+        assert!(
+            lock_busy_evidence(command),
+            "non-busy missing-report rejection exit={:?}",
+            command.exit
+        );
+    }
+    assert!(
+        commands.iter().all(|command| {
+            !command.command.contains("queue task-lineage")
+                && !command.command.contains("queue task-revise")
+        }),
+        "missing-report phase must not continue or revise"
     );
 }
 
