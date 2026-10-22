@@ -783,7 +783,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         ]
     };
     let notifications = if apply_repair { 4 } else { 2 };
-    let mut artifact_names = vec!["source", "reviewer-checkout"];
+    let mut artifact_names = vec!["source", "development", "reviewer-checkout"];
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
