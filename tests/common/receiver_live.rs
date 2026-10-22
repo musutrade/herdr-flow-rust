@@ -1773,6 +1773,7 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
                 command,
                 output: part["state"]["output"]
                     .as_str()
+                    .or_else(|| part["state"]["metadata"]["output"].as_str())
                     .unwrap_or_default()
                     .to_string(),
                 error: part["state"]["error"]
