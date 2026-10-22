@@ -254,9 +254,15 @@ pub(super) fn native_codex(
     assert_eq!(result["outcome"], "complete");
     child.kill().unwrap();
     child.wait().unwrap();
-    assert_eq!(fs::read(&config_source).unwrap(), config_before);
+    assert!(
+        fs::read(&config_source).unwrap() == config_before,
+        "selected Codex config changed"
+    );
     if let (Some(path), Some(before)) = (&auth_source, auth_before) {
-        assert_eq!(fs::read(path).unwrap(), before);
+        assert!(
+            fs::read(path).unwrap() == before,
+            "selected Codex auth changed"
+        );
     }
     println!("real Codex native {name}: exact turn collected and server stopped");
     (state, result)
