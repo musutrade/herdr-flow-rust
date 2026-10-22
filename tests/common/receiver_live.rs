@@ -250,6 +250,12 @@ fn run_native_receiver(
             final_reviewer_root.join("submission.json"),
         ]);
     }
+    if apply_restart {
+        evidence_paths.extend([
+            temp.path().join("inventory-before.json"),
+            temp.path().join("inventory-after.json"),
+        ]);
+    }
     let _failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
@@ -809,6 +815,19 @@ fn run_native_receiver(
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
         let artifact = delivery_artifact.as_ref().unwrap();
+        let inventory = super::native_inventory::NativeInventory::new(
+            &env,
+            &q,
+            temp.path(),
+            vec![formal_target.clone(), user_asset.clone()],
+            vec![
+                root.clone(),
+                worker_root.clone().unwrap(),
+                reviewer_root.clone().unwrap(),
+                repair_root.clone().unwrap(),
+                final_reviewer_root.clone().unwrap(),
+            ],
+        );
         external_supervisor_restart(
             env,
             &q,
@@ -820,6 +839,7 @@ fn run_native_receiver(
                 artifact,
                 expected: delivery_expected.as_ref().unwrap(),
                 user_identity: user_identity.unwrap(),
+                inventory,
             },
         );
         return;
@@ -1049,6 +1069,7 @@ impl Drop for ChildReaper<'_> {
 }
 
 struct RestartSpec<'a> {
+    inventory: super::native_inventory::NativeInventory,
     target: &'a Path,
     user_asset: &'a Path,
     artifact: &'a J,
@@ -1064,6 +1085,7 @@ fn external_supervisor_restart(
     spec: RestartSpec<'_>,
 ) {
     let RestartSpec {
+        inventory,
         target,
         user_asset,
         artifact,
@@ -1087,6 +1109,7 @@ fn external_supervisor_restart(
     let artifact_id = artifact["id"].as_str().unwrap();
     let intent_id = confirmed["id"].clone();
     let receipt = confirmed["receipt"].clone();
+    let expected_inventory = inventory.before(&confirmed);
     custody = env.into_handoff();
 
     let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
@@ -1124,6 +1147,7 @@ fn external_supervisor_restart(
     assert!(!q.exists());
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
     assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
+    inventory.after(&expected_inventory);
     custody.disarm();
 }
 
