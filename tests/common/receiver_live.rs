@@ -1,6 +1,7 @@
 //! Opt-in real receiver proof; the driver never acknowledges or ticks the queue.
 use super::*;
 use herdr_flow::{opencode::session, util};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 struct FailureEvidence(Vec<std::path::PathBuf>);
@@ -146,12 +147,118 @@ fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() 
     run_native_receiver(true, true, true, true, true);
 }
 
+#[test]
+#[ignore = "requires two completed real native rounds: normal delivery then repair/restart on one outer base"]
+fn installed_real_opencode_two_rounds_share_one_outer_base() {
+    let temp = temp();
+    let base = temp.path();
+    let round1 = base.join("round-1");
+    let round2 = base.join("round-2");
+    common::create_dir(&round1).unwrap();
+    common::create_dir(&round2).unwrap();
+    let formal1 = round1.join("formal.git");
+    let user1 = round1.join("user-owned.txt");
+    let formal2 = round2.join("formal.git");
+    let user2 = round2.join("user-owned.txt");
+    let excluded = vec![
+        formal1.clone(),
+        user1.clone(),
+        formal2.clone(),
+        user2.clone(),
+    ];
+
+    run_native_receiver_in(
+        true, true, true, false, false, base, &formal1, &user1, &excluded,
+    );
+    let commit1 = git(&formal1, &["rev-parse", "refs/heads/main"]);
+    let identity1 = user_identity(&user1);
+    assert_round_output(&formal1, &user1, &commit1, identity1);
+
+    run_native_receiver_in(
+        true, true, true, true, true, base, &formal2, &user2, &excluded,
+    );
+    let commit2 = git(&formal2, &["rev-parse", "refs/heads/main"]);
+    let identity2 = user_identity(&user2);
+    assert_round_output(&formal1, &user1, &commit1, identity1);
+    assert_round_output(&formal2, &user2, &commit2, identity2);
+    assert!(base.join("registry").exists());
+    assert!(!base.join("workspace").exists());
+    assert!(!base.join("temporary").exists());
+    assert!(!is_registered("project").unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    let reports = [
+        base.join("inventory-before.json"),
+        base.join("inventory-after.json"),
+    ];
+    for report in &reports {
+        let len = fs::metadata(report).unwrap().len();
+        assert!(len > 0 && len <= 1024 * 1024, "unbounded report");
+    }
+    let report_count = fs::read_dir(base)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("inventory-")
+        })
+        .count();
+    assert_eq!(report_count, 2, "reports must remain a rolling pair");
+}
+
+fn user_identity(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).unwrap();
+    (metadata.dev(), metadata.ino())
+}
+
+fn assert_round_output(target: &Path, user_asset: &Path, commit: &str, identity: (u64, u64)) {
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), commit);
+    assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
+    let metadata = fs::metadata(user_asset).unwrap();
+    assert_eq!((metadata.dev(), metadata.ino()), identity);
+    assert_eq!(
+        fs::read_to_string(user_asset).unwrap(),
+        "unrelated user asset"
+    );
+}
+
 fn run_native_receiver(
     apply_development: bool,
     apply_acceptance: bool,
     apply_delivery: bool,
     apply_repair: bool,
     apply_restart: bool,
+) {
+    let temp = temp();
+    let formal_target = temp.path().join("formal.git");
+    let user_asset = temp.path().join("user-owned.txt");
+    let excluded = vec![formal_target.clone(), user_asset.clone()];
+    run_native_receiver_in(
+        apply_development,
+        apply_acceptance,
+        apply_delivery,
+        apply_repair,
+        apply_restart,
+        temp.path(),
+        &formal_target,
+        &user_asset,
+        &excluded,
+    );
+}
+
+fn run_native_receiver_in(
+    apply_development: bool,
+    apply_acceptance: bool,
+    apply_delivery: bool,
+    apply_repair: bool,
+    apply_restart: bool,
+    base: &Path,
+    formal_target: &Path,
+    user_asset: &Path,
+    excluded: &[PathBuf],
 ) {
     assert!(
         !apply_delivery || apply_acceptance,
@@ -166,21 +273,18 @@ fn run_native_receiver(
         "restart requires repair/delivery"
     );
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let temp = temp();
-    let formal_target = temp.path().join("formal.git");
-    let user_asset = temp.path().join("user-owned.txt");
     if apply_delivery {
-        fs::write(&user_asset, "unrelated user asset").unwrap();
+        fs::write(user_asset, "unrelated user asset").unwrap();
     }
     use std::os::unix::fs::MetadataExt;
     let user_identity = apply_delivery.then(|| {
-        let m = fs::metadata(&user_asset).unwrap();
+        let m = fs::metadata(user_asset).unwrap();
         (m.dev(), m.ino())
     });
     let mut env = if apply_delivery {
-        environment_project(temp.path(), &formal_target)
+        environment_project(base, formal_target)
     } else {
-        environment(temp.path())
+        environment(base)
     };
     let cwd = env.workspace_root.join("receiver");
     fs::create_dir(&cwd).unwrap();
@@ -196,6 +300,33 @@ fn run_native_receiver(
     let repair_root = apply_repair.then(|| task_runtime::prepare(&env, "repair-native").unwrap());
     let final_reviewer_root =
         apply_repair.then(|| task_runtime::prepare(&env, "accept-final").unwrap());
+    let mut runtime_roots = vec![root.clone()];
+    for runtime in [
+        &worker_root,
+        &reviewer_root,
+        &repair_root,
+        &final_reviewer_root,
+    ] {
+        if let Some(runtime) = runtime {
+            runtime_roots.push(runtime.clone());
+        }
+    }
+    let expected_tasks = if apply_repair {
+        vec![
+            "accept-final".to_string(),
+            "accept-first".to_string(),
+            "project".to_string(),
+            "repair-native".to_string(),
+            "review".to_string(),
+        ]
+    } else {
+        vec![
+            "accept-native".to_string(),
+            "project".to_string(),
+            "review".to_string(),
+        ]
+    };
+    let notifications = if apply_repair { 4 } else { 2 };
     let mut artifact_names = vec!["source", "acceptance", "reviewer-checkout"];
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
@@ -250,10 +381,10 @@ fn run_native_receiver(
             final_reviewer_root.join("submission.json"),
         ]);
     }
-    if apply_restart {
+    if apply_delivery {
         evidence_paths.extend([
-            temp.path().join("inventory-before.json"),
-            temp.path().join("inventory-after.json"),
+            base.join("inventory-before.json"),
+            base.join("inventory-after.json"),
         ]);
     }
     let _failure_evidence = FailureEvidence(evidence_paths);
@@ -377,9 +508,9 @@ fn run_native_receiver(
     let mut delivery_expected = None;
     if apply_delivery {
         let source = env.workspace_root.join("source");
-        let base = git(&source, &["rev-parse", "HEAD"]);
+        let source_base = git(&source, &["rev-parse", "HEAD"]);
         git(
-            temp.path(),
+            base,
             &[
                 "clone",
                 "--bare",
@@ -390,15 +521,18 @@ fn run_native_receiver(
         // setup_in_queue does not impose a source branch name; seed the exact
         // formal ref used by Local delivery regardless of the clone's HEAD.
         git(
-            &formal_target,
-            &["update-ref", "refs/heads/main", base.as_str()],
+            formal_target,
+            &["update-ref", "refs/heads/main", source_base.as_str()],
         );
-        assert_eq!(git(&formal_target, &["rev-parse", "refs/heads/main"]), base);
         assert_eq!(
-            fs::read_to_string(&user_asset).unwrap(),
+            git(formal_target, &["rev-parse", "refs/heads/main"]),
+            source_base
+        );
+        assert_eq!(
+            fs::read_to_string(user_asset).unwrap(),
             "unrelated user asset"
         );
-        delivery_expected = Some(base);
+        delivery_expected = Some(source_base);
     }
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     let development_result = if let Some(development_cwd) = development_cwd {
@@ -588,8 +722,8 @@ fn run_native_receiver(
             );
             if apply_delivery {
                 assert_target_untouched(
-                    &formal_target,
-                    &user_asset,
+                    formal_target,
+                    user_asset,
                     user_identity.unwrap(),
                     delivery_expected.as_ref().unwrap(),
                 );
@@ -644,8 +778,8 @@ fn run_native_receiver(
             );
             if apply_delivery {
                 assert_target_untouched(
-                    &formal_target,
-                    &user_asset,
+                    formal_target,
+                    user_asset,
                     user_identity.unwrap(),
                     delivery_expected.as_ref().unwrap(),
                 );
@@ -675,8 +809,8 @@ fn run_native_receiver(
             );
             if apply_delivery {
                 assert_target_untouched(
-                    &formal_target,
-                    &user_asset,
+                    formal_target,
+                    user_asset,
                     user_identity.unwrap(),
                     delivery_expected.as_ref().unwrap(),
                 );
@@ -811,31 +945,30 @@ fn run_native_receiver(
             );
         }
     }
+    let inventory = apply_delivery.then(|| {
+        super::native_inventory::NativeInventory::new(
+            &env,
+            &q,
+            base,
+            excluded.to_vec(),
+            runtime_roots.clone(),
+            expected_tasks.clone(),
+            notifications,
+        )
+    });
     if apply_restart {
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
         let artifact = delivery_artifact.as_ref().unwrap();
-        let inventory = super::native_inventory::NativeInventory::new(
-            &env,
-            &q,
-            temp.path(),
-            vec![formal_target.clone(), user_asset.clone()],
-            vec![
-                root.clone(),
-                worker_root.clone().unwrap(),
-                reviewer_root.clone().unwrap(),
-                repair_root.clone().unwrap(),
-                final_reviewer_root.clone().unwrap(),
-            ],
-        );
+        let inventory = inventory.expect("restart requires inventory");
         external_supervisor_restart(
             env,
             &q,
             &mut server,
             &mut guard_child,
             RestartSpec {
-                target: &formal_target,
-                user_asset: &user_asset,
+                target: formal_target,
+                user_asset,
                 artifact,
                 expected: delivery_expected.as_ref().unwrap(),
                 user_identity: user_identity.unwrap(),
@@ -850,18 +983,20 @@ fn run_native_receiver(
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
         let artifact = delivery_artifact.as_ref().unwrap();
-        external_driver_delivery(
+        let (inventory, expected_inventory) = external_driver_delivery(
             &mut env,
             &q,
-            &formal_target,
-            &user_asset,
+            formal_target,
+            user_asset,
             artifact,
             delivery_expected.as_ref().unwrap(),
             user_identity.unwrap(),
+            inventory.expect("delivery requires inventory"),
         );
         for child in [&mut server, &mut guard_child] {
             child.wait().unwrap();
         }
+        inventory.after(&expected_inventory);
     } else {
         destroy_environment(&env).unwrap();
         for child in [&mut server, &mut guard_child, &mut queue_child] {
@@ -1161,7 +1296,8 @@ fn external_driver_delivery(
     artifact: &J,
     expected: &str,
     user_identity: (u64, u64),
-) {
+    inventory: super::native_inventory::NativeInventory,
+) -> (super::native_inventory::NativeInventory, J) {
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(user_asset).unwrap();
     assert_eq!((m.dev(), m.ino()), user_identity);
@@ -1215,6 +1351,7 @@ fn external_driver_delivery(
         fs::read_to_string(user_asset).unwrap(),
         "unrelated user asset"
     );
+    let expected_inventory = inventory.before(&confirmed);
 
     delivery::finish(env).unwrap();
     let m = fs::metadata(user_asset).unwrap();
@@ -1235,6 +1372,7 @@ fn external_driver_delivery(
         fs::read_to_string(user_asset).unwrap(),
         "unrelated user asset"
     );
+    (inventory, expected_inventory)
 }
 
 fn wait_for_stage(q: &Path, guard: &Path, coordinator: &J, wait: &str) -> J {
