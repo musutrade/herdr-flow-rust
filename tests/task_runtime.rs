@@ -6,6 +6,13 @@ use std::{fs, path::Path, process::Command};
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const UNAVAILABLE_DEPENDENCY: &str = "required-dependency-fixture";
 const UNAVAILABLE_DEPENDENCY_SOURCE: &str = "Operator-provided acceptance validation requires executable ./required-dependency-fixture --check; it is not part of the developer artifact.";
+const AMBIGUOUS_ORIGINAL: &str =
+    "Original requirement reference: the delivered file must contain exactly version A.";
+const AMBIGUOUS_CHANGE: &str = "Confirmed change reference: the delivered file must contain exactly version B; this reference does not state that it supersedes or takes precedence over the original.";
+const AMBIGUOUS_SPECIFICATION: &str = "Project specification: both conflicting content statements above remain binding, and no precedence or resolution between them is stated.";
+const AMBIGUOUS_CONFIRMATION: &str = "Operator confirmation identifies both content references as current but does not choose between version A and version B.";
+const AMBIGUOUS_AUTHORIZATION_SOURCE: &str =
+    "Existing operator authorization for independent acceptance review of the fixed artifact.";
 
 struct OwnedEnvironment {
     env: Option<TaskEnvironment>,
@@ -269,6 +276,39 @@ fn setup_in_queue_inner(
     }
     queue::save(q, &mut state).unwrap();
     (q.to_path_buf(), cwd)
+}
+
+fn setup_in_queue_with_ambiguous_requirement(env: &TaskEnvironment, q: &Path) -> J {
+    let source = env.workspace_root.join("source");
+    common::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(&source, &["config", "user.name", "Test"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    fs::write(source.join("file"), "version A").unwrap();
+    git(&source, &["add", "file"]);
+    git(&source, &["commit", "-qm", "A"]);
+    let sha = git(&source, &["rev-parse", "HEAD"]);
+    let now = herdr_flow::util::now();
+    let mut state = queue::load_queue(q).unwrap();
+    let plan = json!({
+        "kind":"plan", "task":"project",
+        "goal":"Review the fixed file against all current requirement references",
+        "basis":{
+            "original":[AMBIGUOUS_ORIGINAL],
+            "changes":[AMBIGUOUS_CHANGE],
+            "specifications":[AMBIGUOUS_SPECIFICATION],
+            "endpoint":"disposable acceptance endpoint",
+            "confirmation":AMBIGUOUS_CONFIRMATION
+        },
+        "authorization":[{"id":"verify","action":"review","source":AMBIGUOUS_AUTHORIZATION_SOURCE}]
+    });
+    progress::lineage::action(&mut state, &plan, now).unwrap();
+    let artifact = json!({"id":sha,"adapter":"git","location":source});
+    let mut spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
+    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    progress::lineage::action(&mut state, &spec, now).unwrap();
+    queue::save(q, &mut state).unwrap();
+    artifact
 }
 
 #[test]

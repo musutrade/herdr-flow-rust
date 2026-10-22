@@ -8,12 +8,12 @@ remains open. It does not replace its issue acceptance matrix or close #32.
 | Boundary | Existing/current evidence | Still required for #38 |
 | --- | --- | --- |
 | Old task state | `tests/lineage.rs::legacy_migration_requires_quiescence_and_preserves_no_approval` refuses migration with a writer, pending operation, executing phase or open PR; preserves old task state and does not create a new approval. | Validate ownership association for actual pre-existing resources and undelivered artifacts; no home-directory sweep or inferred authority over unknown paths. |
-| Delivery and restart | `tests/delivery.rs` covers real local file/Git endpoints, frozen candidates, uncertain delivery, restart and cleanup faults with protocol reviewer fixtures. | Run those transitions with actual native role output, including failure/repair and fresh acceptance sessions, not fabricated verdicts. |
-| Repeated control state | The twenty-round protocol regression reuses one control directory and shared queue, alternating normal delivery, restore after preparation, and restore after confirmation; confirmed delivery cannot be executed again. | Twenty completed real tasks including repair and restart, with actual model takeover/ACK and customer-delivery evidence. The protocol regression does not count toward that real-task total. |
-| Native execution | Opt-in installed tests and `tests/common/acceptance_live.rs` can run real native roles. Their coordinator and notification ACK/application are test-driver operations. | An actual coordinator must receive and act on the protocol, with model-generated actions distinguishable from driver actions. |
-| Resource lifetime | Protocol regression checks task registration/slots, workspace/temp roots, plan/env/lock records, shared entries, previous deliveries and a pre-existing user asset before fixture teardown. | Observe native caches/sessions outside task roots, open files, process identities, worktree registrations and shared entries for every real round; check correct delivery plus complete task teardown. |
-| Runtime compatibility | Local readiness review found Codex 0.163.0 and OpenCode 1.19.3; the existing opt-in inputs select binary/model/config/auth copies. | Execute exact selected configurations in disposable environments; do not infer model availability from binary versions or old successful provider calls. No OpenCode 2.0 upgrade. |
-| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults. | Real execution/approval/unavailable-environment and interruption boundaries, with no false completion, replay or unlimited environment creation. |
+| Delivery and restart | `tests/delivery.rs` covers real local file/Git endpoints, frozen candidates, uncertain delivery, restart and cleanup faults with protocol reviewer fixtures. Real native delivery, repair, recovery and restart runs are documented below. | Actual native role output is now covered for the OpenCode scenarios below; real uncertain-delivery/cleanup-failure interruptions and customer production delivery remain unproven. |
+| Repeated control state | The twenty-round protocol regression reuses one control directory and shared queue, alternating normal delivery, restore after preparation, and restore after confirmation; confirmed delivery cannot be executed again. A twenty-round real native campaign is recorded below. | Real twenty-task completion is observed below; whole-campaign disk stability and reliable global outside-root cache/session discovery remain unproven. |
+| Native execution | Opt-in installed tests and `tests/common/acceptance_live.rs` run real native roles. OpenCode native coordinator scenarios below execute ACK/application themselves; the driver only registers work and collects. | OpenCode native coordinator behavior is evidenced; Codex coordinator/session bootstrap remains blocked by the host nested-userns/product gap. |
+| Resource lifetime | Protocol regression checks task registration/slots, workspace/temp roots, plan/env/lock records, shared entries, previous deliveries and a pre-existing user asset before fixture teardown; native reports record marked processes and base resources. | Outside-root cache/session and complete process/worktree discovery remain observational; correct native delivery plus teardown is evidenced only for the recorded OpenCode scenarios. |
+| Runtime compatibility | Local readiness review found Codex 0.163.0 and OpenCode 1.19.3; selected OpenCode configuration was exercised unchanged in the native scenarios below. | Codex still requires supported nested-userns/bootstrap behavior; no OpenCode 2.0 upgrade is claimed. |
+| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Real approval handling, dispatch/takeover interruption and delivery-unknown recovery remain; the ambiguity scenario must be independently run before claiming a real ambiguous result. |
 
 ## Twenty-round protocol regression
 
@@ -764,3 +764,37 @@ Attempt 6 retained the actual continuation error: `result wait must be an object
 After live attempt 7, the only test-code change was diagnostic truncation: when JSON escaping or multibyte text would exceed 60 KiB, oldest diagnostic records are removed until the serialized snapshot fits, preserving the most recent records and the original total/truncated metadata. A non-model regression covers escaped control characters and multibyte text. This does not change the native scenario, prompts, state transitions or acceptance assertions. The first full-gate attempt and an overlapping diagnostic-test compilation failed with `No space left on device`; those failures were retained. After checking process references, only the completed legacy-resources worktree's build target was cleaned, freeing 6.7 GiB; source and evidence were preserved. Final gates are rerun separately.
 
 Final non-live verification after diagnostic truncation: stable coverage and Rust 1.85 all-target suites each passed 484 tests with zero failures and 18 ignored. The escaped-text diagnostic regression passed. Formatting, lint policy, Clippy and rustdoc passed; CRAP checked 4800 functions at 77.3% line coverage with zero violations of the absolute threshold 10. The real scenario evidence remains attempt 7, whose prompts and acceptance logic were unchanged by the later diagnostic-only cap fix.
+
+## Real ambiguous requirement clarification (phase 1)
+
+The opt-in `installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver`
+scenario covers the remaining real-role acceptance branch without inventing a
+user decision. It creates one disposable fixed Git artifact A and a requirement
+whose original reference requires version A while a confirmed change and project
+specification keep version B binding with no stated precedence. The existing
+review authorization is retained.
+
+One fresh real OpenCode reviewer receives the fixed basis and must inspect the
+actual artifact with a direct `git show HEAD:file` invocation, preserving its
+terminal exit, output and timestamps. It writes the actual `.herdr-verdict.json`
+itself; the driver never supplies or rewrites the conclusion. For a genuinely
+unresolved conflict the report must use `conclusion: ambiguous` with nonempty
+top-level `question` and `unresolved_after_review`, blocked checks bound to each
+exact conflicting basis source and the valid `goal` criterion, empty
+`gaps`/`resolutions`/`reuses`, and `agreements_checked` containing every
+original/change/specification reference, `basis.confirmation` and every
+authorization source. A different conclusion fails the scenario honestly.
+
+The same registered real coordinator receives the single production notification,
+ACKs its exact delivery as receipt, applies the exact immutable verdict with
+`next_action.kind=clarify`, runs readiness, and stops. The test checks exact
+queue/delivery/spec arguments, terminal native exits and timestamps, one successful
+task-apply with only lock-busy failed attempts, no `task-lineage`/revise/continue,
+one event/delivery, unchanged artifact/requirement/candidate/revision/authorization,
+`approved=null`, and a blocked child with empty pending. No dependency installation,
+new activity, requirement revision, user-confirmed resolution or delivery occurs.
+
+This is phase 1 only. It is implemented but not yet run; no model-success claim is
+made. A real operator/user confirmation, revised requirement and resumed work
+remain a separate scenario. #38 and #32 remain OPEN; the Codex host/bootstrap
+blocker and all prior evidence limits are unchanged.
