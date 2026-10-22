@@ -273,3 +273,18 @@ observed; overdue stall suppression is not demonstrated because the default
 deadline is 600 seconds. This is delayed delivery of a pre-collected result, not
 collection after replacement and not a concurrent developer proof. No
 product/API/isolation or crash-restart behavior is added.
+### Reviewer unavailable restore boundary
+
+The opt-in `installed_real_opencode_unable_restore_is_applied_by_native_receiver`
+phase-1 scenario records a fixed product requirement plus a mandatory
+operator-provided dependency before dispatch. A real reviewer executes the exact
+missing `./required-dependency-fixture --check` command; its terminal exit-127
+evidence and missing-path error support an actual immutable `unable` report. The
+real coordinator ACKs/apply the registered verdict with a restore continuation.
+Assertions preserve candidate A, null approval, unchanged requirement revision
+and authorization, blocked child/empty pending, exact verdict/report/session
+binding, and bounded cleanup; no repair, delivery or new development child is
+created. The missing dependency remains absent and uncommitted. This is phase 1
+only: it does not claim dependency restoration or a fresh review/pass. The
+synthetic unable/restore and execution-problem tests remain the broader matrix
+overlap. No product/API/isolation change.

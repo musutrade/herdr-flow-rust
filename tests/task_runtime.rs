@@ -4,6 +4,8 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path, process::Command};
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const UNAVAILABLE_DEPENDENCY: &str = "required-dependency-fixture";
+const UNAVAILABLE_DEPENDENCY_SOURCE: &str = "Operator-provided acceptance validation requires executable ./required-dependency-fixture --check; it is not part of the developer artifact.";
 
 struct OwnedEnvironment {
     env: Option<TaskEnvironment>,
@@ -172,13 +174,31 @@ fn setup_in_queue(
     role: &str,
     q: &Path,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
-    setup_in_queue_with_apply_timeout(env, role, q, None)
+    setup_in_queue_inner(env, role, q, None, None)
 }
 fn setup_in_queue_with_apply_timeout(
     env: &TaskEnvironment,
     role: &str,
     q: &Path,
     apply_timeout_seconds: Option<f64>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    setup_in_queue_inner(env, role, q, apply_timeout_seconds, None)
+}
+fn setup_in_queue_with_unavailable_dependency(
+    env: &TaskEnvironment,
+    role: &str,
+    q: &Path,
+    dependency: &str,
+    apply_timeout_seconds: Option<f64>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    setup_in_queue_inner(env, role, q, apply_timeout_seconds, Some(dependency))
+}
+fn setup_in_queue_inner(
+    env: &TaskEnvironment,
+    role: &str,
+    q: &Path,
+    apply_timeout_seconds: Option<f64>,
+    unavailable_dependency: Option<&str>,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = env.workspace_root.join("source");
     common::create_dir_all(&source).unwrap();
@@ -210,9 +230,19 @@ fn setup_in_queue_with_apply_timeout(
         ("reviewer", "review")
     };
     let mut state = queue::load_queue(q).unwrap();
-    progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"verify file",
-        "basis":{"original":[if role=="development" {"change file to version B and commit locally"} else {"file must contain version A"}],"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
-        "authorization":[{"id":"verify","action":"review","source":"user"}]}),now).unwrap();
+    let mut original = vec![json!(if role == "development" {
+        "change file to version B and commit locally"
+    } else {
+        "file must contain version A"
+    })];
+    if let Some(dependency) = unavailable_dependency {
+        assert_eq!(dependency, UNAVAILABLE_DEPENDENCY);
+        original.push(json!(UNAVAILABLE_DEPENDENCY_SOURCE));
+    }
+    let plan = json!({"kind":"plan","task":"project","goal":"verify file",
+        "basis":{"original":original,"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
+        "authorization":[{"id":"verify","action":"review","source":"user"}]});
+    progress::lineage::action(&mut state, &plan, now).unwrap();
     if let Some(target) = env.delivery_targets.first() {
         state["tasks"]["project"]["requirements"]["1"]["authorization"]["deliver"] =
             json!({"action":"delivery","source":"explicit disposable native delivery test"});
