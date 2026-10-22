@@ -1021,6 +1021,20 @@ restores the displaced root before child reaping and handoff cleanup on unwind;
 it never overwrites an unexpected replacement path. No product journal, receipt,
 ACK or application is fabricated, and no raw evidence is uploaded.
 
-This scenario has not yet been run as a live model acceptance. The twenty-round
-campaign and earlier native delivery/restart evidence remain separate. #38/#32
-remain OPEN.
+Primary attempt 1 (2026-10-22) failed after 226.28s at the occupied-slot
+assertion, after the real native stages and first failed cleanup. The fixture
+expected one slot, but `occupied_slots()` counts the environment document and
+cleanup plan separately. The corrected assertion requires exactly two, exactly
+one registered environment, and matching document/plan/registry instance identity.
+This was a fixture assertion failure, not evidence of a second leaked environment;
+the failure is retained locally. Attempt 2 passed in 189.46s including build,
+with selected configuration unchanged. It verified actual partial cleanup,
+retained cleaning state and plan, replay rejection, restoration of the original
+workspace inode, fresh `finished:true`, and final resource/target/user checks. The twenty-round campaign and earlier native delivery/restart evidence
+remain separate. #38/#32 remain OPEN.
+
+The final inventory sample includes the bounded failure snapshot in base usage.
+The snapshot is removed only after that sample passes, so this sample proves the
+asserted owned-root/registry cleanup, not an exact formal-output-only base listing.
+The outer disposable fixture is removed at teardown; the snapshot is preserved
+only on a failed assertion through the bounded development failure evidence path.

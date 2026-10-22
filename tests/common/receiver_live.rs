@@ -5867,10 +5867,7 @@ fn external_cleanup_recovery(
         String::from_utf8_lossy(&failed_finish.stderr)
     );
 
-    let failed_state: J = serde_json::from_slice(
-        &fs::read(&state_file).unwrap_or_else(|error| panic!("read failed state: {error}")),
-    )
-    .unwrap_or_else(|error| panic!("parse failed state: {error}"));
+    let failed_state = bounded_cleanup_document(&state_file, 1024 * 1024);
     assert_eq!(failed_state["state"], "destroy_failed");
     assert_eq!(failed_state["instance_id"], json!(instance_id));
     assert_eq!(
@@ -5886,6 +5883,7 @@ fn external_cleanup_recovery(
     assert_eq!(failed_state["delivery"]["id"], intent_id);
     assert_eq!(failed_state["delivery"]["receipt"], receipt);
     let registry = load_registry().unwrap();
+    assert_eq!(registry.len(), 1);
     let entry = registry.get("project").unwrap();
     assert_eq!(entry.instance_id, instance_id);
     assert_eq!(entry.workspace_root, workspace);
@@ -5895,11 +5893,11 @@ fn external_cleanup_recovery(
         entry.claimed_roots(),
         vec![workspace.clone(), temporary.clone()]
     );
-    assert_eq!(occupied_slots().unwrap(), 1);
+    // occupied_slots counts environment documents and cleanup plans separately.
+    assert_eq!(occupied_slots().unwrap(), 2);
 
     assert!(plan_path.exists());
-    let plan: J = serde_json::from_slice(&fs::read(&plan_path).unwrap())
-        .unwrap_or_else(|error| panic!("parse cleanup plan: {error}"));
+    let plan = bounded_cleanup_document(&plan_path, 1024 * 1024);
     assert_eq!(plan["task_id"], "project");
     assert_eq!(plan["instance_id"], json!(instance_id));
     assert_eq!(plan["delivery_confirmed"], true);
@@ -6023,8 +6021,8 @@ fn external_cleanup_recovery(
     assert!(!cleanup_path_present(q));
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
     assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
-    fs::remove_file(failure_snapshot).unwrap();
     inventory.after(&expected_inventory);
+    fs::remove_file(failure_snapshot).unwrap();
     custody.disarm();
 }
 
@@ -6127,8 +6125,42 @@ fn bounded_cleanup_document(path: &Path, limit: usize) -> J {
     if bytes.len() > limit {
         return json!({"truncated": true, "bytes_at_least": limit + 1});
     }
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| json!({"invalid_json": true, "bytes": bytes.len()}))
+    let mut document = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({"invalid_json": true, "bytes": bytes.len()}));
+    redact_cleanup_errors(&mut document);
+    document
+}
+
+fn redact_cleanup_errors(value: &mut J) {
+    match value {
+        J::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(key.as_str(), "last_error" | "problem" | "execution_error") {
+                    *value = json!({"present": !value.is_null(), "redacted": true});
+                } else {
+                    redact_cleanup_errors(value);
+                }
+            }
+        }
+        J::Array(items) => items.iter_mut().for_each(redact_cleanup_errors),
+        _ => {}
+    }
+}
+
+#[test]
+fn cleanup_document_bounds_reads_and_redacts_persisted_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.json");
+    fs::write(
+        &path,
+        br#"{"delivery":{"execution_error":"secret"},"last_error":"secret","instance_id":"same"}"#,
+    )
+    .unwrap();
+    let document = bounded_cleanup_document(&path, 1024);
+    assert_eq!(document["instance_id"], "same");
+    assert_eq!(document["delivery"]["execution_error"]["redacted"], true);
+    assert!(!document.to_string().contains("secret"));
+    assert_eq!(bounded_cleanup_document(&path, 8)["truncated"], true);
 }
 
 fn cli_failure_status(output: &std::process::Output) -> J {
@@ -6215,7 +6247,8 @@ fn cleanup_fault_guard_refuses_replacement_dangling_and_mismatched_inode() {
     fs::create_dir(&original).unwrap();
     let displaced = temp.path().join("mismatch-displaced");
     let mut mismatch = DisplacedWorkspace::displace(&original, displaced.clone());
-    fs::remove_dir_all(&displaced).unwrap();
+    let retained_original = temp.path().join("mismatch-retained-original");
+    fs::rename(&displaced, &retained_original).unwrap();
     fs::create_dir(&displaced).unwrap();
     assert!(mismatch.restore_result().is_err());
     assert!(!cleanup_path_present(&original));
