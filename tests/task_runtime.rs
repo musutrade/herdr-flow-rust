@@ -311,6 +311,55 @@ fn setup_in_queue_with_ambiguous_requirement(env: &TaskEnvironment, q: &Path) ->
     artifact
 }
 
+fn setup_in_queue_with_concurrent_activities(env: &TaskEnvironment, q: &Path) -> J {
+    let source = env.workspace_root.join("source");
+    common::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(&source, &["config", "user.name", "Test"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    fs::write(source.join("file"), "version A").unwrap();
+    git(&source, &["add", "file"]);
+    git(&source, &["commit", "-qm", "A"]);
+    let sha = git(&source, &["rev-parse", "HEAD"]);
+    let now = herdr_flow::util::now();
+    let mut state = queue::load_queue(q).unwrap();
+    let plan = json!({
+        "kind":"plan", "task":"project",
+        "goal":"Verify fixed version A while development may produce a successor",
+        "basis":{"original":["file must contain version A"],"changes":[],"specifications":[],
+            "endpoint":"disposable acceptance endpoint","confirmation":"user"},
+        "authorization":[
+            {"id":"verify","action":"review","source":"operator verification authorization"},
+            {"id":"develop","action":"development","source":"operator development authorization"}
+        ]
+    });
+    progress::lineage::action(&mut state, &plan, now).unwrap();
+    let artifact = json!({"id":sha,"adapter":"git","location":source});
+    let mut artifact_spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
+    artifact_spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    progress::lineage::action(&mut state, &artifact_spec, now).unwrap();
+    let mut candidate =
+        json!({"kind":"candidate","task":"project","candidate":sha,"reason":"fixed A"});
+    candidate["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    progress::lineage::action(&mut state, &candidate, now).unwrap();
+    for (name, role, owner, assignment) in [
+        ("accept-a", "acceptance", "reviewer", "accept-a-a1"),
+        ("develop-b", "development", "developer", "develop-b-a1"),
+    ] {
+        let mut activity = json!({
+            "kind":"activity", "task":"project", "activity":name, "role":role,
+            "input":sha, "session_epoch":1,
+            "result_wait":{"id":name,"task":name,"kind":"signal","epoch":1,
+                "assignment":assignment,"owner":owner,"reason":"native role result",
+                "condition":"terminal report","timeout_seconds":600}
+        });
+        activity["state_version"] = state["tasks"]["project"]["state_version"].clone();
+        progress::lineage::action(&mut state, &activity, now).unwrap();
+    }
+    queue::save(q, &mut state).unwrap();
+    artifact
+}
+
 #[test]
 fn handoff_guard_resumes_a_plan_after_registry_removal() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());

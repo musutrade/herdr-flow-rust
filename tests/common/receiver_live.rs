@@ -144,6 +144,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -172,6 +173,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -200,6 +202,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_unable_restore: true,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -228,6 +231,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_unable_restore: true,
         apply_restored_review: true,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -256,6 +260,36 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: true,
+        apply_concurrent: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires two concurrent real OpenCode native turns: fixed-A reviewer and developing developer"]
+fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -310,6 +344,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -692,6 +727,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_unable_restore: false,
             apply_restored_review: false,
             apply_ambiguous: false,
+            apply_concurrent: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -863,6 +899,7 @@ struct ReceiverSpec<'a> {
     apply_unable_restore: bool,
     apply_restored_review: bool,
     apply_ambiguous: bool,
+    apply_concurrent: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -894,6 +931,7 @@ fn run_native_receiver(
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -915,6 +953,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_unable_restore,
         apply_restored_review,
         apply_ambiguous,
+        apply_concurrent,
         unavailable_dependency,
         base,
         formal_target,
@@ -996,6 +1035,22 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "ambiguous requirement requires acceptance-only OpenCode mode"
     );
+    assert!(
+        !apply_concurrent
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && unavailable_dependency.is_none()),
+        "concurrent native turns require isolated OpenCode mode"
+    );
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -1048,6 +1103,12 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         ]
     } else if apply_ambiguous {
         vec!["accept-native".to_string(), "project".to_string()]
+    } else if apply_concurrent {
+        vec![
+            "accept-a".to_string(),
+            "develop-b".to_string(),
+            "project".to_string(),
+        ]
     } else {
         vec![
             "accept-native".to_string(),
@@ -1059,11 +1120,15 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         4
     } else if apply_ambiguous {
         1
+    } else if apply_concurrent {
+        2
     } else {
         2
     };
     let mut artifact_names = if apply_ambiguous {
         vec!["source", "reviewer-checkout"]
+    } else if apply_concurrent {
+        vec!["source", "accept-a", "develop-b"]
     } else {
         vec!["source", "development", "reviewer-checkout"]
     };
@@ -1076,7 +1141,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous {
+    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous || apply_concurrent {
         artifact_names
             .iter()
             .map(|name| {
@@ -1371,6 +1436,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     let ambiguous_artifact =
         apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
+    let concurrent_artifact =
+        apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
@@ -1404,6 +1471,168 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         let source = Path::new(artifact["location"].as_str().unwrap());
         assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
         assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
+    if let Some(artifact) = concurrent_artifact.as_ref() {
+        let selected_config_before =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        let accept_cwd = acceptance_live::clone_snapshot(&env, artifact, "accept-a");
+        let develop_cwd = acceptance_live::clone_snapshot(&env, artifact, "develop-b");
+        let accept_instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD against all current requirement references. Use direct tools only. Run exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve actual exit status, output and timestamps. Do not edit tracked files or commit. Write .herdr-verdict.json in cwd following acceptance_protocol with actual checks and evidence, and derive the conclusion yourself. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline, stage/add it, and create one new local Git commit. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let readiness = herdr_flow::runtime::readiness(
+            &q,
+            registered["session"].as_str(),
+            &herdr_flow::herdr::receiver_factory,
+        )
+        .unwrap();
+        assert_eq!(
+            readiness["active_wakeup"], true,
+            "production receiver readiness was not active before dispatch"
+        );
+        let mut accept_turn = acceptance_live::native_start(
+            &mut env,
+            &q,
+            &accept_cwd,
+            "accept-a",
+            accept_instruction,
+        );
+        let mut develop_turn = acceptance_live::native_start(
+            &mut env,
+            &q,
+            &develop_cwd,
+            "develop-b",
+            develop_instruction,
+        );
+        let disabled = cli_output(&["queue", "disable", "--state-dir", q.to_str().unwrap()]);
+        assert!(
+            disabled.status.success(),
+            "queue disable failed: {}",
+            String::from_utf8_lossy(&disabled.stderr)
+        );
+        assert_eq!(queue::load_queue(&q).unwrap()["notify"], false);
+        failure_evidence
+            .0
+            .push(accept_turn.root.join("submission.json"));
+        failure_evidence
+            .0
+            .push(develop_turn.root.join("submission.json"));
+        failure_evidence
+            .0
+            .push(accept_cwd.join(".herdr-verdict.json"));
+        let accept_submission = util::read_json(&accept_turn.root.join("submission.json")).unwrap();
+        let develop_submission =
+            util::read_json(&develop_turn.root.join("submission.json")).unwrap();
+        let accept_result = acceptance_live::native_finish(&env, &mut accept_turn);
+        let develop_result = acceptance_live::native_finish(&env, &mut develop_turn);
+        let accept_session = accept_result["session"].as_str().unwrap();
+        let accept_message = accept_result["message_id"].as_str().unwrap();
+        let develop_session = develop_result["session"].as_str().unwrap();
+        let develop_message = develop_result["message_id"].as_str().unwrap();
+        assert_ne!(accept_session, develop_session);
+        assert_eq!(accept_submission["session"], accept_session);
+        assert_eq!(accept_submission["message_id"], accept_message);
+        assert_eq!(develop_submission["session"], develop_session);
+        assert_eq!(develop_submission["message_id"], develop_message);
+        let accept_created =
+            submission_created_millis(&accept_submission["created_at"], "reviewer submission");
+        let develop_created =
+            submission_created_millis(&develop_submission["created_at"], "developer submission");
+        let accept_rows = session_rows(
+            &accept_turn.client,
+            &accept_turn.endpoint,
+            accept_session,
+            &accept_cwd,
+        );
+        let develop_rows = session_rows(
+            &develop_turn.client,
+            &develop_turn.endpoint,
+            develop_session,
+            &develop_cwd,
+        );
+        let accept_completed = exact_assistant_completion_millis(
+            &accept_rows,
+            accept_session,
+            accept_message,
+            "reviewer",
+        );
+        let develop_completed = exact_assistant_completion_millis(
+            &develop_rows,
+            develop_session,
+            develop_message,
+            "developer",
+        );
+        assert!(
+            accept_created < accept_completed,
+            "reviewer submission/completion timestamps are reversed"
+        );
+        assert!(
+            develop_created < develop_completed,
+            "developer submission/completion timestamps are reversed"
+        );
+        let overlap_start = accept_created.max(develop_created);
+        let overlap_end = accept_completed.min(develop_completed);
+        assert!(
+            overlap_start < overlap_end
+                && accept_created < develop_completed
+                && develop_created < accept_completed,
+            "native reviewer and developer turns did not actually overlap"
+        );
+        let source = Path::new(artifact["location"].as_str().unwrap());
+        assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
+        assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
+        assert_eq!(git(&accept_cwd, &["rev-parse", "HEAD"]), artifact["id"]);
+        assert_eq!(git(&accept_cwd, &["show", "HEAD:file"]), "version A");
+        let output = &develop_result["output"];
+        assert_eq!(output["input"], artifact["id"]);
+        assert_ne!(output["id"], artifact["id"]);
+        assert_eq!(git(&develop_cwd, &["rev-parse", "HEAD"]), output["id"]);
+        assert_eq!(git(&develop_cwd, &["show", "HEAD:file"]), "version B");
+        let report_path = accept_cwd.join(".herdr-verdict.json");
+        let report_bytes = fs::read(&report_path).unwrap();
+        let actual_report = util::read_json(&report_path).unwrap();
+        let final_state = queue::load_queue(&q).unwrap();
+        let project = &final_state["tasks"]["project"];
+        let accept_task = &final_state["tasks"]["accept-a"];
+        let develop_task = &final_state["tasks"]["develop-b"];
+        assert_eq!(project["candidate"], artifact["id"]);
+        assert!(project["approved"].is_null());
+        assert_eq!(project["requirement_revision"], json!(1));
+        assert_eq!(accept_task["candidate"], artifact["id"]);
+        assert_eq!(accept_task["lineage"]["input"], artifact["id"]);
+        assert_eq!(develop_task["lineage"]["input"], artifact["id"]);
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["reviewer"]["session"],
+            accept_session
+        );
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["binding"]["candidate"],
+            artifact["id"]
+        );
+        assert_eq!(accept_task["verdict"]["envelope"]["report"], actual_report);
+        assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+        assert_eq!(final_state["notify"], false);
+        assert!(final_state["deliveries"]
+            .as_object()
+            .is_none_or(|deliveries| deliveries.is_empty()));
+        assert!(final_state["events"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .all(|(_, event)| event["applied"] != true));
+        assert_eq!(
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap(),
+            selected_config_before
+        );
+        accept_turn.stop();
+        develop_turn.stop();
         destroy_environment(&env).unwrap();
         wait_bounded(&mut server, "native server");
         wait_bounded(&mut guard_child, "guard watcher");
@@ -2150,6 +2379,44 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
         .collect();
     commands.sort_by_key(|command| (command.start, command.end));
     commands
+}
+
+fn submission_created_millis(value: &J, label: &str) -> f64 {
+    let seconds = value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| panic!("{label} created_at missing, nonfinite or nonpositive"));
+    seconds * 1000.0
+}
+
+fn exact_assistant_completion_millis(
+    rows: &J,
+    session: &str,
+    parent_message: &str,
+    label: &str,
+) -> f64 {
+    let matches: Vec<_> = rows
+        .as_array()
+        .expect("native session rows")
+        .iter()
+        .filter(|row| {
+            row["info"]["sessionID"] == session
+                && row["info"]["role"] == "assistant"
+                && row["info"]["parentID"] == parent_message
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "{label} requires exactly one assistant row for the exact submitted message"
+    );
+    let millis = matches[0]["info"]["time"]["completed"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| {
+            panic!("{label} assistant completion missing, nonfinite or nonpositive")
+        });
+    millis
 }
 
 fn exact_path_argument(command: &str, flag: &str, path: &Path) -> bool {

@@ -812,3 +812,36 @@ each passed 484 tests with zero failures and 19 ignored. Formatting, lint policy
 Clippy and rustdoc passed. CRAP checked 4800 functions at 77.2% line coverage with
 zero violations of the absolute threshold 10. Stable and Rust 1.85 release builds
 passed; all builds used this worktree’s own target directory.
+
+## Concurrent native development and fixed-A review
+
+The opt-in `installed_real_opencode_concurrent_developer_while_reviewer_fixed_a`
+scenario adds the missing real concurrent-role proof. Unlike the fixed-snapshot
+late-result test, which creates B with driver setup after collecting reviewer A,
+this scenario starts one real OpenCode developer and one real OpenCode reviewer
+against separate checkouts/roots of the same fixed candidate A. Both production
+native dispatches are issued before either result is collected. Notifications are
+then disabled through the supported queue CLI and both native results are
+collected; reviewer A signals only after that point, so the coordinator cannot
+apply an unwanted result. Receiver readiness is checked against the real
+coordinator session before dispatch, and no watcher or readiness state is
+fabricated.
+
+The developer must create an actual new commit B from A; the reviewer must write
+its own actual verdict and inspect `git show HEAD:file` as A. The test binds
+parent candidate/revision, both activity inputs, exact sessions and submitted
+message IDs, reviewer report/verdict binding, developer output `input`, distinct
+checkout HEADs, and the unchanged A source. No driver creates B or a report, and
+no ACK, task-apply, candidate selection, delivery or user answer occurs.
+
+Overlap is asserted only post hoc from actual timestamps: each exact
+`submission.json` `created_at` is normalized from seconds to milliseconds, and the
+assistant completion is selected by exact session plus exact parent message ID
+(not an arbitrary historical assistant row). Missing, nonfinite, reversed or
+non-overlapping intervals fail the proof. This describes overlapping native turns;
+it does not claim simultaneous CPU or model execution. With no supported
+scheduling barrier, overlap is observed rather than forced; a non-overlapping run
+is retained as an honest failed proof, not retried with sleeps or synthetic
+reports. B either remains unselected and unapplied, leaving A current and approval
+null. The test has not yet been run; no model-success claim is made. #38/#32 remain
+OPEN and all prior Codex/resource-discovery limits are unchanged.
