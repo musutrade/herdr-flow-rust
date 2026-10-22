@@ -954,7 +954,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     );
     if apply_ack_stall_recovery {
         instruction_text = format!(
-            "Authorized disposable coordinator test for ACK/stall recovery. This is same-session omission recovery, not a process restart. Do not delegate or create sessions. Exactly one real development result for task review will arrive. First notification: use its exact OPENCODE_SESSION_ID, execute its exact queue ack command, require success, then finish immediately. Do not run task-apply, readiness or event-current, and do not edit queue/guard/watch state. Leave the acknowledged result unapplied. Later the production watcher will send a progress_stall notification for the same task and wait after the apply deadline. It is an alarm, not a result. Both events share wait=review, so select exact IDs and kinds from queue.json. Use the exact OPENCODE_SESSION_ID. Execute the exact ACK command for the stall delivery and require success. Find the progress_stall event with kind=progress_stall, reason=result_unapplied and wait=review; run {binary} queue event-current --state-dir {queue_path} --event STALL_ID and require exit 0. Find the original acknowledged, unapplied, non-progress_stall event in tasks.review.pending with wait=review; use that exact original event ID. Read the collector report referenced by the original event and use its output unchanged. Read the release receipt at {release} and require matching session/stopped status; do not infer it. Write an application JSON in cwd with task=review, current state_version, exact original event ID, output from that collector, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<actual receipt status>, next_action={{kind:complete}}. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE exactly once. Never task-apply the progress_stall event. Then run {binary} queue readiness --state-dir {queue_path}, require active_wakeup=true, and finish. Never edit queue, guard, reports, watch files or tracked artifacts; never fabricate event IDs, output, ACK, application or readiness. Retry only lock-busy errors for at most15seconds. Do not inspect herdr-flow source, operator repositories, or any paths outside the supplied disposable roots. The task-apply schema and commands are complete; write only your application JSON in cwd. No repository search is authorized.",
+            "Authorized disposable coordinator test for ACK/stall recovery. This is same-session omission recovery, not a process restart. Run each queue ACK, event-current, task-apply and readiness command in its own separate bash tool invocation; do not group these commands into a script or a single shell call. Do not delegate or create sessions. Exactly one real development result for task review will arrive. First notification: use its exact OPENCODE_SESSION_ID, execute its exact queue ack command, require success, then finish immediately. Do not run task-apply, readiness or event-current, and do not edit queue/guard/watch state. Leave the acknowledged result unapplied. Later the production watcher will send a progress_stall notification for the same task and wait after the apply deadline. It is an alarm, not a result. Both events share wait=review, so select exact IDs and kinds from queue.json. Use the exact OPENCODE_SESSION_ID. Execute the exact ACK command for the stall delivery and require success. Find the progress_stall event with kind=progress_stall, reason=result_unapplied and wait=review; run {binary} queue event-current --state-dir {queue_path} --event STALL_ID and require exit 0. Find the original acknowledged, unapplied, non-progress_stall event in tasks.review.pending with wait=review; use that exact original event ID. Read the collector report referenced by the original event and use its output unchanged. Read the release receipt at {release} and require matching session/stopped status; do not infer it. Write an application JSON in cwd with task=review, current state_version, exact original event ID, output from that collector, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<actual receipt status>, next_action={{kind:complete}}. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE exactly once. Never task-apply the progress_stall event. Then run {binary} queue readiness --state-dir {queue_path}, require active_wakeup=true, and finish. Never edit queue, guard, reports, watch files or tracked artifacts; never fabricate event IDs, output, ACK, application or readiness. Retry only lock-busy errors for at most15seconds. Do not inspect herdr-flow source, operator repositories, or any paths outside the supplied disposable roots. The task-apply schema and commands are complete; write only your application JSON in cwd. No repository search is authorized.",
             release=root.join("developer-release.json").display()
         );
     } else if apply_development {
@@ -1969,7 +1969,7 @@ fn verify_ack_stall_recovery(spec: AckStallRecoverySpec<'_>) {
     );
     assert!(!stall["applied"].as_bool().unwrap_or(false));
     assert_eq!(state["events"].as_object().unwrap().len(), 2);
-    assert_eq!(state["tasks"]["project"]["approved"], Value::Null);
+    assert_eq!(state["tasks"]["project"]["approved"], J::Null);
     assert_eq!(
         state["tasks"]["project"]["artifacts"][output_id]["object"],
         *output
@@ -2052,7 +2052,8 @@ fn verify_ack_stall_recovery(spec: AckStallRecoverySpec<'_>) {
     {
         let evidence = format!("{} {}", command.output, command.error).to_ascii_lowercase();
         assert!(
-            evidence.contains("busy"),
+            evidence.contains("wait queue busy; retry after current poll")
+                || evidence.contains("opencode submission is busy"),
             "unsuccessful task-apply without lock-busy evidence: {}",
             command.command
         );
@@ -2083,18 +2084,53 @@ fn verify_ack_stall_recovery(spec: AckStallRecoverySpec<'_>) {
                 && command.command.contains(queue_path)
         })
         .expect("recovery task-apply missing");
-    assert!(stall_ack < task_apply, "stall ACK preceded task-apply");
+    for index in [stall_ack, event_current, task_apply] {
+        assert!(
+            commands[index].start > 0
+                && commands[index].start != i64::MAX
+                && commands[index].end >= commands[index].start
+                && commands[index].end != i64::MAX,
+            "missing or invalid tool timestamps"
+        );
+    }
+    assert!(
+        commands[stall_ack].end <= commands[event_current].start,
+        "stall ACK must finish before event-current"
+    );
+    assert!(
+        commands[event_current].end <= commands[task_apply].start,
+        "event-current must finish before task-apply"
+    );
+    assert!(stall_ack < task_apply, "stall ACK must precede task-apply");
     assert!(
         event_current < task_apply,
         "event-current preceded recovery application"
     );
-    assert!(
-        commands.iter().any(|command| {
+    let post_apply_readiness = commands
+        .iter()
+        .find(|command| {
             command.success
                 && command.command.contains("queue readiness")
                 && command.command.contains(queue_path)
-        }),
-        "recovery readiness missing"
+                && command.start >= commands[task_apply].end
+                && command.start != i64::MAX
+                && command.end >= command.start
+                && command.end != i64::MAX
+        })
+        .expect("successful readiness after task-apply missing");
+    let checked_at = readiness["checked_at"]
+        .as_f64()
+        .expect("readiness checked_at");
+    assert!(
+        checked_at * 1000.0 >= post_apply_readiness.start as f64
+            && checked_at * 1000.0 <= post_apply_readiness.end as f64 + 1.0,
+        "readiness file does not belong to the post-apply invocation"
+    );
+    let readiness_output: J = serde_json::from_str(post_apply_readiness.output.trim())
+        .expect("readiness command JSON output");
+    assert_eq!(
+        readiness_output, readiness,
+        "persisted readiness must match the post-apply command output"
     );
     assert!(
         !commands.iter().any(|command| {

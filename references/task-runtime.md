@@ -250,6 +250,7 @@ worker's actual collector/release identity, and requires exactly two acknowledge
 deliveries for that session, a unique final artifact, `next_action.kind=complete`,
 one successful task-apply, and completed timestamp-ordered tool records using the
 exact queue path. Failed task-apply attempts are allowed only with lock-busy shell
-evidence. Readiness must name the stall delivery and coordinator session. It does
+evidence. Readiness must name the stall delivery and coordinator session, run after
+successful application, and match the persisted document and invocation time. It does
 not cover a coordinator/server crash or restart; no supported OpenCode transport
 restart API is added.

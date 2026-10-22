@@ -603,7 +603,10 @@ ordered by their timestamps and use shell exit metadata: successful ACK,
 event-current, task-apply and readiness calls must use the exact disposable queue
 path. Readiness must name the stall delivery and coordinator session in
 `last_confirmed_receipt`, not merely report `active_wakeup`. The first-turn ACK
-snapshot is retained as bounded failure evidence. Transient `active` and
+snapshot is retained as bounded summary failure evidence (counts and identities,
+not a full tool transcript). Readiness must execute after successful task-apply;
+its checked_at must fall within that tool invocation and its returned JSON must
+equal the persisted readiness document. Transient `active` and
 `delivery_status` values are recorded only as observations and are not assumed
 to persist.
 
@@ -612,3 +615,10 @@ restart proof. There is no supported OpenCode coordinator transport restart API;
 do not delete runtime state or start a second server to simulate one. The scenario
 does not claim independent acceptance, customer delivery, Codex parity, or a
 twenty-task campaign. #38 and #32 remain OPEN.
+
+Primary live verification passed in 126.75 seconds after the post-apply readiness
+checks were added; selected OpenCode configuration bytes were unchanged. An
+earlier run passed in 115.96 seconds before that tightening and is not used as
+evidence for the final chronology assertions. The initial non-live compile
+failure (undeclared Value::Null) was corrected to the existing J alias; its log
+is retained during this unfinished acceptance work.
