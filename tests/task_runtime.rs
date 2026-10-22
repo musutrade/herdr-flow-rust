@@ -172,6 +172,14 @@ fn setup_in_queue(
     role: &str,
     q: &Path,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
+    setup_in_queue_with_apply_timeout(env, role, q, None)
+}
+fn setup_in_queue_with_apply_timeout(
+    env: &TaskEnvironment,
+    role: &str,
+    q: &Path,
+    apply_timeout_seconds: Option<f64>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = env.workspace_root.join("source");
     common::create_dir_all(&source).unwrap();
     git(&source, &["init", "-q"]);
@@ -214,11 +222,15 @@ fn setup_in_queue(
         state["tasks"]["project"]["requirements"]["1"]["authorization"]["develop"] =
             json!({"action":"development","source":"explicit disposable native development test"});
     }
+    let mut activity = json!({"kind":"activity","activity":"review","role":role,"input":sha,"session_epoch":1,
+        "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":wait_owner,"reason":wait_reason,"condition":"report","timeout_seconds":600}});
+    if let Some(timeout) = apply_timeout_seconds {
+        activity["apply_timeout_seconds"] = json!(timeout);
+    }
     for spec in [
         json!({"kind":"artifact","artifact":{"id":sha,"adapter":"git","location":source}}),
         json!({"kind":"candidate","candidate":sha,"reason":"review"}),
-        json!({"kind":"activity","activity":"review","role":role,"input":sha,"session_epoch":1,
-            "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":wait_owner,"reason":wait_reason,"condition":"report","timeout_seconds":600}}),
+        activity,
     ] {
         let mut spec = spec;
         spec["task"] = json!("project");

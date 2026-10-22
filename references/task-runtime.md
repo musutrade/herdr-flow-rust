@@ -233,3 +233,18 @@ other callers must honor that runtime guard and must not send directly through
 the same session concurrently. The absence check alone is not an atomic claim
 against a sender that ignores this ownership contract. This is not same-UID
 isolation or a generalized guarantee for independent concurrent send APIs.
+
+### ACK/stall recovery boundary
+
+The opt-in `installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver`
+scenario exercises a same-session omission, not a process restart. A real native
+development result arrives and is ACKed by the coordinator, which then stops
+without applying it. After the task's 60-second apply deadline (measured from
+result arrival, not ACK), the production queue watcher emits a `progress_stall`;
+the same coordinator session ACKs that alarm, checks the exact stall event with
+`event-current`, and applies the exact acknowledged original event once with the
+actual collector output. The driver does not tick, ACK, apply or mutate the
+deadline/watch state. The test retains an ACK-only snapshot and requires exactly
+two deliveries for that session, a unique final artifact, the recorded release
+receipt, and completed tool records. It does not cover a coordinator/server crash
+or restart; no supported OpenCode transport restart API is added.
