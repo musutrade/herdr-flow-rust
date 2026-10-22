@@ -244,7 +244,12 @@ result arrival, not ACK), the production queue watcher emits a `progress_stall`;
 the same coordinator session ACKs that alarm, checks the exact stall event with
 `event-current`, and applies the exact acknowledged original event once with the
 actual collector output. The driver does not tick, ACK, apply or mutate the
-deadline/watch state. The test retains an ACK-only snapshot and requires exactly
-two deliveries for that session, a unique final artifact, the recorded release
-receipt, and completed tool records. It does not cover a coordinator/server crash
-or restart; no supported OpenCode transport restart API is added.
+deadline/watch state. The test retains an ACK-only snapshot with no stall and one
+original-event delivery, requires distinct worker/coordinator sessions and the
+worker's actual collector/release identity, and requires exactly two acknowledged
+deliveries for that session, a unique final artifact, `next_action.kind=complete`,
+one successful task-apply, and completed timestamp-ordered tool records using the
+exact queue path. Failed task-apply attempts are allowed only with lock-busy shell
+evidence. Readiness must name the stall delivery and coordinator session. It does
+not cover a coordinator/server crash or restart; no supported OpenCode transport
+restart API is added.

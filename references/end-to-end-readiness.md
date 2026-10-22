@@ -589,15 +589,23 @@ exact ID (both events share the same wait), and apply the original collector
 output once. The driver never ticks, ACKs, applies, edits a deadline, or writes
 watch/heartbeat state.
 
-The test preserves an intermediate ACK-only snapshot before recovery. It requires
-an observed ACK-only turn, exactly two deliveries bound to the same real session,
-the original event acknowledged but unapplied at the snapshot, and no first-turn
-task-apply. Final checks require the original event applied, the stall event not
-applied, one new artifact equal to the collector output, the actual release
-receipt, completed ACK/event-current/task-apply/readiness tool records, and a
-clean owned-resource teardown. The first-turn ACK snapshot is retained as bounded
-failure evidence. Transient `active` and `delivery_status` values are recorded
-only as observations and are not assumed to persist.
+The test preserves an intermediate ACK-only snapshot before recovery. At that
+snapshot it requires no stall event yet, exactly one delivery containing only the
+exact original event, the original event acknowledged but unapplied, and no
+completed first-turn task-apply command. The coordinator and worker sessions must
+differ, and the worker's actual collector report and release receipt must name
+that worker. Final checks require the original event applied, the stall event not
+applied, `next_action.kind=complete`, one successful task-apply (failed attempts
+are allowed only with lock-busy shell evidence), one new artifact equal to the
+collector output, the actual release receipt, and exactly two distinct
+acknowledged delivery identities for the coordinator session. Tool records are
+ordered by their timestamps and use shell exit metadata: successful ACK,
+event-current, task-apply and readiness calls must use the exact disposable queue
+path. Readiness must name the stall delivery and coordinator session in
+`last_confirmed_receipt`, not merely report `active_wakeup`. The first-turn ACK
+snapshot is retained as bounded failure evidence. Transient `active` and
+`delivery_status` values are recorded only as observations and are not assumed
+to persist.
 
 This is same-session omission and stall recovery, not a process-crash or server-
 restart proof. There is no supported OpenCode coordinator transport restart API;

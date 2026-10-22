@@ -1177,21 +1177,21 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     };
 
     if apply_ack_stall_recovery {
-        verify_ack_stall_recovery(
-            &q,
-            &guard,
-            &registered,
-            &client,
-            &endpoint,
-            &cwd,
-            &developer_release,
-            development_result.as_ref().unwrap(),
-            &base.join("ack-only-snapshot.json"),
-        );
+        verify_ack_stall_recovery(AckStallRecoverySpec {
+            q: &q,
+            guard: &guard,
+            registered: &registered,
+            client: &client,
+            endpoint: &endpoint,
+            cwd: &cwd,
+            developer_release: &developer_release,
+            result: development_result.as_ref().unwrap(),
+            snapshot_path: &base.join("ack-only-snapshot.json"),
+        });
         destroy_environment(&env).unwrap();
-        for child in [&mut server, &mut guard_child, &mut queue_child] {
-            child.wait().unwrap();
-        }
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
         assert!(!env.workspace_root.exists());
         assert!(!env.temp_root.exists());
         assert_eq!(occupied_slots().unwrap(), 0);
@@ -1677,23 +1677,47 @@ fn delivery_for_event<'a>(state: &'a J, session: &str, event_id: &str) -> Option
         .map(|(id, delivery)| (id.as_str(), delivery))
 }
 
-fn completed_commands(rows: &J, session: &str) -> Vec<String> {
-    rows.as_array()
+struct ToolCommand {
+    command: String,
+    output: String,
+    error: String,
+    success: bool,
+    start: i64,
+    end: i64,
+}
+
+fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
+    let mut commands: Vec<ToolCommand> = rows
+        .as_array()
         .into_iter()
         .flatten()
         .filter(|row| row["info"]["sessionID"] == session)
         .flat_map(|row| row["parts"].as_array().into_iter().flatten())
-        .filter(|part| {
-            part["type"] == "tool"
-                && part["tool"] == "bash"
-                && part["state"]["status"] == "completed"
-        })
+        .filter(|part| part["type"] == "tool" && part["tool"] == "bash")
         .filter_map(|part| {
-            part["state"]["input"]["command"]
-                .as_str()
-                .map(str::to_string)
+            let command = part["state"]["input"]["command"].as_str()?.to_string();
+            let status = part["state"]["status"].as_str().unwrap_or_default();
+            let exit = part["state"]["metadata"]["exit"].as_i64();
+            let start = part["state"]["time"]["start"].as_i64().unwrap_or(i64::MAX);
+            let end = part["state"]["time"]["end"].as_i64().unwrap_or(start);
+            Some(ToolCommand {
+                command,
+                output: part["state"]["output"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                error: part["state"]["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                success: status == "completed" && exit == Some(0),
+                start,
+                end,
+            })
         })
-        .collect()
+        .collect();
+    commands.sort_by_key(|command| (command.start, command.end));
+    commands
 }
 
 fn session_rows(client: &ureq::Agent, endpoint: &str, session: &str, cwd: &Path) -> J {
@@ -1716,21 +1740,41 @@ fn artifact_ids(state: &J) -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 
-fn verify_ack_stall_recovery(
-    q: &Path,
-    guard: &Path,
-    registered: &J,
-    client: &ureq::Agent,
-    endpoint: &str,
-    cwd: &Path,
-    developer_release: &Path,
-    result: &J,
-    snapshot_path: &Path,
-) {
+struct AckStallRecoverySpec<'a> {
+    q: &'a Path,
+    guard: &'a Path,
+    registered: &'a J,
+    client: &'a ureq::Agent,
+    endpoint: &'a str,
+    cwd: &'a Path,
+    developer_release: &'a Path,
+    result: &'a J,
+    snapshot_path: &'a Path,
+}
+
+fn verify_ack_stall_recovery(spec: AckStallRecoverySpec<'_>) {
+    let AckStallRecoverySpec {
+        q,
+        guard,
+        registered,
+        client,
+        endpoint,
+        cwd,
+        developer_release,
+        result,
+        snapshot_path,
+    } = spec;
     let session_id = registered["session"]
         .as_str()
         .expect("registered receiver session");
-    assert_eq!(result["session"], registered["session"]);
+    let worker_session = result["session"]
+        .as_str()
+        .filter(|session| !session.is_empty())
+        .expect("worker result session");
+    assert_ne!(
+        worker_session, session_id,
+        "worker must not be the coordinator"
+    );
     let output = &result["output"];
     let output_id = output["id"].as_str().expect("developer output id");
     assert_ne!(output_id, output["input"].as_str().unwrap_or_default());
@@ -1752,9 +1796,40 @@ fn verify_ack_stall_recovery(
                             .is_some_and(|pending| pending.iter().any(|event| event == &id)));
                         assert!(state["tasks"]["project"]["approved"].is_null());
                         assert!(!artifact_ids(&state).contains(output_id));
+                        assert!(
+                            exact_stall_events(&state).is_empty(),
+                            "progress_stall existed before the ACK-only snapshot"
+                        );
+                        assert_eq!(
+                            state["deliveries"].as_object().map(|items| items.len()),
+                            Some(1),
+                            "ACK-only snapshot requires exactly one delivery"
+                        );
+                        assert_eq!(record["events"], json!([id.as_str()]));
+                        let signal = util::read_json(Path::new(
+                            event["evidence"].as_str().expect("result evidence path"),
+                        ))
+                        .unwrap();
+                        let worker_report = signal["evidence"]
+                            .as_str()
+                            .expect("worker collector report path");
+                        let report = util::read_json(Path::new(worker_report)).unwrap();
+                        assert_eq!(report["session"], json!(worker_session));
+                        assert_eq!(report["output"], *output);
+                        let snapshot_rows = session_rows(client, endpoint, session_id, cwd);
+                        let snapshot_commands = tool_commands(&snapshot_rows, session_id);
+                        let first_turn_task_apply = snapshot_commands
+                            .iter()
+                            .filter(|command| command.command.contains("queue task-apply"))
+                            .count();
+                        assert_eq!(
+                            first_turn_task_apply, 0,
+                            "first coordinator turn ran task-apply instead of stopping after ACK"
+                        );
                         let snapshot = json!({
                             "observed_at": util::now(),
-                            "session": session_id,
+                            "coordinator_session": session_id,
+                            "worker_session": worker_session,
                             "delivery": delivery,
                             "delivery_phase": record["phase"],
                             "delivery_status": state["delivery_status"],
@@ -1765,10 +1840,14 @@ fn verify_ack_stall_recovery(
                             "original_output": output,
                             "original_acknowledged": event["acknowledged"],
                             "original_applied": event["applied"],
+                            "worker_report": worker_report,
                             "task_state_version": task["state_version"],
                             "task_phase": task["phase"],
                             "pending": task["pending"],
                             "artifact_ids": artifact_ids(&state),
+                            "first_turn_no_task_apply": true,
+                            "first_turn_task_apply_commands": first_turn_task_apply,
+                            "first_turn_commands_observed": snapshot_commands.len(),
                         });
                         util::atomic_write_json(snapshot_path, &snapshot).unwrap();
                         break (id, delivery.to_string(), snapshot);
@@ -1792,16 +1871,10 @@ fn verify_ack_stall_recovery(
     );
     assert_eq!(snapshot_on_disk["original_output"], *output);
     assert_eq!(snapshot_on_disk["original_applied"], false);
-    let snapshot_rows = session_rows(client, endpoint, session_id, cwd);
-    let snapshot_commands = completed_commands(&snapshot_rows, session_id);
-    assert!(
-        !snapshot_commands
-            .iter()
-            .any(|command| command.contains("queue task-apply")),
-        "first coordinator turn ran task-apply instead of stopping after ACK"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(180);
+    assert_eq!(snapshot_on_disk["first_turn_no_task_apply"], true);
+    assert_eq!(snapshot_on_disk["first_turn_task_apply_commands"], 0);
+    assert_eq!(snapshot_on_disk["coordinator_session"], session_id);
+    assert_eq!(snapshot_on_disk["worker_session"], worker_session);
     let stall_id = loop {
         let state = queue::load_queue(q).unwrap();
         let stalls = exact_stall_events(&state);
@@ -1810,6 +1883,18 @@ fn verify_ack_stall_recovery(
             assert_eq!(event["kind"], "progress_stall");
             assert_eq!(event["reason"], "result_unapplied");
             assert_eq!(event["wait"], "review");
+            assert_eq!(event["task"], "review");
+            assert_eq!(event["state_version"], snapshot["task_state_version"]);
+            assert_eq!(event["binding"], snapshot["original_binding"]);
+            let original = &state["events"][original_id.as_str()];
+            let task = &state["tasks"]["review"];
+            assert_eq!(original, &snapshot["original_event"]);
+            assert_eq!(original["acknowledged"], true);
+            assert_eq!(original["applied"], false);
+            assert_eq!(task["phase"], "result_pending");
+            assert!(task["pending"]
+                .as_array()
+                .is_some_and(|pending| pending.iter().any(|item| item == &original_id)));
             break id.clone();
         }
         assert!(
@@ -1820,7 +1905,6 @@ fn verify_ack_stall_recovery(
     };
     assert_ne!(original_id, stall_id);
 
-    let deadline = Instant::now() + Duration::from_secs(180);
     let state = loop {
         let state = queue::load_queue(q).unwrap();
         let original = &state["events"][original_id.as_str()];
@@ -1832,12 +1916,15 @@ fn verify_ack_stall_recovery(
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
+        let stall_delivery = stall_delivery.to_string();
         let submission_complete = util::read_json(&guard.join("submission.json"))
             .is_ok_and(|submission| submission["phase"] == "complete");
         let readiness = util::read_json(&q.join("readiness.json")).ok();
-        let ready = readiness
-            .as_ref()
-            .is_some_and(|value| value["active_wakeup"] == true);
+        let ready = readiness.as_ref().is_some_and(|value| {
+            value["active_wakeup"] == true
+                && value["last_confirmed_receipt"]["delivery"] == stall_delivery.as_str()
+                && value["last_confirmed_receipt"]["session"] == session_id
+        });
         let complete = original["applied"] == true
             && state["tasks"]["review"]["phase"] == "completed"
             && state["tasks"]["review"]["pending"] == json!([])
@@ -1853,7 +1940,7 @@ fn verify_ack_stall_recovery(
         if complete {
             assert_eq!(initial["events"], json!([original_id.as_str()]));
             assert_eq!(stall_record["events"], json!([stall_id.as_str()]));
-            break (state, stall_delivery.to_string());
+            break (state, stall_delivery);
         }
         assert!(
             Instant::now() < deadline,
@@ -1869,6 +1956,17 @@ fn verify_ack_stall_recovery(
     assert_eq!(original["acknowledged"], true);
     assert_eq!(original["applied"], true);
     assert_eq!(original["applied_version"], task["state_version"]);
+    assert_eq!(task["next_action"]["kind"], "complete");
+    let readiness = util::read_json(&q.join("readiness.json")).unwrap();
+    assert_eq!(readiness["active_wakeup"], true);
+    assert_eq!(
+        readiness["last_confirmed_receipt"]["delivery"].as_str(),
+        Some(stall_delivery.as_str())
+    );
+    assert_eq!(
+        readiness["last_confirmed_receipt"]["session"].as_str(),
+        Some(session_id)
+    );
     assert!(!stall["applied"].as_bool().unwrap_or(false));
     assert_eq!(state["events"].as_object().unwrap().len(), 2);
     assert_eq!(state["tasks"]["project"]["approved"], Value::Null);
@@ -1896,49 +1994,94 @@ fn verify_ack_stall_recovery(
         "version B"
     );
     let receipt = util::read_json(developer_release).unwrap();
-    assert_eq!(receipt["session"], result["session"]);
+    assert_eq!(receipt["session"].as_str(), Some(worker_session));
+    assert_eq!(result["session"].as_str(), Some(worker_session));
     assert_eq!(task["last_release"]["evidence"], receipt["status"]);
 
     let rows = session_rows(client, endpoint, session_id, cwd);
-    let commands = completed_commands(&rows, session_id);
-    let ack_commands: Vec<_> = commands
-        .iter()
-        .filter(|command| command.contains("queue ack"))
-        .collect();
-    assert!(ack_commands.len() >= 2, "both deliveries require ACK");
+    let commands = tool_commands(&rows, session_id);
     assert!(
-        ack_commands
+        commands
+            .windows(2)
+            .all(|pair| pair[0].start <= pair[1].start),
+        "tool command timestamps are not chronological"
+    );
+    let queue_path = q.to_str().unwrap();
+    let successful_acks: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.success
+                && command.command.contains("queue ack")
+                && command.command.contains(queue_path)
+        })
+        .collect();
+    assert!(
+        successful_acks.len() >= 2,
+        "both deliveries require successful ACK calls"
+    );
+    assert!(
+        successful_acks
             .iter()
-            .any(|command| command.contains(initial_delivery.as_str())),
+            .any(|command| command.command.contains(initial_delivery.as_str())),
         "initial delivery ACK missing"
     );
     assert!(
-        ack_commands
+        successful_acks
             .iter()
-            .any(|command| command.contains(stall_delivery.as_str())),
+            .any(|command| command.command.contains(stall_delivery.as_str())),
         "stall delivery ACK missing"
     );
-    assert!(
-        commands
-            .iter()
-            .any(|command| command.contains("queue task-apply")),
-        "recovery task-apply missing"
+    let task_apply_attempts: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.command.contains("queue task-apply") && command.command.contains(queue_path)
+        })
+        .collect();
+    let successful_task_apply: Vec<_> = task_apply_attempts
+        .iter()
+        .filter(|command| command.success)
+        .collect();
+    assert_eq!(
+        successful_task_apply.len(),
+        1,
+        "exactly one successful task-apply required"
     );
+    for command in task_apply_attempts
+        .iter()
+        .filter(|command| !command.success)
+    {
+        let evidence = format!("{} {}", command.output, command.error).to_ascii_lowercase();
+        assert!(
+            evidence.contains("busy"),
+            "unsuccessful task-apply without lock-busy evidence: {}",
+            command.command
+        );
+    }
     let stall_ack = commands
         .iter()
         .position(|command| {
-            command.contains("queue ack") && command.contains(stall_delivery.as_str())
+            command.success
+                && command.command.contains("queue ack")
+                && command.command.contains(stall_delivery.as_str())
+                && command.command.contains(queue_path)
         })
-        .expect("stall ACK command missing");
+        .expect("successful stall ACK command missing");
     let event_current = commands
         .iter()
         .position(|command| {
-            command.contains("queue event-current") && command.contains(stall_id.as_str())
+            command.success
+                && command.command.contains("queue event-current")
+                && command.command.contains(stall_id.as_str())
+                && command.command.contains(queue_path)
         })
-        .expect("event-current was not run for the stall alarm");
+        .expect("event-current was not run successfully for the stall alarm");
     let task_apply = commands
         .iter()
-        .position(|command| command.contains("queue task-apply"))
+        .position(|command| {
+            command.success
+                && command.command.contains("queue task-apply")
+                && command.command.contains(queue_path)
+        })
         .expect("recovery task-apply missing");
     assert!(stall_ack < task_apply, "stall ACK preceded task-apply");
     assert!(
@@ -1946,16 +2089,18 @@ fn verify_ack_stall_recovery(
         "event-current preceded recovery application"
     );
     assert!(
-        commands
-            .iter()
-            .any(|command| command.contains("queue readiness")),
+        commands.iter().any(|command| {
+            command.success
+                && command.command.contains("queue readiness")
+                && command.command.contains(queue_path)
+        }),
         "recovery readiness missing"
     );
     assert!(
-        !commands
-            .iter()
-            .any(|command| command.contains("queue task-apply")
-                && command.contains(stall_id.as_str())),
+        !commands.iter().any(|command| {
+            command.command.contains("queue task-apply")
+                && command.command.contains(stall_id.as_str())
+        }),
         "progress_stall was applied as a result"
     );
     println!(
