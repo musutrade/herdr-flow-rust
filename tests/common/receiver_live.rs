@@ -2243,18 +2243,19 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_eq!(occupied_slots().unwrap(), 0);
         return;
     }
-    if let Some(cwd) = missing_cwd.as_ref() {
+    if let Some(reviewer_cwd) = missing_cwd.as_ref() {
         let source = env.workspace_root.join("source");
         let source_head = git(&source, &["rev-parse", "HEAD"]);
         let source_file = git(&source, &["show", "HEAD:file"]);
-        let reviewer_head = git(cwd, &["rev-parse", "HEAD"]);
-        let reviewer_file = git(cwd, &["show", "HEAD:file"]);
-        let report_path = cwd.join(".herdr-verdict.json");
+        let reviewer_head = git(reviewer_cwd, &["rev-parse", "HEAD"]);
+        let reviewer_file = git(reviewer_cwd, &["show", "HEAD:file"]);
+        let report_path = reviewer_cwd.join(".herdr-verdict.json");
         let application_path = cwd.join("missing-report-application.json");
         assert!(!report_path.exists());
         let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
         let wait_before = queue::load_queue(&q).unwrap()["waits"]["review"].clone();
         let runtime_root = task_runtime::prepare(&env, "review").unwrap();
+        let diagnostic_path = q.parent().unwrap().join("missing-report-evidence.json");
         failure_evidence.0.push(runtime_root.join("server.log"));
         failure_evidence.0.push(runtime_root.join("creation.json"));
         failure_evidence.0.push(runtime_root.join("dispatch.json"));
@@ -2263,8 +2264,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             .push(runtime_root.join("submission.json"));
         failure_evidence.0.push(report_path.clone());
         failure_evidence.0.push(application_path.clone());
+        failure_evidence.0.push(diagnostic_path.clone());
         let instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD with `git show HEAD:file` in a separate direct bash invocation; preserve its actual exit and output. Then finish your turn without writing .herdr-verdict.json and without claiming acceptance passed/failed. This is an explicit disposable missing-report probe, not a product verdict. Do not edit tracked files, commit, approve, answer a question, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
-        let mut turn = acceptance_live::native_prepare(&mut env, &q, cwd, "review", instruction);
+        let mut turn =
+            acceptance_live::native_prepare(&mut env, &q, reviewer_cwd, "review", instruction);
         acceptance_live::native_dispatch(&env, &turn);
         let submission = util::read_json(&turn.root.join("submission.json")).unwrap();
         let message = submission["message_id"]
@@ -2278,6 +2281,17 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert!(!report_path.exists());
         let result = acceptance_live::native_finish(&env, &mut turn);
         assert!(!report_path.exists(), "reviewer wrote a verdict report");
+        assert!(result["phase"] == "signalled");
+        assert_eq!(result["outcome"], "complete");
+        assert!(result["session"]
+            .as_str()
+            .is_some_and(|session| !session.trim().is_empty()));
+        assert!(result["message_id"]
+            .as_str()
+            .is_some_and(|message| !message.trim().is_empty()));
+        assert!(result["reply_id"]
+            .as_str()
+            .is_some_and(|reply| !reply.trim().is_empty()));
         assert!(result["report"]
             .as_str()
             .is_some_and(|report| !report.trim().is_empty()));
@@ -2345,6 +2359,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_eq!(actual_submission["reply_id"], result["reply_id"]);
         assert!(parent["approved"].is_null());
         assert!(parent["verdicts"]["review"].is_null());
+        assert_eq!(parent["continuation"]["id"], "review");
         assert_eq!(parent["continuation"]["action"]["kind"], "restore");
         assert_eq!(
             parent["continuation"]["execution_problem"],
@@ -2353,6 +2368,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_eq!(parent["continuation"]["phase"], "planned");
         assert_eq!(parent["continuation"]["verdict"], J::Null);
         assert_eq!(parent["continuation"]["binding"], event["binding"]);
+        assert_eq!(event["evidence"], json!(q.join("results/review.json")));
+        assert_eq!(event["applied_version"], task["state_version"]);
         assert_eq!(parent["requirements"], parent_before["requirements"]);
         assert_eq!(parent["candidate"], parent_before["candidate"]);
         assert_eq!(
@@ -2365,7 +2382,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         assert_eq!(task["phase"], "blocked");
         assert_eq!(task["pending"], json!([]));
+        assert!(task["verdict"].is_null());
         assert_eq!(task["candidate"], parent["candidate"]);
+        assert_eq!(source_head, reviewer_head);
+        assert_eq!(parent["candidate"], source_head);
         let task_names: std::collections::BTreeSet<_> = state["tasks"]
             .as_object()
             .unwrap()
@@ -2375,15 +2395,74 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_eq!(task_names, ["project", "review"].into_iter().collect());
         assert_eq!(git(&source, &["rev-parse", "HEAD"]), source_head);
         assert_eq!(git(&source, &["show", "HEAD:file"]), source_file);
-        assert_eq!(git(cwd, &["rev-parse", "HEAD"]), reviewer_head);
-        assert_eq!(git(cwd, &["show", "HEAD:file"]), reviewer_file);
-        let rows = session_rows(
+        assert_eq!(git(reviewer_cwd, &["rev-parse", "HEAD"]), reviewer_head);
+        assert_eq!(git(reviewer_cwd, &["show", "HEAD:file"]), reviewer_file);
+        let reviewer_rows = session_rows(
+            &client,
+            &endpoint,
+            result["session"].as_str().unwrap(),
+            reviewer_cwd,
+        );
+        let coordinator_rows = session_rows(
             &client,
             &endpoint,
             registered["session"].as_str().unwrap(),
             &cwd,
         );
-        let commands = tool_commands(&rows, registered["session"].as_str().unwrap());
+        let reviewer_commands = tool_commands(&reviewer_rows, result["session"].as_str().unwrap());
+        let commands = tool_commands(&coordinator_rows, registered["session"].as_str().unwrap());
+        let readiness = util::read_json(&q.join("readiness.json")).unwrap();
+        let diagnostic = json!({
+            "reviewer": {
+                "session": result["session"],
+                "message": message,
+                "reply_id": result["reply_id"],
+                "report": result["report"].as_str().unwrap_or_default().chars().take(1024).collect::<String>(),
+            },
+            "reviewer_tools": reviewer_commands.iter()
+                .filter(|command| command.command.trim() == "git show HEAD:file")
+                .take(8)
+                .map(|command| json!({
+                    "command": command.command.chars().take(512).collect::<String>(),
+                    "exit": command.exit, "status": command.status,
+                    "start": command.start, "end": command.end
+                })).collect::<Vec<_>>(),
+            "application": {
+                "task": application["task"], "event": application["event"],
+                "state_version": application["state_version"],
+                "execution_problem": application["execution_problem"],
+                "next_action": application["next_action"],
+            },
+            "coordinator_commands": commands.iter()
+                .filter(|command| command.command.contains("queue ack")
+                    || command.command.contains("queue task-apply")
+                    || command.command.contains("queue readiness"))
+                .take(8)
+                .map(|command| json!({
+                    "command": command.command.chars().take(512).collect::<String>(),
+                    "exit": command.exit, "status": command.status,
+                    "start": command.start, "end": command.end
+                })).collect::<Vec<_>>(),
+            "readiness": {
+                "active_wakeup": readiness["active_wakeup"],
+                "checked_at": readiness["checked_at"],
+                "last_confirmed_receipt": readiness["last_confirmed_receipt"],
+            },
+        });
+        util::atomic_write_json(&diagnostic_path, &diagnostic).unwrap();
+        let inspection = reviewer_commands
+            .iter()
+            .find(|command| command.command.trim() == "git show HEAD:file")
+            .expect("reviewer fixed-A inspection evidence");
+        assert!(
+            terminal_tool_state(inspection) && inspection.success,
+            "reviewer fixed-A inspection was not successful"
+        );
+        assert_eq!(inspection.exit, Some(0));
+        assert_eq!(inspection.output.trim(), "version A");
+        assert!(inspection.start > 0 && inspection.start != i64::MAX);
+        assert!(inspection.end >= inspection.start && inspection.end != i64::MAX);
+        exact_terminal_completion_millis(&reviewer_rows, &result, reviewer_cwd, "reviewer");
         assert_missing_report_application_commands(
             &q,
             &state,
@@ -5713,14 +5792,33 @@ fn assert_missing_report_application_commands(
             command.success
                 && command.command.contains("queue readiness")
                 && exact_path_argument(&command.command, "--state-dir", q)
+                && command.start >= apply.end
         })
-        .expect("successful missing-report readiness");
+        .expect("post-apply missing-report readiness");
     for command in [ack, apply, readiness] {
         assert!(command.start > 0 && command.start != i64::MAX);
         assert!(command.end >= command.start && command.end != i64::MAX);
     }
     assert!(ack.end <= apply.start);
     assert!(apply.end <= readiness.start);
+    let readiness_doc = util::read_json(&q.join("readiness.json")).unwrap();
+    assert_eq!(readiness_doc["active_wakeup"], true);
+    assert_eq!(
+        readiness_doc["last_confirmed_receipt"]["delivery"],
+        delivery.0
+    );
+    assert_eq!(readiness_doc["last_confirmed_receipt"]["session"], session);
+    let readiness_output: J =
+        serde_json::from_str(readiness.output.trim()).expect("readiness command JSON output");
+    assert_eq!(readiness_output, readiness_doc);
+    let checked_at = readiness_doc["checked_at"]
+        .as_f64()
+        .expect("readiness checked_at");
+    assert!(
+        checked_at * 1000.0 >= readiness.start as f64
+            && checked_at * 1000.0 <= readiness.end as f64 + 1.0,
+        "readiness file does not belong to the post-apply invocation"
+    );
     for command in commands.iter().filter(|command| {
         !command.success
             && command.command.contains("queue task-apply")

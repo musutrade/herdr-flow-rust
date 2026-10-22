@@ -928,6 +928,8 @@ readiness, parent `approved=null`, null parent verdict, blocked child with empty
 pending, and a planned restore continuation bound to the exact event. Requirement,
 candidate, round, revision, authorization and source/reviewer snapshots remain
 unchanged; exactly one event/delivery exists and no new activity, real restore,
-delivery or user decision occurs. Bounded native/child cleanup and failure evidence
-are retained. The scenario has not yet been run; no model-success claim is made.
-#38/#32 remain OPEN.
+delivery or user decision occurs. Report absence is observed at sample points
+before dispatch, after collection and after final apply; this does not prove the
+file was never transiently created and deleted, and the driver never deletes it.
+Bounded native/child cleanup and failure evidence are retained. The scenario has
+not yet been run; no model-success claim is made. #38/#32 remain OPEN.
