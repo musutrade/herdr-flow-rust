@@ -1,6 +1,7 @@
 //! Opt-in real receiver proof; the driver never acknowledges or ticks the queue.
 use super::*;
 use herdr_flow::{opencode::session, util};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -141,6 +142,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_ack_stall_recovery: true,
         apply_late_acceptance: false,
         apply_unable_restore: false,
+        apply_restored_review: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -167,6 +169,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_ack_stall_recovery: false,
         apply_late_acceptance: true,
         apply_unable_restore: false,
+        apply_restored_review: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -193,6 +196,34 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_ack_stall_recovery: false,
         apply_late_acceptance: false,
         apply_unable_restore: true,
+        apply_restored_review: false,
+        unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real OpenCode unavailable dependency restore, installed operator fixture and fresh passing review"]
+fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: true,
+        apply_restored_review: true,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -245,6 +276,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_ack_stall_recovery: false,
         apply_late_acceptance: false,
         apply_unable_restore: false,
+        apply_restored_review: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -625,6 +657,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_ack_stall_recovery: false,
             apply_late_acceptance: false,
             apply_unable_restore: false,
+            apply_restored_review: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -794,6 +827,7 @@ struct ReceiverSpec<'a> {
     apply_ack_stall_recovery: bool,
     apply_late_acceptance: bool,
     apply_unable_restore: bool,
+    apply_restored_review: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -823,6 +857,7 @@ fn run_native_receiver(
         apply_ack_stall_recovery: false,
         apply_late_acceptance: false,
         apply_unable_restore: false,
+        apply_restored_review: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -842,6 +877,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_ack_stall_recovery,
         apply_late_acceptance,
         apply_unable_restore,
+        apply_restored_review,
         unavailable_dependency,
         base,
         formal_target,
@@ -894,6 +930,20 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_some()),
         "unable restore requires OpenCode development+acceptance with a dependency"
     );
+    assert!(
+        !apply_restored_review
+            || (apply_unable_restore
+                && development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && unavailable_dependency.is_some()),
+        "restored review requires the phase-1 unable mode"
+    );
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -918,6 +968,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     };
     let reviewer_root =
         apply_acceptance.then(|| task_runtime::prepare(&env, reviewer_name).unwrap());
+    let restored_reviewer_root =
+        apply_restored_review.then(|| task_runtime::prepare(&env, "accept-restored").unwrap());
     let repair_root = apply_repair.then(|| task_runtime::prepare(&env, "repair-native").unwrap());
     let final_reviewer_root =
         apply_repair.then(|| task_runtime::prepare(&env, "accept-final").unwrap());
@@ -925,6 +977,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     for runtime in [
         &worker_root,
         &reviewer_root,
+        &restored_reviewer_root,
         &repair_root,
         &final_reviewer_root,
     ]
@@ -955,6 +1008,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     if apply_late_acceptance {
         artifact_names.extend(["late-reviewer-checkout", "late-candidate"]);
+    }
+    if apply_restored_review {
+        artifact_names.push("restored-reviewer-checkout");
     }
     let artifact_roots: Vec<_> = if apply_development {
         artifact_names
@@ -992,6 +1048,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         evidence_paths.extend([
             reviewer_root.join("server.log"),
             reviewer_root.join("submission.json"),
+        ]);
+    }
+    if let Some(restored_reviewer_root) = &restored_reviewer_root {
+        evidence_paths.extend([
+            restored_reviewer_root.join("server.log"),
+            restored_reviewer_root.join("submission.json"),
+            env.workspace_root
+                .join("restored-reviewer-checkout/.herdr-verdict.json"),
+            q.parent().unwrap().join("restore-dependency-install.json"),
+            q.parent().unwrap().join("restore-tool-evidence.json"),
         ]);
     }
     if let Some(repair_root) = &repair_root {
@@ -1037,6 +1103,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         if let Some(reviewer_root) = &reviewer_root {
             allow_owned_external_directory(&mut config, reviewer_root);
         }
+        if let Some(restored_reviewer_root) = &restored_reviewer_root {
+            allow_owned_external_directory(&mut config, restored_reviewer_root);
+        }
         if let Some(repair_root) = &repair_root {
             allow_owned_external_directory(&mut config, repair_root);
         }
@@ -1069,11 +1138,36 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     if apply_acceptance {
         instruction_text = instruction_text.replace("Exactly one real development result for task review will arrive.", "This is a two-stage protocol in the same coordinator session: first development task review, then independent acceptance task accept-native. Each stage has its own notification. Handle task review as follows.").replace("This is not independent acceptance or delivery.", "This first stage does not establish independent acceptance or delivery.");
+        if apply_restored_review {
+            instruction_text = instruction_text.replace(
+                "This is a two-stage protocol in the same coordinator session: first development task review, then independent acceptance task accept-native. Each stage has its own notification.",
+                "This is a four-notification protocol in the same coordinator session: development review, unable accept-native, ACK-only operator install, then fresh accept-restored. Each notification is separate.");
+        }
         if apply_late_acceptance {
             instruction_text.push_str(&format!("\nAfter development, a second accept-native notification will arrive only after delivery is re-enabled. Its result was collected while snapshot A was current; candidate B was selected afterward. This is delayed delivery of a pre-collected result, not collection after replacement. Run the ACK, event-current and task-apply commands directly in separate bash tool invocations; do not group them into a script or one shell call. Preserve each original exit status: never append echo, status-printing, pipes, shell wrappers, or OR-true. The bash tool metadata records the native exit code automatically; do not print or capture it yourself. For that notification: ACK its exact delivery first, and treat ACK as receipt only. Read queue.json and use the exact pending accept-native event ID and the exact registered immutable verdict ID/binding. Run {binary} queue event-current --state-dir {queue_path} --event THAT_EVENT and expect exit 1 with JSON current=false; do not retry it and do not treat false as success. Write the application at the exact path {application} with task=accept-native, current child state_version, that exact stale event, that registered verdict ID, no output or acceptance fields, and next_action mapped from the actual registered report conclusion (passed->delivery, failed->repair, unable->restore, ambiguous->clarify), owner=native coordinator, reason=independent report, condition=existing authorization. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once and require the exact nonzero stale rejection; record the actual command output/exit and do not retry. Do not run readiness, do not claim approval, do not rewrite the verdict, and do not edit queue/guard/reports/artifacts. Finish after recording the rejection. The earlier development-only schema applies only to task review. Do not read operator repositories.", application=late_application.display()));
         } else {
             instruction_text.push_str(&format!("\nAfter completing development, a second notification for accept-native will arrive in this same session. For that notification ACK its exact delivery first. Read task accept-native, its pending event and registered immutable verdict in queue.json, and the exact referenced collector evidence. Write an application JSON in cwd: task=accept-native, current state_version, exact event, verdict=the registered verdict.id, next_action={{kind: chosen from the actual report conclusion, owner: native coordinator, reason: independent report, condition: existing authorization}}. Map passed to delivery, failed to repair, unable to restore, ambiguous to clarify. Do not invent or rewrite any verdict; do not supply output or acceptance fields for this stage. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE, then queue readiness with that same state-dir and exact session environment. This records a continuation only; do not deliver to any customer or alter artifacts. The earlier development-only schema applies only to task review. Do not read operator repositories."));
         }
+    }
+    if apply_restored_review {
+        instruction_text.push_str(&format!("\nAfter the phase-1 unable verdict is applied and this turn ends, a restore-dependency-install notification will arrive. ACK that exact delivery as receipt only; do not task-apply it, and do not treat its operator signal as a verdict. Read the actual install evidence path from the notification/queue. Then run exactly one queue task-lineage --state-dir {queue_path} --spec {spec} using your model-written spec at {spec}. The spec must contain kind=continue, task=project, current parent state_version, intent=accept-native, authorization=verify, action=review, resolution=<actual install evidence path>, and activity fields: activity=accept-restored, role=acceptance, input=<artifact A id>, session_epoch=2, result_wait id=accept-restored, task=accept-restored, epoch=2, assignment=accept-restored-a2, owner=reviewer, kind=signal, reason=fresh independent review, condition=terminal report, timeout_seconds=1800. Do not create or install the dependency; the operator install already did that. Register the activity only. After the fresh accept-restored notification arrives, ACK it, read the registered passed verdict, task-apply that exact verdict, run readiness with active_wakeup=true, and finish. Run the install ACK, lineage command, fresh ACK, task-apply and readiness in separate direct bash invocations with no echo/wrappers/OR-true. Do not deliver to any customer and do not alter the old unable verdict/report or source role. Never fabricate the dependency, verdict, ACK, application or continuation.", queue_path=queue_path, spec=cwd.join("restore-continue.json").display()));
+    }
+    if apply_restored_review {
+        let shape = json!({
+            "kind":"continue", "task":"project", "state_version":"<current parent integer>",
+            "intent":"accept-native", "authorization":"verify", "action":"review",
+            "resolution":"<actual installation evidence absolute path>",
+            "activity": {
+                "activity":"accept-restored", "role":"acceptance", "input":"<exact candidate A id>",
+                "session_epoch":2,
+                "result_wait": {
+                    "id":"accept-restored", "task":"accept-restored", "epoch":2,
+                    "assignment":"accept-restored-a2", "owner":"reviewer", "kind":"signal",
+                    "reason":"fresh independent review", "condition":"terminal report", "timeout_seconds":1800
+                }
+            }
+        });
+        instruction_text.push_str(&format!("\nContinuation JSON schema (replace only angle-bracket placeholders with actual observed values; state_version must be an integer): {shape}. The root activity value is an OBJECT, and activity.result_wait is a nested OBJECT. Do not flatten result_wait fields, do not put result_wait at the root, and do not make activity a string. Read tasks.project.state_version after ACK before writing your spec. Validate this shape locally before the single lineage invocation; stop on any schema error rather than fixing and resending."));
     }
     if apply_repair {
         instruction_text = format!(
@@ -1164,6 +1258,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             setup_in_queue(&env, "development", &q).1
         }
     });
+    if apply_restored_review {
+        register_operator_wait(&q);
+    }
     let mut delivery_expected = None;
     if apply_delivery {
         let source = env.workspace_root.join("source");
@@ -1480,7 +1577,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_acceptance {
         if apply_unable_restore {
             let development_artifact = &development_result.as_ref().unwrap()["output"];
-            native_review_stage(
+            let unable_state = native_review_stage(
                 &mut env,
                 &q,
                 &guard,
@@ -1490,7 +1587,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     reviewer_root: reviewer_root.as_ref().unwrap(),
                     activity: "accept-native",
                     checkout: "reviewer-checkout",
-                    instruction: "Independently inspect the fixed artifact against the original requirement. A separate mandatory acceptance validation requires the operator-provided tool ./required-dependency-fixture --check. Execute exactly `./required-dependency-fixture --check` directly in cwd; do not append echo/status printing, pipes, shell wrappers, or OR-true; preserve the native exit status. Do not create, install, copy or synthesize it, and do not infer availability from the artifact file. If the tool is unavailable, write .herdr-verdict.json with conclusion unable, a blocked check for criterion goal using the exact requirement basis source, a blocker containing the actual missing path/exit, and a concrete restore_condition for installing that operator tool. Do not claim a product failure, repair gap, approval or pass. If the tool is available, derive the conclusion from its actual output.",
+                    instruction: "Independently inspect the fixed artifact against the original requirement. A separate mandatory acceptance validation requires the operator-provided tool ./required-dependency-fixture --check. Execute exactly `./required-dependency-fixture --check` directly in cwd; do not append echo/status printing, pipes, shell wrappers, or OR-true; preserve the native exit status. Do not create, install, copy or synthesize it, and do not infer availability from the artifact file. If the tool is unavailable, write .herdr-verdict.json with conclusion unable, a blocked check with criterion=goal and source EXACTLY equal to this operator basis string: Operator-provided acceptance validation requires executable ./required-dependency-fixture --check; it is not part of the developer artifact. Do not use the product-file source for this dependency check. Include the REQUIRED TOP-LEVEL string fields blocker and restore_condition (each nonempty, at most 1000 characters). blocker must name the actual command/path and observed exit 127; restore_condition must describe installing that operator tool. These are root JSON keys alongside conclusion/checks, never nested in checks or gaps. Set gaps=[] for this execution-unavailable result; a gap release_condition is NOT a substitute for blocker or restore_condition. Do not claim a product failure, repair gap, approval or pass. If the tool is available, derive the conclusion from its actual output.",
                     expected_waits: &["review", "accept-native"],
                     expect_pass: false,
                     unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
@@ -1499,8 +1596,25 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                             .as_str()
                             .unwrap(),
                     ),
+                    prepared_checkout: None,
+                    capture_tools: false,
                 },
             );
+            if apply_restored_review {
+                restored_review_stage(RestoredReviewSpec {
+                    env: &mut env,
+                    q: &q,
+                    guard: &guard,
+                    coordinator: &registered,
+                    unable: &unable_state,
+                    artifact: development_artifact,
+                    reviewer_root: restored_reviewer_root.as_ref().unwrap(),
+                    client: &client,
+                    endpoint: &endpoint,
+                    cwd: &cwd,
+                    evidence: &mut failure_evidence,
+                });
+            }
         } else if apply_repair {
             let development_artifact = &development_result.as_ref().unwrap()["output"];
             let failed_state = native_review_stage(
@@ -1518,6 +1632,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     expect_pass: false,
                     unavailable_dependency: None,
                     development_session: None,
+                    prepared_checkout: None,
+                    capture_tools: false,
                 },
             );
             if apply_delivery {
@@ -1607,6 +1723,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     expect_pass: true,
                     unavailable_dependency: None,
                     development_session: None,
+                    prepared_checkout: None,
+                    capture_tools: false,
                 },
             );
             if apply_delivery {
@@ -1895,6 +2013,21 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
         .collect();
     commands.sort_by_key(|command| (command.start, command.end));
     commands
+}
+
+fn exact_path_argument(command: &str, flag: &str, path: &Path) -> bool {
+    if command.matches(flag).count() != 1 {
+        return false;
+    }
+    let value = command.split_once(flag).unwrap().1.trim_start();
+    let path = path.to_str().unwrap();
+    [path.to_string(), format!("'{path}'"), format!("\"{path}\"")]
+        .iter()
+        .any(|form| {
+            value
+                .strip_prefix(form.as_str())
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))
+        })
 }
 
 fn terminal_tool_state(command: &ToolCommand) -> bool {
@@ -2761,6 +2894,575 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     );
 }
 
+struct RestoredReviewSpec<'a> {
+    env: &'a mut TaskEnvironment,
+    q: &'a Path,
+    guard: &'a Path,
+    coordinator: &'a J,
+    unable: &'a J,
+    artifact: &'a J,
+    reviewer_root: &'a Path,
+    client: &'a ureq::Agent,
+    endpoint: &'a str,
+    cwd: &'a Path,
+    evidence: &'a mut FailureEvidence,
+}
+
+fn register_operator_wait(q: &Path) {
+    let _lock = queue::locked(q, true).unwrap();
+    queue::add(
+        q,
+        &json!({
+            "id":"restore-dependency-install",
+            "task":"project",
+            "epoch":1,
+            "owner":"operator",
+            "reason":"install the disposable operator dependency",
+            "condition":"actual install result",
+            "kind":"signal",
+            "timeout_seconds":600
+        }),
+    )
+    .unwrap();
+}
+
+struct BoundedChild {
+    child: Option<std::process::Child>,
+}
+
+impl BoundedChild {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.child.as_mut().unwrap()
+    }
+    fn release(&mut self) {
+        self.child.take();
+    }
+    fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Ok(None) => {
+                        eprintln!("bounded child did not exit within 5s after kill");
+                        break;
+                    }
+                    Err(error) => {
+                        eprintln!("bounded child wait failed after kill: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    fn wait_status(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = self.child_mut().try_wait()? {
+                self.release();
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                self.stop();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bounded child did not exit within 30s",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for BoundedChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn install_operator_dependency(
+    env: &mut TaskEnvironment,
+    checkout: &Path,
+    evidence_path: &Path,
+) -> std::path::PathBuf {
+    let source = env.workspace_root.join("operator-dependency-source");
+    fs::write(&source, b"#!/bin/sh\nprintf 'operator-dependency-v1\n'\n").unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    let destination = checkout.join(UNAVAILABLE_DEPENDENCY);
+    let mut command = env.command(Path::new("/usr/bin/install"));
+    command
+        .args(["-m", "0700"])
+        .arg(&source)
+        .arg(&destination)
+        .current_dir(checkout);
+    let mut guard = BoundedChild::new(command.spawn().unwrap());
+    let pid = guard.child_mut().id();
+    let failure = |guard: &mut BoundedChild, message: String| -> ! {
+        let _ = util::atomic_write_json(
+            evidence_path,
+            &json!({
+                "operator": "test-driver",
+                "phase": "failure",
+                "pid": pid,
+                "message": message,
+                "status": guard.child.as_mut().and_then(|child| {
+                    child.try_wait().ok().flatten().map(|status| status.code())
+                }),
+                "path": destination,
+                "source": source
+            }),
+        );
+        guard.stop();
+        panic!("{message}");
+    };
+    let mut observed_terminal = None;
+    if let Err(error) = env.register_process(pid as i32) {
+        match guard.child_mut().try_wait() {
+            Ok(Some(status)) if status.success() => {
+                guard.release();
+                observed_terminal = Some(status);
+            }
+            Ok(Some(status)) => failure(
+                &mut guard,
+                format!("operator install exited before registration: {status:?}"),
+            ),
+            _ => failure(
+                &mut guard,
+                format!("operator install registration failed: {error}"),
+            ),
+        }
+    }
+    let status = if let Some(status) = observed_terminal {
+        status
+    } else {
+        match guard.wait_status() {
+            Ok(status) => status,
+            Err(error) => failure(&mut guard, format!("operator install wait failed: {error}")),
+        }
+    };
+    if !status.success() {
+        failure(&mut guard, format!("operator install exited: {status:?}"));
+    }
+    let bytes = fs::read(&destination).unwrap_or_else(|error| {
+        failure(
+            &mut guard,
+            format!("installed dependency read failed: {error}"),
+        )
+    });
+    let metadata = fs::metadata(&destination).unwrap_or_else(|error| {
+        failure(
+            &mut guard,
+            format!("installed dependency metadata failed: {error}"),
+        )
+    });
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o700 {
+        failure(
+            &mut guard,
+            "installed dependency type/mode mismatch".to_string(),
+        );
+    }
+    util::atomic_write_json(
+        evidence_path,
+        &json!({
+            "operator": "test-driver",
+            "phase": "complete",
+            "argv": ["/usr/bin/install", "-m", "0700", source, destination],
+            "cwd": checkout,
+            "exit": status.code(),
+            "sha256": util::pyjson::sha256_hex(&bytes),
+            "mode": "0700",
+            "path": destination
+        }),
+    )
+    .unwrap();
+    destination
+}
+
+fn bounded_restore_tool_evidence(mut evidence: J) -> J {
+    while serde_json::to_vec_pretty(&evidence).unwrap().len() > 60 * 1024 {
+        evidence["commands"].as_array_mut().unwrap().remove(0);
+        evidence["truncated"] = json!(true);
+    }
+    evidence
+}
+
+#[test]
+fn restored_tool_evidence_retains_recent_records_with_escaped_byte_bound() {
+    let records: Vec<_> = (0..8)
+        .map(|id| {
+            json!({
+                "id":id, "command":"\u{0001}".repeat(512),
+                "output":"\u{0002}".repeat(1024), "error":"界".repeat(256)
+            })
+        })
+        .collect();
+    let evidence =
+        bounded_restore_tool_evidence(json!({"commands":records,"total":8,"truncated":false}));
+    let bytes = serde_json::to_vec_pretty(&evidence).unwrap();
+    assert!(bytes.len() <= 60 * 1024);
+    assert_eq!(evidence["total"], 8);
+    assert_eq!(evidence["truncated"], true);
+    assert_eq!(
+        evidence["commands"].as_array().unwrap().last().unwrap()["id"],
+        7
+    );
+    assert_eq!(serde_json::from_slice::<J>(&bytes).unwrap(), evidence);
+}
+
+fn restored_review_stage(spec: RestoredReviewSpec<'_>) {
+    let RestoredReviewSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        unable,
+        artifact,
+        reviewer_root,
+        client,
+        endpoint,
+        cwd,
+        evidence,
+    } = spec;
+    let artifact_id = artifact["id"].as_str().expect("artifact id");
+    let phase1_version = unable["tasks"]["project"]["state_version"].clone();
+    let phase1_requirement = unable["tasks"]["project"]["requirements"]["1"].clone();
+    let phase1_verdict = unable["tasks"]["accept-native"]["verdict"].clone();
+    let phase1_report_path = env
+        .workspace_root
+        .join("reviewer-checkout/.herdr-verdict.json");
+    let phase1_report_bytes = fs::read(&phase1_report_path).unwrap();
+    let phase1_pending = unable["tasks"]["project"]["pending"].clone();
+    let fresh_cwd = acceptance_live::clone_snapshot(env, artifact, "restored-reviewer-checkout");
+    let install_evidence = q.parent().unwrap().join("restore-dependency-install.json");
+    let dependency_path = install_operator_dependency(env, &fresh_cwd, &install_evidence);
+    let dependency_before = fs::metadata(&dependency_path).unwrap();
+    let dependency_hash = util::pyjson::sha256_hex(&fs::read(&dependency_path).unwrap());
+    let previous_submission = util::read_json(&guard.join("submission.json")).unwrap();
+    queue::signal(
+        q,
+        "restore-dependency-install",
+        "complete",
+        "operator dependency installed with actual result evidence",
+        Some(install_evidence.to_str().unwrap()),
+    )
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let state = loop {
+        let state = queue::load_queue(q).unwrap();
+        let install = state["events"].as_object().and_then(|events| {
+            events
+                .values()
+                .find(|event| event["wait"] == "restore-dependency-install")
+        });
+        if install.is_some_and(|event| event["acknowledged"] == true)
+            && state["tasks"].get("accept-restored").is_some()
+            && util::read_json(&guard.join("submission.json")).is_ok_and(|submission| {
+                submission["phase"] == "complete"
+                    && submission["message_id"] != previous_submission["message_id"]
+            })
+        {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "install signal/continue deadline"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (install_id, install_event) = state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "restore-dependency-install")
+        .map(|(id, event)| (id.clone(), event.clone()))
+        .expect("install event");
+    assert_eq!(install_event["acknowledged"], true);
+    assert_ne!(install_event["applied"], true);
+    assert!(install_event["binding"].is_null());
+    assert!(state["waits"]["restore-dependency-install"]
+        .get("assignment")
+        .is_none());
+    let install_signal = util::read_json(Path::new(
+        install_event["evidence"]
+            .as_str()
+            .expect("install evidence"),
+    ))
+    .unwrap();
+    assert_eq!(install_signal["evidence"], json!(install_evidence));
+    let install_data = util::read_json(&install_evidence).unwrap();
+    assert_eq!(install_data["phase"], "complete");
+    assert_eq!(install_data["exit"], 0);
+    assert_eq!(install_data["mode"], "0700");
+    assert_eq!(install_data["sha256"], dependency_hash);
+    assert_eq!(install_data["path"], json!(dependency_path));
+    assert_eq!(install_data["cwd"], json!(fresh_cwd));
+    assert_eq!(state["tasks"]["project"]["pending"], phase1_pending);
+    assert!(state["tasks"]["project"]["pending"].is_array());
+    assert_eq!(
+        state["tasks"]["project"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let continue_spec = util::read_json(&cwd.join("restore-continue.json")).unwrap();
+    assert_eq!(continue_spec["kind"], "continue");
+    assert_eq!(continue_spec["task"], "project");
+    assert_eq!(continue_spec["state_version"], phase1_version);
+    assert_eq!(continue_spec["intent"], "accept-native");
+    assert_eq!(continue_spec["authorization"], "verify");
+    assert_eq!(continue_spec["action"], "review");
+    assert_eq!(continue_spec["resolution"], json!(install_evidence));
+    assert_eq!(continue_spec["activity"]["role"], "acceptance");
+    assert_eq!(continue_spec["activity"]["input"], artifact_id);
+    assert_eq!(continue_spec["activity"]["activity"], "accept-restored");
+    assert_eq!(
+        continue_spec["activity"]["result_wait"]["id"],
+        "accept-restored"
+    );
+    assert_eq!(
+        continue_spec["activity"]["result_wait"]["task"],
+        "accept-restored"
+    );
+    assert_eq!(
+        continue_spec["activity"]["result_wait"]["assignment"],
+        "accept-restored-a2"
+    );
+    assert_eq!(continue_spec["activity"]["session_epoch"], 2);
+    assert_eq!(state["tasks"]["project"]["approved"], J::Null);
+    let rows = session_rows(
+        client,
+        endpoint,
+        coordinator["session"].as_str().unwrap(),
+        cwd,
+    );
+    let commands = tool_commands(&rows, coordinator["session"].as_str().unwrap());
+    let relevant: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.command.contains("queue task-lineage")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    let mut bounded_commands: Vec<_> = relevant
+        .iter()
+        .rev()
+        .take(8)
+        .map(|command| {
+            json!({
+                "command": command.command.chars().take(512).collect::<String>(),
+                "status": command.status, "exit": command.exit, "success": command.success,
+                "output": command.output.chars().take(1024).collect::<String>(),
+                "error": command.error.chars().take(256).collect::<String>(),
+                "start": command.start, "end": command.end
+            })
+        })
+        .collect();
+    bounded_commands.reverse();
+    let tool_evidence = json!({"commands": bounded_commands, "total": relevant.len(),
+        "truncated": relevant.len()>8, "field_character_limits": [512, 1024, 256]});
+    let tool_evidence = bounded_restore_tool_evidence(tool_evidence);
+    util::atomic_write_json(
+        &q.parent().unwrap().join("restore-tool-evidence.json"),
+        &tool_evidence,
+    )
+    .unwrap();
+    let install_delivery = delivery_for_event(
+        &state,
+        coordinator["session"].as_str().unwrap(),
+        &install_id,
+    )
+    .expect("install delivery")
+    .0
+    .to_string();
+    let ack = commands
+        .iter()
+        .position(|command| {
+            command.success
+                && command.command.contains("queue ack")
+                && exact_path_argument(&command.command, "--delivery", Path::new(&install_delivery))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .expect("install ACK command");
+    let successful_continues: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.success
+                && command.command.contains("queue task-lineage")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    assert_eq!(successful_continues.len(), 1, "one successful continue");
+    assert!(exact_path_argument(
+        &successful_continues[0].command,
+        "--spec",
+        &cwd.join("restore-continue.json")
+    ));
+    let continue_index = commands
+        .iter()
+        .position(|command| std::ptr::eq(command, successful_continues[0]))
+        .unwrap();
+    for command in [&commands[ack], &commands[continue_index]] {
+        assert!(command.start > 0 && command.start != i64::MAX);
+        assert!(command.end >= command.start && command.end != i64::MAX);
+    }
+    assert!(commands[ack].end <= commands[continue_index].start);
+    for command in commands.iter().filter(|command| {
+        !command.success
+            && command.command.contains("queue task-lineage")
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }) {
+        assert!(
+            lock_busy_evidence(command),
+            "non-busy continue rejection exit={:?}; see bounded restore-tool-evidence.json",
+            command.exit
+        );
+    }
+    let restored = &state["tasks"]["accept-restored"];
+    assert_eq!(restored["candidate"], artifact_id);
+    assert_eq!(restored["lineage"]["input"], artifact_id);
+    assert_eq!(
+        restored["lineage"]["round"],
+        unable["tasks"]["accept-native"]["lineage"]["round"]
+    );
+    assert_eq!(
+        restored["lineage"]["revision"],
+        unable["tasks"]["accept-native"]["lineage"]["revision"]
+    );
+    assert_eq!(restored["phase"], "waiting");
+    assert_eq!(
+        state["tasks"]["project"]["continuation"]["phase"],
+        "registered"
+    );
+    assert_eq!(
+        restored["acceptance_origin"],
+        unable["tasks"]["project"]["continuation"]
+    );
+    assert_eq!(
+        state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(state["tasks"]["project"]["candidate"], artifact_id);
+    assert!(state["tasks"].get("repair").is_none());
+
+    native_review_stage(
+        env,
+        q,
+        guard,
+        coordinator,
+        ReviewSpec {
+            artifact,
+            reviewer_root,
+            activity: "accept-restored",
+            checkout: "restored-reviewer-checkout",
+            instruction: "You are the independent acceptance reviewer, not the coordinator or developer. Independently inspect the fixed artifact against the original requirement. The operator-provided dependency is now installed. Run `./required-dependency-fixture --check` and `git show HEAD:file` in separate direct bash invocations; do not append echo/status printing, pipes, shell wrappers, or OR-true; preserve each native exit status and use their actual outputs. Include a passed goal check whose source is exactly: Operator-provided acceptance validation requires executable ./required-dependency-fixture --check; it is not part of the developer artifact. Include the exact dependency command and its actual output in that check's evidence. Do not install or modify the dependency, do not commit, and do not ACK or apply anything. Write .herdr-verdict.json with actual passed/failed evidence and derive the conclusion yourself. Do not claim delivery.",
+            expected_waits: &["review", "accept-native", "restore-dependency-install", "accept-restored"],
+            expect_pass: true,
+            unavailable_dependency: None,
+            development_session: unable["tasks"]["accept-native"]["verdict"]["envelope"]
+                ["reviewer"]["session"]
+                .as_str(),
+            prepared_checkout: Some(&fresh_cwd),
+            capture_tools: true,
+        },
+    );
+    let final_state = queue::load_queue(q).unwrap();
+    assert_eq!(final_state["events"].as_object().unwrap().len(), 4);
+    assert_eq!(final_state["deliveries"].as_object().unwrap().len(), 4);
+    let install = final_state["events"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|event| event["wait"] == "restore-dependency-install")
+        .unwrap();
+    assert_eq!(install["acknowledged"], true);
+    assert_ne!(install["applied"], true);
+    assert_eq!(final_state["tasks"]["project"]["pending"], json!([]));
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(final_state["tasks"]["project"]["candidate"], artifact_id);
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["candidate"],
+        artifact_id
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["activity"],
+        "accept-restored"
+    );
+    let final_report = &final_state["tasks"]["accept-restored"]["verdict"]["envelope"]["report"];
+    let dependency_check = final_report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| {
+            check["criterion"] == "goal" && check["source"] == UNAVAILABLE_DEPENDENCY_SOURCE
+        })
+        .expect("fresh report dependency check");
+    assert_eq!(dependency_check["status"], "passed");
+    assert!(dependency_check["evidence"]
+        .as_str()
+        .is_some_and(
+            |value| value.contains("./required-dependency-fixture --check")
+                && value.contains("operator-dependency-v1")
+        ));
+    let fresh_reviewer = final_state["tasks"]["accept-restored"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str();
+    let phase1_reviewer =
+        unable["tasks"]["accept-native"]["verdict"]["envelope"]["reviewer"]["session"].as_str();
+    let phase1_worker = unable["waits"]["review"]["producer"]["session"].as_str();
+    assert!(fresh_reviewer.is_some());
+    assert_ne!(fresh_reviewer, phase1_reviewer);
+    assert_ne!(fresh_reviewer, phase1_worker);
+    assert_eq!(
+        final_state["tasks"]["project"]["continuation"]["action"]["kind"],
+        "delivery"
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-native"]["verdict"],
+        phase1_verdict
+    );
+    assert_eq!(fs::read(&phase1_report_path).unwrap(), phase1_report_bytes);
+    let dependency_after = fs::metadata(&dependency_path).unwrap();
+    assert_eq!(dependency_after.dev(), dependency_before.dev());
+    assert_eq!(dependency_after.ino(), dependency_before.ino());
+    assert_eq!(dependency_after.mode(), dependency_before.mode());
+    assert_eq!(
+        util::pyjson::sha256_hex(&fs::read(&dependency_path).unwrap()),
+        dependency_hash
+    );
+    let task_names: std::collections::BTreeSet<_> = final_state["tasks"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        task_names,
+        ["project", "review", "accept-native", "accept-restored"]
+            .into_iter()
+            .collect()
+    );
+    assert!(final_state["tasks"].get("repair").is_none());
+    let tree = git(&fresh_cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(!tree.lines().any(|line| line == UNAVAILABLE_DEPENDENCY));
+    evidence.0.push(install_evidence);
+    println!(
+        "real OpenCode restored review: unable verdict -> install {} -> continue -> fresh pass; no delivery",
+        dependency_hash
+    );
+}
+
 fn assert_target_untouched(
     target: &Path,
     user_asset: &Path,
@@ -3213,6 +3915,38 @@ fn assert_stage_shape(state: &J, waits: &[&str], coordinator: &J) {
     }
 }
 
+fn assert_restored_shape(state: &J, waits: &[&str], coordinator: &J) {
+    assert_eq!(state["events"].as_object().unwrap().len(), 4);
+    assert_eq!(state["deliveries"].as_object().unwrap().len(), 4);
+    for wait in waits {
+        let matches: Vec<_> = state["events"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, event)| event["wait"] == *wait)
+            .collect();
+        assert_eq!(matches.len(), 1, "exactly one event for {wait}");
+        let (id, event) = matches[0];
+        assert_eq!(event["acknowledged"], true);
+        if *wait == "restore-dependency-install" {
+            assert_ne!(event["applied"], true);
+            assert!(event["binding"].is_null());
+        } else {
+            assert_eq!(event["applied"], true);
+        }
+        let deliveries: Vec<_> = state["deliveries"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|delivery| delivery["events"] == json!([id]))
+            .collect();
+        assert_eq!(deliveries.len(), 1, "exactly one delivery for {wait}");
+        assert_eq!(deliveries[0]["session"], coordinator["session"]);
+        assert_eq!(deliveries[0]["phase"], "acknowledged");
+    }
+    assert_eq!(state["tasks"]["project"]["pending"], json!([]));
+}
+
 struct ReviewSpec<'a> {
     artifact: &'a J,
     reviewer_root: &'a Path,
@@ -3223,6 +3957,8 @@ struct ReviewSpec<'a> {
     expect_pass: bool,
     unavailable_dependency: Option<&'a str>,
     development_session: Option<&'a str>,
+    prepared_checkout: Option<&'a Path>,
+    capture_tools: bool,
 }
 
 fn native_review_stage(
@@ -3242,29 +3978,44 @@ fn native_review_stage(
         expect_pass,
         unavailable_dependency,
         development_session,
+        prepared_checkout,
+        capture_tools,
     } = spec;
     let requirement_before =
         queue::load_queue(q).unwrap()["tasks"]["project"]["requirements"]["1"].clone();
-    acceptance_live::change(
-        q,
-        json!({"kind":"candidate","candidate":artifact["id"],"reason":"real independent acceptance"}),
-    );
-    let mut activity = acceptance_live::activity(activity_name, "acceptance", &artifact["id"]);
-    activity["kind"] = json!("activity");
-    acceptance_live::change(q, activity);
-    let cwd = acceptance_live::clone_snapshot(env, artifact, checkout_name);
+    let cwd = if let Some(prepared) = prepared_checkout {
+        assert!(
+            queue::load_queue(q).unwrap()["tasks"]
+                .get(activity_name)
+                .is_some(),
+            "prepared checkout requires registered activity"
+        );
+        prepared.to_path_buf()
+    } else {
+        acceptance_live::change(
+            q,
+            json!({"kind":"candidate","candidate":artifact["id"],"reason":"real independent acceptance"}),
+        );
+        let mut activity = acceptance_live::activity(activity_name, "acceptance", &artifact["id"]);
+        activity["kind"] = json!("activity");
+        acceptance_live::change(q, activity);
+        acceptance_live::clone_snapshot(env, artifact, checkout_name)
+    };
+    let prepared_head = prepared_checkout.map(|_| git(&cwd, &["rev-parse", "HEAD"]));
     let mut reviewer_tool_rows = J::Null;
-    let (reviewer, collected) = if let Some(dependency) = unavailable_dependency {
-        let dependency_path = cwd.join(dependency);
-        assert!(
-            !dependency_path.exists(),
-            "operator dependency unexpectedly present"
-        );
-        let tree = git(&cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
-        assert!(
-            !tree.lines().any(|line| line == dependency),
-            "operator dependency must not be committed in artifact A"
-        );
+    let (reviewer, collected) = if unavailable_dependency.is_some() || capture_tools {
+        if let Some(dependency) = unavailable_dependency {
+            let dependency_path = cwd.join(dependency);
+            assert!(
+                !dependency_path.exists(),
+                "operator dependency unexpectedly present"
+            );
+            let tree = git(&cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
+            assert!(
+                !tree.lines().any(|line| line == dependency),
+                "operator dependency must not be committed in artifact A"
+            );
+        }
         acceptance_live::native_with_hook(
             env,
             q,
@@ -3286,7 +4037,11 @@ fn native_review_stage(
     }
     let actual_report = util::read_json(&cwd.join(".herdr-verdict.json")).unwrap();
     let state = wait_for_stage(q, guard, coordinator, activity_name);
-    assert_stage_shape(&state, expected_waits, coordinator);
+    if prepared_checkout.is_some() {
+        assert_restored_shape(&state, expected_waits, coordinator);
+    } else {
+        assert_stage_shape(&state, expected_waits, coordinator);
+    }
     let task = &state["tasks"][activity_name];
     assert_eq!(task["pending"], json!([]));
     let verdict = &task["verdict"];
@@ -3353,9 +4108,7 @@ fn native_review_stage(
         );
         let command = commands
             .iter()
-            .find(|command| {
-                command.command.contains(dependency) && command.command.contains("--check")
-            })
+            .find(|command| command.command.trim() == format!("./{dependency} --check"))
             .expect("missing dependency command evidence");
         assert!(
             terminal_tool_state(command),
@@ -3380,6 +4133,52 @@ fn native_review_stage(
                 && command.end != i64::MAX
         );
         assert!(!cwd.join(dependency).exists());
+    }
+    if capture_tools {
+        let commands = tool_commands(
+            &reviewer_tool_rows,
+            reviewer["session"].as_str().expect("reviewer session"),
+        );
+        let dependency = commands
+            .iter()
+            .find(|command| command.command.trim() == "./required-dependency-fixture --check")
+            .expect("fresh dependency check evidence");
+        assert!(
+            terminal_tool_state(dependency),
+            "fresh dependency check not terminal"
+        );
+        assert_eq!(dependency.exit, Some(0));
+        assert!(dependency.output.contains("operator-dependency-v1"));
+        assert!(
+            dependency.start > 0
+                && dependency.start != i64::MAX
+                && dependency.end >= dependency.start
+                && dependency.end != i64::MAX
+        );
+        let product = commands
+            .iter()
+            .find(|command| command.command.trim() == "git show HEAD:file")
+            .expect("fresh product check evidence");
+        assert!(
+            terminal_tool_state(product),
+            "fresh product check not terminal"
+        );
+        assert_eq!(product.exit, Some(0));
+        assert_eq!(product.output.trim(), "version B");
+        assert!(
+            product.start > 0
+                && product.start != i64::MAX
+                && product.end >= product.start
+                && product.end != i64::MAX
+        );
+        if let Some(prepared_head) = prepared_head {
+            assert_eq!(prepared_head, artifact["id"].as_str().unwrap());
+            assert_eq!(
+                git(&cwd, &["rev-parse", "HEAD"]),
+                prepared_head,
+                "fresh checkout HEAD changed"
+            );
+        }
     }
     let parent = &state["tasks"]["project"];
     assert_eq!(parent["candidate"], artifact["id"]);
