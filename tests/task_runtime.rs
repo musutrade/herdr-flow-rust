@@ -267,6 +267,19 @@ fn setup_in_queue_inner(
         spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
         progress::lineage::action(&mut state, &spec, now).unwrap();
     }
+    if unavailable_dependency.is_some() {
+        state["waits"]["restore-dependency-install"] = json!({
+            "id":"restore-dependency-install",
+            "task":"project",
+            "epoch":1,
+            "owner":"operator",
+            "reason":"install the disposable operator dependency",
+            "condition":"actual install result",
+            "kind":"signal",
+            "timeout_seconds":600,
+            "closed":false
+        });
+    }
     queue::save(q, &mut state).unwrap();
     (q.to_path_buf(), cwd)
 }

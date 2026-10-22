@@ -720,3 +720,35 @@ product/API/isolation change is made and #38/#32 remain OPEN.
 Primary verification: the real unavailable-dependency scenario passed in 127.05 seconds; the selected OpenCode configuration remained unchanged. The initial local compile failure was corrected and retained as failure evidence. The dependency is recorded as a requirement basis source and enforced by this scenario's reviewer instructions and observed execution; it is not a required parent acceptance criterion enforced by the core pass validator. This test therefore does not prove that the core rejects a hypothetical passing report that omits this dependency check. The relative command uses the fixed reviewer session cwd; tool cwd is not independently sampled. Actual dependency restoration and a fresh passing review remain outside this phase.
 
 Independent non-live gates passed: stable coverage and Rust 1.85 all-target suites each reported 483 passed, zero failed, 17 ignored. CRAP checked 4800 functions at 77.2% line coverage with zero violations of the absolute threshold 10; formatting, lint policy, Clippy and rustdoc passed. Ignored live scenarios are not counted as executed by these suites; the unavailable-dependency scenario was run separately as reported above.
+
+## Restored-review continuation
+
+The restored-review phase builds on the phase-1 unavailable state without
+rewriting it. The operator dependency is installed exactly once through a
+registered foreground `env.command` installer (no detached `queue run`), with its
+actual argv/cwd/exit/hash/mode retained as evidence. A pre-registered unassigned
+`restore-dependency-install` signal wait is then produced by the test operator; it
+is a producer event, not a driver ACK/apply/verdict. Its delivery is ACK-only and
+must remain unbound/unapplied, leaving parent pending/version untouched. The same
+coordinator wakes, ACKs receipt, and consumes the phase-1 restore intent with
+`task-lineage kind=continue` using `verify`/`review`, the current parent version,
+and actual install evidence. It registers only a new `accept-restored` acceptance
+activity/wait.
+
+The fresh checkout is cloned once from candidate A before continuation, and the
+operator dependency is installed there once before the signal. The new activity
+carries the phase-1 acceptance origin; candidate, round, revision, input and
+authorization must remain unchanged. A fresh real reviewer, distinct from the
+phase-1 reviewer/worker/coordinator, runs on that prepared checkout without
+reinstalling; its `./required-dependency-fixture --check` and product check must
+have actual successful tool evidence, and its actual passed verdict is required.
+The real coordinator ACKs/applies that immutable verdict, setting parent approval
+for candidate A while recording a delivery continuation; no delivery is executed.
+
+The exact phase totals are four events/deliveries: phase-1 review and unable,
+operator install signal, and fresh review. The install event remains
+acknowledged-only and never becomes a verdict or pending result. Phase-1
+limitations remain: the dependency is a basis source rather than a core-enforced
+required criterion, and tool cwd is implied by the fixed checkout rather than
+independently sampled. This phase does not claim customer delivery, context
+rotation, Codex parity or #38/#32 closure. No product/API/isolation change.

@@ -288,3 +288,18 @@ created. The missing dependency remains absent and uncommitted. This is phase 1
 only: it does not claim dependency restoration or a fresh review/pass. The
 synthetic unable/restore and execution-problem tests remain the broader matrix
 overlap. No product/API/isolation change.
+### Restored review phase
+
+The restored-review test installs the disposable operator dependency once via a
+registered foreground command, sends a real producer signal through the
+pre-registered unassigned install wait, and lets the same coordinator consume the
+saved restore continuation with lineage continue using `verify`/`review`.
+The install event is ACK-only and not attached/applied; parent pending/version
+remain unchanged. A pre-created checkout with the one installed dependency is
+used by a fresh real reviewer without reinstall. Candidate/round/revision/input,
+authorization and acceptance_origin are checked; an actual passed verdict is
+required before the coordinator applies approval and records delivery
+continuation. Total events/deliveries are four (phase1 review+unable, install
+signal, fresh review). No delivery is executed. The phase-1 basis-source and
+tool-cwd limitations remain. No detached queue-run process or product/API change
+is used.
