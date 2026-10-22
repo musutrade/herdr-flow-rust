@@ -443,24 +443,42 @@ IDs. Both transcripts use the same rolling before/after report pair; the fixture
 asserts exactly two bounded report entries after both rounds. Formal targets and
 user assets are created per round under the outer base and retained. Exclusions
 enumerate every round's formal target and user asset exactly, cumulatively; no
-broad prefix is used (reports are counted, not excluded). After each round and at
-the final check, every prior target ref/commit, user device/inode/bytes and
-content are checked again.
+broad prefix is used (reports and the bounded summary are counted separately).
+After each round and at the final check, every prior target ref/commit, user
+device/inode/bytes and content are checked again.
 
-The outer base, retained formal/user outputs and reports live until final
+The outer base, retained formal/user outputs, summary and reports live until final
 assertions; there is no per-round `TempDir` teardown. After each round the fixture
 enumerates base and shared-registry entries with fallible `read_dir` calls,
 rejects unexpected retained entries, requires the exact rolling report pair,
-round formal/user entries and allowed registry files, and requires the registry
-index plus envs/plans/locks to contain no retained task state. A normalized
-path/type footprint of the shared registry must be equal after round 1 and round
-2, while workspace/temporary roots must remain absent. The non-live negative
-control adds an unexpected retained file and verifies the retained-control check
-rejects it. Reports are counted separately from the exact formal/user exclusions;
-no broad exclusion hides retained control. Registry file byte sizes and lock
-contents are not compared; this is a normalized-state/path check. This is two observed rounds, not a
-twenty-round campaign, a whole-campaign disk-stability proof, or a claim of
-persistent shared queue or global-cache absence.
+round formal/user entries, the bounded campaign summary and allowed registry
+files, and requires the registry index plus envs/plans/locks to contain no
+retained task state. A normalized path/type footprint of the shared registry must
+be equal after each round, while workspace/temporary roots must remain absent. The
+non-live negative control adds an unexpected retained file and verifies the
+retained-control check rejects it. Reports are counted separately from the exact
+formal/user exclusions; no broad exclusion hides retained control. Registry file
+byte sizes and lock contents are not compared; this is a normalized-state/path
+check.
+
+The same shared runner supports an opt-in fixed twenty-round campaign on one
+outer base: rounds 1..20 are normal except rounds 5, 10, 15 and 20, which use
+failed review, repair, fresh acceptance and confirmed restart. Every round uses
+fresh formal/user paths and a recreated queue under the disposable runtime.
+A bounded `campaign-summary.json` starts with zero records and records at most
+twenty completed entries (normal or repair/restart, expected artifact/output
+identity, actual before/after marked-process counts and incompleteness flags,
+compact base file/byte/block observations, roots/state/cleanup/registry/queue
+observations, elapsed time and measured report count/bytes). Records are appended
+only after all round validation succeeds; a validation failure leaves the prior
+completed count and cannot create a completed record. Report files remain a
+bounded rolling pair; summary size is capped at 256KiB. An outer campaign
+failure guard retains the rolling reports and summary when validation or a later
+round fails, in addition to the per-round bounded logs. A failed round fails the
+campaign immediately and retains bounded failure evidence; there is no retry,
+skip or failed-round completion count. The observed twenty-round run is recorded
+below. It does not establish whole-campaign disk stability, persistent shared
+queue behavior or global-cache absence.
 
 Observed validation (2026-10-22): the final two-round live run passed in 284.23s.
 Each round sampled two marked processes before finish and zero matching processes
@@ -470,3 +488,43 @@ attempt completed round 1 but failed in round 2 because the developer wrote
 `INCOMPLETE` instead of the required literal `version INCOMPLETE`; its bounded
 failure evidence was retained. The prompt was clarified without relaxing the
 assertion, and the complete campaign was rerun successfully.
+
+Twenty-round validation attempt (2026-10-22): the first actual campaign stopped
+at round 4 after three complete rounds (681.70s total). The fourth developer
+reported an acceptance verdict without changing the artifact; its collected
+output ID equalled the input ID. Application rejected the duplicate artifact,
+and the real event was acknowledged but not applied before the deadline.
+The retained summary contains only rounds 1–3. Bounded failure evidence was
+retained and the selected configuration bytes were unchanged. This is not
+twenty-task acceptance; no failed round was retried or counted as complete.
+The fixture now identifies the developer role explicitly despite the legacy
+activity name `review`, uses a development-named cwd and developer/development
+wait labels, and asks for the literal file contents with edit/add/commit while
+forbidding verdicts. Immediately after developer collection the fixture requires
+a new output commit, exact committed content, and no `.herdr-verdict.json`, and
+adds that worker report to bounded failure evidence before coordinator waits.
+Coordinator instructions require the exact collector output, forbid copying,
+editing or probing queue/guard/state, and require stopping on non-busy errors.
+The failed attempt remains recorded; assertions were not relaxed. Its primary
+log and structured diagnosis remain available locally; the transient bounded
+dump directories were no longer present at the later verification.
+
+
+Observed twenty-round validation (2026-10-22): the second complete campaign
+passed in 2601.78s, starting from round 1 with a fresh outer base. All twenty
+consecutive tasks completed: sixteen normal delivery rounds and four
+repair/confirmed-restart rounds (5, 10, 15, 20). Every round sampled two marked
+processes before finish and zero matches afterward, with zero occupied slots
+and owned roots, exact output/user preservation, and all prior outputs rechecked.
+The report pair remained exactly two files, totaling 31,456–41,929 bytes across
+rounds; the at-most-twenty-record summary and 256KiB bound passed. The selected
+OpenCode configuration was byte-identical before and after the run. No failed
+round from the first attempt was counted or resumed into this campaign.
+
+The queue is recreated each round, and process sampling remains incomplete by
+design. Registry comparisons concern paths/types and empty state, not lock-file
+bytes. The summary validator checks completion-critical fields, not every field
+of a general-purpose external JSON schema. If native collection fails before
+returning its message ID, fixed server/submission diagnostics remain available
+but the per-message report may not be captured. These limits and the remaining
+Codex and failure-matrix acceptance work keep #38 and #32 open.

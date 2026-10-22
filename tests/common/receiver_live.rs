@@ -152,59 +152,77 @@ fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() 
 fn installed_real_opencode_two_rounds_share_one_outer_base() {
     let temp = temp();
     let base = temp.path();
-    let round1 = base.join("round-1");
-    let round2 = base.join("round-2");
-    common::create_dir(&round1).unwrap();
-    let formal1 = round1.join("formal.git");
-    let user1 = round1.join("user-owned.txt");
-    let formal2 = round2.join("formal.git");
-    let user2 = round2.join("user-owned.txt");
-    let excluded = vec![
-        formal1.clone(),
-        user1.clone(),
-        formal2.clone(),
-        user2.clone(),
+    let rounds = vec![
+        campaign_round(base, 1, false),
+        campaign_round(base, 2, true),
     ];
+    run_campaign(base, &rounds);
+}
 
-    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    run_native_receiver_in(ReceiverSpec {
-        apply_development: true,
-        apply_acceptance: true,
-        apply_delivery: true,
-        apply_repair: false,
-        apply_restart: false,
-        base,
-        formal_target: &formal1,
-        user_asset: &user1,
-        excluded: &excluded,
-    });
-    let commit1 = git(&formal1, &["rev-parse", "refs/heads/main"]);
-    let identity1 = user_identity(&user1);
-    assert_round_output(&formal1, &user1, &commit1, identity1);
-    assert_report_pair(base);
-    let control1 = retained_control(base, &["round-1"]).unwrap();
-    common::create_dir(&round2).unwrap();
+#[test]
+#[ignore = "requires twenty completed real native rounds on one outer base"]
+fn installed_real_opencode_twenty_rounds_share_one_outer_base() {
+    let temp = temp();
+    let base = temp.path();
+    let rounds = twenty_round_plans(base);
+    run_campaign(base, &rounds);
+}
 
-    run_native_receiver_in(ReceiverSpec {
-        apply_development: true,
-        apply_acceptance: true,
-        apply_delivery: true,
-        apply_repair: true,
-        apply_restart: true,
-        base,
-        formal_target: &formal2,
-        user_asset: &user2,
-        excluded: &excluded,
-    });
-    let commit2 = git(&formal2, &["rev-parse", "refs/heads/main"]);
-    let identity2 = user_identity(&user2);
-    assert_round_output(&formal1, &user1, &commit1, identity1);
-    assert_round_output(&formal2, &user2, &commit2, identity2);
-    assert_report_pair(base);
-    let control2 = retained_control(base, &["round-1", "round-2"]).unwrap();
-    assert_eq!(control1, control2, "shared control footprint changed");
-    assert!(!is_registered("project").unwrap());
-    assert_eq!(occupied_slots().unwrap(), 0);
+#[test]
+fn twenty_round_schedule_and_summary_bounds_are_fixed() {
+    let base = Path::new("/tmp/herdr-native-twenty-schedule");
+    let rounds = twenty_round_plans(base);
+    assert_eq!(rounds.len(), 20);
+    assert_eq!(rounds.iter().filter(|round| round.repair).count(), 4);
+    let repair_indices: Vec<_> = rounds
+        .iter()
+        .filter(|round| round.repair)
+        .map(|round| round.index)
+        .collect();
+    assert_eq!(repair_indices, vec![5, 10, 15, 20]);
+    let mut paths = std::collections::BTreeSet::new();
+    for round in &rounds {
+        assert!(paths.insert(round.formal.clone()));
+        assert!(paths.insert(round.user.clone()));
+    }
+    assert_eq!(paths.len(), 40);
+    let records: Vec<J> = (1..=20)
+        .map(|index| {
+            json!({
+                "index": index,
+                "completed": true,
+                "expected_artifact": "artifact",
+                "output": {"commit": "artifact"},
+                "cleanup": {"registry_slots": 0, "owned_roots": 0, "reports": 2}
+            })
+        })
+        .collect();
+    let document = summary_document(&records);
+    assert_eq!(document["records"].as_array().unwrap().len(), 20);
+    assert!(serde_json::to_vec(&document).unwrap().len() <= 256 * 1024);
+
+    // Synthetic boundary checks: no failed record, no 21st record, no oversized summary.
+    let completed = json!({"completed": true});
+    let mut bounded = Vec::new();
+    assert!(append_summary_record(&mut bounded, completed.clone()).is_ok());
+    assert!(append_summary_record(&mut bounded, json!({"completed": false})).is_err());
+    for _ in 1..20 {
+        append_summary_record(&mut bounded, completed.clone()).unwrap();
+    }
+    assert_eq!(bounded.len(), 20);
+    assert!(append_summary_record(&mut bounded, completed).is_err());
+    let oversized = json!({"completed": true, "padding": "x".repeat(300 * 1024)});
+    let mut oversized_records = Vec::new();
+    assert!(append_summary_record(&mut oversized_records, oversized).is_err());
+    let temp = temp();
+    let path = temp.path().join("summary.json");
+    write_summary(&path, &[]);
+    let previous = fs::read(&path).unwrap();
+    let invalid = json!({"index": 1, "completed": true, "expected_artifact": "a",
+        "output": {"commit": "wrong"},
+        "cleanup": {"registry_slots": 0, "owned_roots": 0, "reports": 2}});
+    assert!(std::panic::catch_unwind(|| write_summary(&path, &[invalid])).is_err());
+    assert_eq!(fs::read(&path).unwrap(), previous);
 }
 
 fn user_identity(path: &Path) -> (u64, u64) {
@@ -237,7 +255,7 @@ fn sorted_names(path: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn assert_report_pair(base: &Path) {
+fn report_pair_metadata(base: &Path) -> (usize, u64) {
     let names = sorted_names(base).unwrap();
     let reports: Vec<&str> = names
         .iter()
@@ -249,11 +267,43 @@ fn assert_report_pair(base: &Path) {
         vec!["inventory-after.json", "inventory-before.json"],
         "reports must be one rolling pair"
     );
-    for report in reports {
+    let mut bytes = 0u64;
+    for report in &reports {
         let path = base.join(report);
         let len = fs::metadata(&path).unwrap().len();
         assert!(len > 0 && len <= 1024 * 1024, "unbounded report {report}");
+        bytes += len;
     }
+    (reports.len(), bytes)
+}
+
+fn compact_base(report: &J) -> J {
+    let base = &report["base_usage"];
+    json!({
+        "entries": base["entries"],
+        "files": base["files"],
+        "dirs": base["dirs"],
+        "symlinks": base["symlinks"],
+        "bytes": base["bytes"],
+        "allocated_blocks_512": base["allocated_blocks_512"],
+        "excluded_files": base["excluded_files"],
+        "excluded_bytes": base["excluded_bytes"],
+        "excluded_allocated_blocks_512": base["excluded_allocated_blocks_512"],
+        "truncated": base["truncated"],
+    })
+}
+
+fn incomplete_processes(report: &J) -> usize {
+    report["processes"]["records"]
+        .as_array()
+        .expect("missing process records")
+        .iter()
+        .filter(|record| record["complete"] != true)
+        .count()
+}
+
+fn summary_bytes(records: &[J]) -> Vec<u8> {
+    serde_json::to_vec_pretty(&summary_document(records)).unwrap()
 }
 
 fn control_footprint(path: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
@@ -283,6 +333,7 @@ fn control_footprint(path: &Path, root: &Path, out: &mut Vec<String>) -> Result<
 
 fn retained_control(base: &Path, rounds: &[&str]) -> Result<Vec<String>, String> {
     let mut expected = vec![
+        "campaign-summary.json".to_string(),
         "inventory-after.json".to_string(),
         "inventory-before.json".to_string(),
         "registry".to_string(),
@@ -350,6 +401,242 @@ fn retained_control(base: &Path, rounds: &[&str]) -> Result<Vec<String>, String>
     Ok(footprint)
 }
 
+struct CampaignRound {
+    index: usize,
+    repair: bool,
+    formal: PathBuf,
+    user: PathBuf,
+}
+
+fn campaign_round(base: &Path, index: usize, repair: bool) -> CampaignRound {
+    let directory = base.join(format!("round-{index}"));
+    CampaignRound {
+        index,
+        repair,
+        formal: directory.join("formal.git"),
+        user: directory.join("user-owned.txt"),
+    }
+}
+
+fn twenty_round_plans(base: &Path) -> Vec<CampaignRound> {
+    (1..=20)
+        .map(|index| campaign_round(base, index, index % 5 == 0))
+        .collect()
+}
+
+struct CompletedRound {
+    formal: PathBuf,
+    user: PathBuf,
+    commit: String,
+    identity: (u64, u64),
+}
+
+fn summary_document(records: &[J]) -> J {
+    json!({"schema": 1, "max_records": 20, "records": records})
+}
+
+fn append_summary_record(records: &mut Vec<J>, record: J) -> Result<(), String> {
+    if record["completed"] != true {
+        return Err("only completed records may be appended".to_string());
+    }
+    let mut candidate = records.clone();
+    candidate.push(record);
+    if candidate.len() > 20 {
+        return Err("summary exceeds twenty records".to_string());
+    }
+    if summary_bytes(&candidate).len() > 256 * 1024 {
+        return Err("summary exceeds 256KiB".to_string());
+    }
+    *records = candidate;
+    Ok(())
+}
+
+fn write_summary(path: &Path, records: &[J]) {
+    assert!(records.len() <= 20, "summary exceeds twenty records");
+    assert_summary(&summary_document(records), records.len());
+    let bytes = summary_bytes(records);
+    assert!(bytes.len() <= 256 * 1024, "summary exceeds 256KiB");
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes).unwrap();
+    fs::rename(temporary, path).unwrap();
+}
+
+fn assert_summary(document: &J, expected: usize) {
+    assert_eq!(document["max_records"], 20);
+    let records = document["records"].as_array().unwrap();
+    assert_eq!(records.len(), expected);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record["index"], json!(index + 1));
+        assert_eq!(record["completed"], true);
+        assert!(record["expected_artifact"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(record["output"]["commit"], record["expected_artifact"]);
+        assert_eq!(record["cleanup"]["registry_slots"], 0);
+        assert_eq!(record["cleanup"]["owned_roots"], 0);
+        assert_eq!(record["cleanup"]["reports"], 2);
+    }
+}
+
+fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
+    assert!(!rounds.is_empty() && rounds.len() <= 20);
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let excluded: Vec<PathBuf> = rounds
+        .iter()
+        .flat_map(|round| [round.formal.clone(), round.user.clone()])
+        .collect();
+    let summary_path = base.join("campaign-summary.json");
+    write_summary(&summary_path, &[]);
+    let _campaign_evidence = FailureEvidence(vec![
+        base.join("inventory-before.json"),
+        base.join("inventory-after.json"),
+        summary_path.clone(),
+    ]);
+    let mut completed: Vec<CompletedRound> = Vec::new();
+    let mut records: Vec<J> = Vec::new();
+    let mut control: Option<Vec<String>> = None;
+    for (position, round) in rounds.iter().enumerate() {
+        assert_eq!(round.index, position + 1);
+        common::create_dir(base.join(format!("round-{}", round.index))).unwrap();
+        eprintln!(
+            "native campaign round {}/{} starting: {}",
+            round.index,
+            rounds.len(),
+            if round.repair {
+                "repair_restart"
+            } else {
+                "normal"
+            }
+        );
+        let started = Instant::now();
+        run_native_receiver_in(ReceiverSpec {
+            apply_development: true,
+            apply_acceptance: true,
+            apply_delivery: true,
+            apply_repair: round.repair,
+            apply_restart: round.repair,
+            base,
+            formal_target: &round.formal,
+            user_asset: &round.user,
+            excluded: &excluded,
+        });
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+        let before: J =
+            serde_json::from_slice(&fs::read(base.join("inventory-before.json")).unwrap()).unwrap();
+        let after: J =
+            serde_json::from_slice(&fs::read(base.join("inventory-after.json")).unwrap()).unwrap();
+        assert_eq!(before["expected_identity"], after["expected_identity"]);
+        let expected_artifact = before["expected_identity"]["candidate"]
+            .as_str()
+            .expect("missing expected artifact");
+        let actual_ref = git(&round.formal, &["rev-parse", "refs/heads/main"]);
+        assert_eq!(actual_ref, expected_artifact);
+        let identity = user_identity(&round.user);
+        completed.push(CompletedRound {
+            formal: round.formal.clone(),
+            user: round.user.clone(),
+            commit: actual_ref.clone(),
+            identity,
+        });
+        for prior in &completed {
+            assert_round_output(&prior.formal, &prior.user, &prior.commit, prior.identity);
+        }
+
+        let before_marked = before["processes"]["count"]
+            .as_u64()
+            .expect("missing process count");
+        let after_marked = after["processes"]["count"]
+            .as_u64()
+            .expect("missing process count");
+        assert_eq!(after_marked, 0);
+        let (report_count, report_bytes) = report_pair_metadata(base);
+        let names: Vec<String> = rounds[..=position]
+            .iter()
+            .map(|round| format!("round-{}", round.index))
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let current = retained_control(base, &names).unwrap();
+        if let Some(reference) = &control {
+            assert_eq!(reference, &current, "shared control footprint changed");
+        } else {
+            control = Some(current);
+        }
+        let slots = occupied_slots().unwrap();
+        assert_eq!(slots, 0);
+        assert!(!is_registered("project").unwrap());
+        let owned_roots = ["workspace", "temp"]
+            .iter()
+            .filter(|root| after["roots"][root]["exists"] == true)
+            .count();
+        assert_eq!(owned_roots, 0);
+
+        let record = json!({
+            "index": round.index,
+            "scenario": if round.repair { "repair_restart" } else { "normal" },
+            "completed": true,
+            "expected_artifact": expected_artifact,
+            "output": {
+                "ref": "refs/heads/main",
+                "commit": actual_ref,
+                "content": "version B",
+            },
+            "user_identity": {
+                "dev": identity.0,
+                "ino": identity.1,
+                "bytes": fs::metadata(&round.user).unwrap().len(),
+            },
+            "elapsed_ms": elapsed_ms,
+            "inventory": {
+                "before": {
+                    "marked": before_marked,
+                    "process_truncated": before["processes"]["truncated"],
+                    "incomplete_processes": incomplete_processes(&before),
+                    "base": compact_base(&before),
+                },
+                "after": {
+                    "marked": after_marked,
+                    "process_truncated": after["processes"]["truncated"],
+                    "incomplete_processes": incomplete_processes(&after),
+                    "base": compact_base(&after),
+                },
+                "roots": after["roots"],
+                "runtime_roots": after["runtime_roots"],
+                "open_files": after["open_files"],
+                "worktrees": after["worktrees"],
+                "state_exists": after["state"]["exists"],
+                "cleanup_exists": after["cleanup"]["exists"],
+                "registry": {
+                    "registered": after["registry"]["registered"],
+                    "entry_null": after["registry"]["entry"].is_null(),
+                    "slots": after["registry"]["occupied_slots"],
+                },
+                "queue_absent": after["queue_entries"]["error"].is_string(),
+            },
+            "cleanup": {
+                "owned_roots": owned_roots,
+                "registry_slots": slots,
+                "reports": report_count,
+                "report_bytes": report_bytes,
+                "completed_rounds": records.len() + 1,
+            }
+        });
+        let mut candidate = records.clone();
+        append_summary_record(&mut candidate, record).unwrap();
+        assert_summary(&summary_document(&candidate), candidate.len());
+        write_summary(&summary_path, &candidate);
+        records = candidate;
+        eprintln!("native campaign round {}/{} completed: elapsed_ms={elapsed_ms}, marked_before={before_marked}, marked_after={after_marked}, slots={slots}, owned_roots={owned_roots}, reports={report_count}, report_bytes={report_bytes}", round.index, rounds.len());
+    }
+    assert_eq!(
+        records.len(),
+        rounds.len(),
+        "campaign did not complete all rounds"
+    );
+    assert!(!is_registered("project").unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+}
+
 #[test]
 fn retained_control_rejects_unexpected_entries() {
     let temp = temp();
@@ -361,6 +648,11 @@ fn retained_control_rejects_unexpected_entries() {
         common::create_dir(round.join("formal.git")).unwrap();
         fs::write(round.join("user-owned.txt"), "unrelated user asset").unwrap();
     }
+    fs::write(
+        base.join("campaign-summary.json"),
+        r#"{"schema":1,"max_records":20,"records":[]}"#,
+    )
+    .unwrap();
     fs::write(base.join("inventory-before.json"), "{}").unwrap();
     fs::write(base.join("inventory-after.json"), "{}").unwrap();
     let registry = base.join("registry");
@@ -491,7 +783,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         ]
     };
     let notifications = if apply_repair { 4 } else { 2 };
-    let mut artifact_names = vec!["source", "acceptance", "reviewer-checkout"];
+    let mut artifact_names = vec!["source", "development", "reviewer-checkout"];
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
@@ -549,9 +841,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         evidence_paths.extend([
             base.join("inventory-before.json"),
             base.join("inventory-after.json"),
+            base.join("campaign-summary.json"),
         ]);
     }
-    let _failure_evidence = FailureEvidence(evidence_paths);
+    let mut failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
     // Only an explicit operator opt-in may widen the disposable copy's directory
@@ -600,6 +893,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             developer_release=developer_release.display(), repair_release=repair_release.display()
         );
     }
+    instruction_text.push_str(" Use only the supplied queue path. Never create, copy, rename, edit or probe queue, guard or state directories. Stop and fail on any non-lock-busy error; never fabricate task-apply, output, event, verdict or readiness, and never create a replacement or duplicate artifact.");
     fs::write(&instructions, instruction_text).unwrap();
     let items = config
         .as_object_mut()
@@ -706,13 +1000,55 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             &["config", "user.email", "native@example.invalid"],
         );
         let review_instruction = if apply_repair {
-            "This is the deliberately incomplete first review for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, then commit it locally. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. Do not write an acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+            "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. This is the deliberately incomplete first development for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, edit and stage/add that file, then create one new local Git commit. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         } else {
-            "Complete the authorized development assignment: change file to exactly version B and commit locally. Do not write an acceptance verdict. The complete assignment is to write file and commit it here. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+            "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. Complete the authorized development assignment: replace the contents of the file named `file` with exactly `version B` followed by a newline, edit and stage/add that file, and create one new local Git commit. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         };
         let (worker, result) =
             acceptance_live::native(&mut env, &q, &development_cwd, "review", review_instruction);
         assert_ne!(worker["session"], registered["session"]);
+        let worker_report = worker_root
+            .as_ref()
+            .unwrap()
+            .join("submissions")
+            .join(format!("{}.json", result["message_id"].as_str().unwrap()));
+        assert!(
+            worker_report.exists(),
+            "developer collector report is missing"
+        );
+        failure_evidence.0.push(worker_report);
+        let output = &result["output"];
+        let output_id = output["id"].as_str().expect("developer output id");
+        let input_id = output["input"].as_str().expect("developer input id");
+        assert_ne!(output_id, input_id, "developer did not create a new commit");
+        let output_cwd = Path::new(
+            output["location"]
+                .as_str()
+                .expect("developer output location"),
+        );
+        assert_eq!(
+            git(output_cwd, &["rev-parse", "HEAD"]),
+            output_id,
+            "developer HEAD is not the collected output"
+        );
+        let expected_content = if apply_repair {
+            "version INCOMPLETE"
+        } else {
+            "version B"
+        };
+        let show = format!("{output_id}:file");
+        let committed = std::process::Command::new("git")
+            .current_dir(output_cwd)
+            .args(["show", &show])
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        assert_eq!(
+            committed.stdout.as_slice(),
+            format!("{expected_content}\n").as_bytes(),
+            "developer committed the wrong file content"
+        );
+        assert!(!development_cwd.join(".herdr-verdict.json").exists());
         util::atomic_write_json(&developer_release,
             &json!({"session":worker["session"],"runtime":worker_root,"status":"server stopped and reaped after terminal collection"})).unwrap();
         Some(result)
