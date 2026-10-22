@@ -240,6 +240,40 @@ fn installed_real_opencode_developer_result_is_applied_by_native_receiver() {
 }
 
 #[test]
+#[ignore = "requires a real submitted OpenCode worker recovered by fresh CLI collection without resend"]
+fn installed_real_opencode_submitted_worker_is_collected_by_fresh_cli() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
+        apply_worker_recovery: true,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
 #[ignore = "requires real OpenCode 1.19.3 config/model and native shell permission; ACK/stall same-session recovery"]
 fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -264,6 +298,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -297,6 +332,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -330,6 +366,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -363,6 +400,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -396,6 +434,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -429,6 +468,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -462,6 +502,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -495,6 +536,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_missing_report: true,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -535,6 +577,7 @@ fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supe
         apply_missing_report: false,
         apply_unknown_delivery: true,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -587,6 +630,7 @@ fn installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: true,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -622,6 +666,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -1009,6 +1054,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_missing_report: false,
             apply_unknown_delivery: false,
             apply_cleanup_recovery: false,
+            apply_worker_recovery: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1185,6 +1231,7 @@ struct ReceiverSpec<'a> {
     apply_missing_report: bool,
     apply_unknown_delivery: bool,
     apply_cleanup_recovery: bool,
+    apply_worker_recovery: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1221,6 +1268,7 @@ fn run_native_receiver(
         apply_missing_report: false,
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1247,6 +1295,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_missing_report,
         apply_unknown_delivery,
         apply_cleanup_recovery,
+        apply_worker_recovery,
         unavailable_dependency,
         base,
         formal_target,
@@ -1418,11 +1467,33 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "cleanup recovery requires the native repair/restart delivery fixture"
     );
+    assert!(
+        !apply_worker_recovery
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && !apply_unknown_delivery
+                && !apply_cleanup_recovery
+                && unavailable_dependency.is_none()),
+        "worker recovery requires isolated native development"
+    );
     let selected_config_before = (apply_concurrent
         || apply_approval_block
         || apply_missing_report
         || apply_unknown_delivery
-        || apply_cleanup_recovery)
+        || apply_cleanup_recovery
+        || apply_worker_recovery)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1552,6 +1623,22 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         evidence_paths.extend([
             worker_root.join("server.log"),
             worker_root.join("submission.json"),
+        ]);
+    }
+    if apply_worker_recovery {
+        evidence_paths.extend([
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("creation.json"),
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("dispatch.json"),
+            worker_root
+                .as_ref()
+                .expect("worker recovery runtime")
+                .join("runtime.json"),
         ]);
     }
     if let Some(reviewer_root) = &reviewer_root {
@@ -2658,22 +2745,36 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         } else {
             review_instruction.to_string()
         };
-        let (worker, result) = match development_adapter {
-            DevelopmentAdapter::OpenCode => acceptance_live::native(
+        let (worker, result) = if apply_worker_recovery {
+            let failure_snapshot = base.join("worker-recovery-failure.json");
+            failure_evidence.0.push(failure_snapshot.clone());
+            recover_submitted_worker(
                 &mut env,
                 &q,
                 &development_cwd,
                 "review",
                 &review_instruction,
-            ),
-            DevelopmentAdapter::Codex => acceptance_live::native_codex(
-                &mut env,
-                &q,
-                &development_cwd,
-                worker_root.as_ref().unwrap(),
-                "review",
-                &review_instruction,
-            ),
+                &mut failure_evidence,
+                &failure_snapshot,
+            )
+        } else {
+            match development_adapter {
+                DevelopmentAdapter::OpenCode => acceptance_live::native(
+                    &mut env,
+                    &q,
+                    &development_cwd,
+                    "review",
+                    &review_instruction,
+                ),
+                DevelopmentAdapter::Codex => acceptance_live::native_codex(
+                    &mut env,
+                    &q,
+                    &development_cwd,
+                    worker_root.as_ref().unwrap(),
+                    "review",
+                    &review_instruction,
+                ),
+            }
         };
         assert_ne!(worker["session"], registered["session"]);
         let worker_report = match development_adapter {
@@ -3331,6 +3432,17 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         return;
     }
+    if apply_worker_recovery {
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("worker-recovery config snapshot"),
+            "selected OpenCode configuration changed during worker-recovery scenario"
+        );
+    }
     if apply_delivery {
         // The native coordinator has finished both notifications. Stop the queue
         // watcher before the external driver takes the queue lock for delivery.
@@ -3362,6 +3474,456 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     assert!(!env.workspace_root.exists());
     assert!(!env.temp_root.exists());
     assert_eq!(occupied_slots().unwrap(), 0);
+}
+
+struct WorkerCustody<'a> {
+    outer: &'a mut super::OwnedEnvironment,
+    task_id: String,
+    instance_id: String,
+    armed: bool,
+}
+
+impl<'a> WorkerCustody<'a> {
+    fn release(outer: &'a mut super::OwnedEnvironment) -> Self {
+        assert!(
+            outer.owns_lock(),
+            "worker custody requires owned environment"
+        );
+        let task_id = outer.task_id.clone();
+        let instance_id = outer.instance_id.clone();
+        outer.cleanup_on_drop = false;
+        outer.release_ownership();
+        Self {
+            outer,
+            task_id,
+            instance_id,
+            armed: true,
+        }
+    }
+
+    fn resume(mut self) {
+        assert!(self.armed, "worker custody already resolved");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match restore_environment(&self.task_id) {
+                Ok(env) => {
+                    assert_eq!(
+                        env.instance_id, self.instance_id,
+                        "worker custody instance changed"
+                    );
+                    self.outer.env = Some(env);
+                    self.outer.cleanup_on_drop = true;
+                    self.armed = false;
+                    return;
+                }
+                Err(error)
+                    if error.kind == herdr_flow::error::ErrorKind::StateBusy
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("worker custody resume failed: {error}"),
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match restore_environment(&self.task_id) {
+                Ok(env) => {
+                    if env.instance_id != self.instance_id {
+                        eprintln!(
+                            "worker custody instance changed; preserving {}",
+                            self.task_id
+                        );
+                    } else {
+                        self.outer.env = Some(env);
+                        self.outer.cleanup_on_drop = true;
+                    }
+                    return;
+                }
+                Err(error)
+                    if error.kind == herdr_flow::error::ErrorKind::StateBusy
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    eprintln!("worker custody could not reacquire: {error}");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WorkerCustody<'_> {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn worker_submission_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(root.join("submissions")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= 64 {
+            return Err(std::io::Error::other(
+                "worker submissions directory exceeds 64 entries",
+            ));
+        }
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+fn worker_collect_busy(stderr: &str) -> bool {
+    stderr.contains("wait queue busy; retry after current poll")
+        || stderr.contains("OpenCode submission is busy")
+}
+
+fn wait_worker_event(q: &Path, name: &str) -> J {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = queue::load_queue(q).unwrap();
+        let events: Vec<_> = state["events"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, event)| event["wait"] == name)
+            .map(|(_, event)| event.clone())
+            .collect();
+        assert!(events.len() <= 1, "duplicate worker events");
+        if let Some(event) = events.into_iter().next() {
+            return event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker event was not attached after signalled collection"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn write_worker_snapshot(path: &Path, value: &J) {
+    util::atomic_write_json(path, &bounded_delivery_evidence(value)).unwrap();
+}
+
+fn collect_worker_with_fresh_cli(
+    root: &Path,
+    task_id: &str,
+    message: &str,
+    snapshot_path: &Path,
+    snapshot: &mut J,
+) -> J {
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "fresh worker collection deadline for {message}"
+        );
+        let output = cli_output_with_timeout(
+            &[
+                "task-runtime",
+                "collect",
+                "--task",
+                task_id,
+                "--state-dir",
+                root.to_str().expect("worker root UTF-8"),
+            ],
+            remaining.min(Duration::from_secs(60)),
+        );
+        assert!(
+            Instant::now() < deadline,
+            "fresh worker collection deadline for {message}"
+        );
+        let status = json!({"success": output.status.success(), "code": output.status.code()});
+        if output.status.success() {
+            let journal: J = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| panic!("fresh worker collect output invalid: {error}"));
+            snapshot["cli"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"status":status,"phase":journal["phase"]}));
+            write_worker_snapshot(snapshot_path, snapshot);
+            if journal["phase"] == "signalled" {
+                assert_eq!(journal["message_id"], json!(message));
+                return journal;
+            }
+            assert!(
+                matches!(
+                    journal["phase"].as_str(),
+                    Some("sending" | "submitted" | "running")
+                ),
+                "fresh worker collect returned unexpected phase: {}",
+                journal["phase"]
+            );
+        } else {
+            snapshot["cli"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"status":status}));
+            write_worker_snapshot(snapshot_path, snapshot);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                worker_collect_busy(&stderr),
+                "fresh worker collect failed with non-retryable status {:?}",
+                output.status.code()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fresh worker collection deadline for {message}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn recover_submitted_worker(
+    env: &mut super::OwnedEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+    failure_evidence: &mut FailureEvidence,
+    failure_snapshot: &Path,
+) -> (J, J) {
+    let mut turn = acceptance_live::native_start(env, q, cwd, name, instruction);
+    let root = turn.root.clone();
+    let instance_id = env.instance_id.clone();
+    let task_id = env.task_id.clone();
+    let state: J = util::read_json(&root.join("state.json")).unwrap();
+    let creation_before = util::read_json(&root.join("creation.json")).unwrap();
+    let dispatch_before = fs::read(root.join("dispatch.json")).unwrap();
+    let runtime_before = fs::read(root.join("runtime.json")).unwrap();
+    let submission_before = util::read_json(&root.join("submission.json")).unwrap();
+    let session = submission_before["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("worker submission session")
+        .to_string();
+    let message = submission_before["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("worker submission message")
+        .to_string();
+    let context = submission_before["context"].clone();
+    let dispatch: J = serde_json::from_slice(&dispatch_before).unwrap();
+    let report_path = root.join("submissions").join(format!("{message}.json"));
+    failure_evidence.0.push(report_path);
+    let mut failure_metadata = json!({
+        "task_id": task_id.clone(),
+        "session": session.clone(),
+        "message": message.clone(),
+        "endpoint": turn.endpoint.clone(),
+        "cwd": cwd.to_str().expect("worker cwd UTF-8"),
+        "submission_phase": submission_before["phase"],
+        "creation": {
+            "phase": creation_before["phase"],
+            "session": creation_before["session"],
+            "packet_sha256": creation_before["packet_sha256"],
+            "queue_id": creation_before["queue_id"],
+        },
+        "dispatch": {
+            "phase": dispatch["phase"],
+            "session": dispatch["session"],
+            "packet_sha256": dispatch["packet_sha256"],
+        },
+        "submission": {
+            "phase": submission_before["phase"],
+            "session": submission_before["session"],
+            "message_id": submission_before["message_id"],
+            "context": context.clone(),
+        },
+        "cli": []
+    });
+    write_worker_snapshot(failure_snapshot, &failure_metadata);
+    assert_eq!(submission_before["phase"], "submitted");
+    assert_eq!(state["session"], json!(session));
+    assert_eq!(state["adapter"], "opencode");
+    assert_eq!(state["cwd"], json!(cwd.to_str().expect("worker cwd UTF-8")));
+    assert_eq!(state["endpoint"], json!(turn.endpoint));
+    assert_eq!(submission_before["model"], state["model"]);
+    assert_eq!(submission_before["cwd"], state["cwd"]);
+    assert_eq!(creation_before["phase"], "bound");
+    assert_eq!(creation_before["session"], json!(session));
+    assert_eq!(creation_before["wait"], json!(name));
+    assert_eq!(creation_before["queue_dir"], json!(q));
+    let packet_sha = creation_before["packet_sha256"].clone();
+    assert_eq!(dispatch["phase"], "sending");
+    assert_eq!(dispatch["session"], json!(session));
+    assert_eq!(dispatch["packet_sha256"], packet_sha);
+    let runtime: J = serde_json::from_slice(&runtime_before).unwrap();
+    assert_eq!(runtime["instance"], json!(instance_id));
+    assert_eq!(
+        runtime["cwd"],
+        json!(cwd.to_str().expect("worker cwd UTF-8"))
+    );
+    assert_eq!(
+        turn.endpoint,
+        format!(
+            "http://127.0.0.1:{}",
+            runtime["port"].as_u64().expect("worker runtime port")
+        )
+    );
+    assert_eq!(runtime["model"], state["model"]);
+    let queue_before = queue::load_queue(q).unwrap();
+    let queue_id = queue_before["id"].clone();
+    let wait_before = queue_before["waits"][name].clone();
+    let binding = progress::binding(&wait_before).unwrap();
+    assert_eq!(wait_before["producer"]["session"], json!(session));
+    assert_eq!(
+        queue_before["tasks"][wait_before["task"].as_str().unwrap()]["writer"]["producer"]
+            ["session"],
+        json!(session)
+    );
+    assert_eq!(context["queue_id"], queue_id);
+    assert_eq!(context["queue_dir"], json!(q));
+    assert_eq!(context["wait"], json!(name));
+    assert_eq!(context["binding"], binding);
+    assert_eq!(context["producer_identity"]["session"], json!(session));
+    assert_eq!(
+        context["producer_identity"]["cwd"],
+        json!(cwd.to_str().expect("worker cwd UTF-8"))
+    );
+    assert_eq!(context["producer_identity"]["model"], state["model"]);
+    assert!(submission_before["report"].is_null());
+    failure_metadata["packet_sha256"] = packet_sha.clone();
+    failure_metadata["queue_id"] = queue_id.clone();
+    failure_metadata["wait"] = json!(name);
+    failure_metadata["binding"] = binding.clone();
+    failure_metadata["context"] = context.clone();
+    write_worker_snapshot(failure_snapshot, &failure_metadata);
+
+    let custody = WorkerCustody::release(env);
+    let result = collect_worker_with_fresh_cli(
+        &root,
+        &task_id,
+        &message,
+        failure_snapshot,
+        &mut failure_metadata,
+    );
+
+    let submission_after = util::read_json(&root.join("submission.json")).unwrap();
+    assert_eq!(submission_after, result);
+    assert_eq!(submission_after["phase"], "signalled");
+    assert_eq!(submission_after["session"], json!(session));
+    assert_eq!(submission_after["message_id"], json!(message));
+    assert_eq!(submission_after["context"], context);
+    assert_eq!(
+        util::read_json(&root.join("state.json")).unwrap()["session"],
+        json!(session)
+    );
+    assert_eq!(
+        util::read_json(&root.join("creation.json")).unwrap(),
+        creation_before
+    );
+    assert_eq!(
+        fs::read(root.join("dispatch.json")).unwrap(),
+        dispatch_before
+    );
+    assert_eq!(
+        util::read_json(&root.join("runtime.json")).unwrap(),
+        runtime
+    );
+    assert_eq!(worker_submission_files(&root).unwrap().len(), 1);
+    let event = wait_worker_event(q, name);
+    assert_eq!(event["outcome"], "complete");
+
+    let rows = session_rows(&turn.client, &turn.endpoint, &session, cwd);
+    let user_rows: Vec<_> = rows
+        .as_array()
+        .expect("worker session rows")
+        .iter()
+        .filter(|row| row["info"]["role"] == "user")
+        .collect();
+    assert_eq!(user_rows.len(), 1, "exactly one user prompt expected");
+    assert_eq!(user_rows[0]["info"]["id"], json!(message));
+    assert_eq!(user_rows[0]["info"]["sessionID"], json!(session));
+    exact_terminal_completion_millis(&rows, &result, cwd, "worker recovery");
+    assert_eq!(result["outcome"], "complete");
+    assert!(result["report"]
+        .as_str()
+        .is_some_and(|report| !report.is_empty()));
+
+    turn.stop();
+    custody.resume();
+    assert_eq!(env.instance_id, instance_id);
+    (state, result)
+}
+
+struct RegistryRootGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl RegistryRootGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("HERDR_TASK_ENV_ROOT");
+        std::env::set_var("HERDR_TASK_ENV_ROOT", path);
+        Self { previous }
+    }
+}
+
+impl Drop for RegistryRootGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("HERDR_TASK_ENV_ROOT", value),
+            None => std::env::remove_var("HERDR_TASK_ENV_ROOT"),
+        }
+    }
+}
+
+#[test]
+fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let root = temp.path();
+    let _registry = RegistryRootGuard::set(&root.join("registry"));
+
+    let mut outer = super::environment_with(root, "worker-custody-success", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let custody = WorkerCustody::release(&mut outer);
+    custody.resume();
+    assert_eq!(outer.instance_id, instance_id);
+    destroy_environment(&outer).unwrap();
+    assert!(!is_registered("worker-custody-success").unwrap());
+
+    let mut outer = super::environment_with(root, "worker-custody-failure", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let custody = WorkerCustody::release(&mut outer);
+    drop(custody);
+    assert!(is_registered("worker-custody-failure").unwrap());
+    assert_eq!(outer.instance_id, instance_id);
+    drop(outer);
+    assert!(!is_registered("worker-custody-failure").unwrap());
+    assert!(!root.join("workspace").exists());
+    assert!(!root.join("temporary").exists());
+
+    let mut outer = super::environment_with(root, "worker-custody-panic", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _custody = WorkerCustody::release(&mut outer);
+        panic!("fixture custody panic");
+    }));
+    assert!(unwound.is_err());
+    assert!(is_registered("worker-custody-panic").unwrap());
+    assert_eq!(outer.instance_id, instance_id);
+    drop(outer);
+    assert!(!is_registered("worker-custody-panic").unwrap());
+    assert!(!root.join("workspace").exists());
 }
 
 fn exact_original_event(state: &J) -> Option<(String, J)> {
@@ -5481,6 +6043,10 @@ fn confirm_delivery(
 }
 
 fn cli_output(args: &[&str]) -> std::process::Output {
+    cli_output_with_timeout(args, Duration::from_secs(60))
+}
+
+fn cli_output_with_timeout(args: &[&str], timeout: Duration) -> std::process::Output {
     use std::io::{Read, Seek, SeekFrom};
     fn read_bounded(file: &mut std::fs::File) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -5500,7 +6066,7 @@ fn cli_output(args: &[&str]) -> std::process::Output {
                 .unwrap(),
         ),
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + timeout;
     loop {
         let status = child.child.as_mut().unwrap().try_wait().unwrap();
         if let Some(status) = status {
@@ -5516,11 +6082,7 @@ fn cli_output(args: &[&str]) -> std::process::Output {
                 let _ = process.kill();
                 let _ = process.wait();
             }
-            panic!(
-                "delivery CLI timed out; stdout={:?}; stderr={:?}",
-                String::from_utf8_lossy(&read_bounded(&mut stdout_file)),
-                String::from_utf8_lossy(&read_bounded(&mut stderr_file))
-            );
+            panic!("bounded CLI timed out; stdout/stderr omitted");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
