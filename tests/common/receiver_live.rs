@@ -214,6 +214,15 @@ fn twenty_round_schedule_and_summary_bounds_are_fixed() {
     let oversized = json!({"completed": true, "padding": "x".repeat(300 * 1024)});
     let mut oversized_records = Vec::new();
     assert!(append_summary_record(&mut oversized_records, oversized).is_err());
+    let temp = temp();
+    let path = temp.path().join("summary.json");
+    write_summary(&path, &[]);
+    let previous = fs::read(&path).unwrap();
+    let invalid = json!({"index": 1, "completed": true, "expected_artifact": "a",
+        "output": {"commit": "wrong"},
+        "cleanup": {"registry_slots": 0, "owned_roots": 0, "reports": 2}});
+    assert!(std::panic::catch_unwind(|| write_summary(&path, &[invalid])).is_err());
+    assert_eq!(fs::read(&path).unwrap(), previous);
 }
 
 fn user_identity(path: &Path) -> (u64, u64) {
@@ -287,13 +296,10 @@ fn compact_base(report: &J) -> J {
 fn incomplete_processes(report: &J) -> usize {
     report["processes"]["records"]
         .as_array()
-        .map(|records| {
-            records
-                .iter()
-                .filter(|record| record["complete"] != true)
-                .count()
-        })
-        .unwrap_or(0)
+        .expect("missing process records")
+        .iter()
+        .filter(|record| record["complete"] != true)
+        .count()
 }
 
 fn summary_bytes(records: &[J]) -> Vec<u8> {
@@ -447,15 +453,15 @@ fn append_summary_record(records: &mut Vec<J>, record: J) -> Result<(), String> 
 
 fn write_summary(path: &Path, records: &[J]) {
     assert!(records.len() <= 20, "summary exceeds twenty records");
+    assert_summary(&summary_document(records), records.len());
     let bytes = summary_bytes(records);
     assert!(bytes.len() <= 256 * 1024, "summary exceeds 256KiB");
-    fs::write(path, bytes).unwrap();
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes).unwrap();
+    fs::rename(temporary, path).unwrap();
 }
 
-fn assert_summary(path: &Path, expected: usize) {
-    let bytes = fs::read(path).unwrap();
-    assert!(bytes.len() <= 256 * 1024, "summary exceeds 256KiB");
-    let document: J = serde_json::from_slice(&bytes).unwrap();
+fn assert_summary(document: &J, expected: usize) {
     assert_eq!(document["max_records"], 20);
     let records = document["records"].as_array().unwrap();
     assert_eq!(records.len(), expected);
@@ -480,7 +486,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
         .flat_map(|round| [round.formal.clone(), round.user.clone()])
         .collect();
     let summary_path = base.join("campaign-summary.json");
-    write_summary(&summary_path, &[]).unwrap();
+    write_summary(&summary_path, &[]);
     let _campaign_evidence = FailureEvidence(vec![
         base.join("inventory-before.json"),
         base.join("inventory-after.json"),
@@ -492,6 +498,16 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
     for (position, round) in rounds.iter().enumerate() {
         assert_eq!(round.index, position + 1);
         common::create_dir(base.join(format!("round-{}", round.index))).unwrap();
+        eprintln!(
+            "native campaign round {}/{} starting: {}",
+            round.index,
+            rounds.len(),
+            if round.repair {
+                "repair_restart"
+            } else {
+                "normal"
+            }
+        );
         let started = Instant::now();
         run_native_receiver_in(ReceiverSpec {
             apply_development: true,
@@ -504,7 +520,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             user_asset: &round.user,
             excluded: &excluded,
         });
-        let elapsed_ms = started.as_millis().min(u128::from(u64::MAX)) as u64;
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         let before: J =
             serde_json::from_slice(&fs::read(base.join("inventory-before.json")).unwrap()).unwrap();
@@ -527,8 +543,12 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             assert_round_output(&prior.formal, &prior.user, &prior.commit, prior.identity);
         }
 
-        let before_marked = before["processes"]["count"].as_u64().unwrap_or(0);
-        let after_marked = after["processes"]["count"].as_u64().unwrap_or(0);
+        let before_marked = before["processes"]["count"]
+            .as_u64()
+            .expect("missing process count");
+        let after_marked = after["processes"]["count"]
+            .as_u64()
+            .expect("missing process count");
         assert_eq!(after_marked, 0);
         let (report_count, report_bytes) = report_pair_metadata(base);
         let names: Vec<String> = rounds[..=position]
@@ -601,9 +621,12 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
                 "completed_rounds": records.len() + 1,
             }
         });
-        append_summary_record(&mut records, record).unwrap();
-        write_summary(&summary_path, &records);
-        assert_summary(&summary_path, records.len());
+        let mut candidate = records.clone();
+        append_summary_record(&mut candidate, record).unwrap();
+        assert_summary(&summary_document(&candidate), candidate.len());
+        write_summary(&summary_path, &candidate);
+        records = candidate;
+        eprintln!("native campaign round {}/{} completed: elapsed_ms={elapsed_ms}, marked_before={before_marked}, marked_after={after_marked}, slots={slots}, owned_roots={owned_roots}, reports={report_count}, report_bytes={report_bytes}", round.index, rounds.len());
     }
     assert_eq!(
         records.len(),

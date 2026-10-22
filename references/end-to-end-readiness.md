@@ -488,3 +488,12 @@ attempt completed round 1 but failed in round 2 because the developer wrote
 `INCOMPLETE` instead of the required literal `version INCOMPLETE`; its bounded
 failure evidence was retained. The prompt was clarified without relaxing the
 assertion, and the complete campaign was rerun successfully.
+
+Twenty-round validation attempt (2026-10-22): the first actual campaign stopped
+at round 4 after three complete rounds (681.70s total). The fourth developer
+reported an acceptance verdict without changing the artifact; its collected
+output ID equalled the input ID. Application rejected the duplicate artifact,
+and the real event was acknowledged but not applied before the deadline.
+The retained summary contains only rounds 1–3. Bounded failure evidence was
+retained and the selected configuration bytes were unchanged. This is not
+twenty-task acceptance; no failed round was retried or counted as complete.
