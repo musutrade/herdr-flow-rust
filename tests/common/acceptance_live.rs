@@ -100,6 +100,109 @@ fn native_driver_retries_busy_only_before_a_creation_or_dispatch_journal() {
     assert_eq!(calls, 1);
 }
 
+pub(super) fn require_nested_userns() {
+    let mut child = std::process::Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "bwrap",
+            "--unshare-user",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/bin/true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("nested user namespace preflight unavailable: {error}"));
+    let mut child = NativeChild::new(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.child_mut().try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "nested user namespace preflight failed: this host cannot run Codex's bubblewrap bootstrap inside the task boundary"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nested user namespace preflight timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+struct NativeChild {
+    child: Option<std::process::Child>,
+}
+
+impl NativeChild {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.child.as_mut().unwrap()
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            wait_bounded_child(&mut child, "native child");
+        }
+    }
+}
+
+impl Drop for NativeChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn wait_bounded_child(child: &mut std::process::Child, label: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                eprintln!("{label} did not exit within 5s after kill");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{label} wait failed after kill: {error}");
+                return;
+            }
+        }
+    }
+}
+
+#[test]
+fn native_child_guard_reaps_a_dropped_process() {
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    drop(NativeChild::new(child));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "native child was not reaped"
+    );
+}
+
 pub(super) fn native(
     env: &mut TaskEnvironment,
     q: &Path,
@@ -123,7 +226,7 @@ pub(super) fn native(
     let model: J =
         serde_json::from_str(&std::env::var("HERDR_LIVE_OPENCODE_MODEL").unwrap()).unwrap();
     let spec = json!({"adapter":"opencode","binary":std::env::var("HERDR_LIVE_OPENCODE_BINARY").unwrap(),"cwd":cwd,"model":model,"port":port()});
-    let mut child = task_runtime::launch(env, &root, &spec).unwrap();
+    let mut child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
     ready(spec["port"].as_u64().unwrap() as u16);
     let instruction=format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
     let state = retry_unstarted(&root, "creation.json", || {
@@ -166,8 +269,7 @@ pub(super) fn native(
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
     assert_eq!(result["outcome"], "complete");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.stop();
     println!("real native {name}: exact session collected and server stopped");
     (state, result)
 }
@@ -199,11 +301,11 @@ pub(super) fn native_codex(
         "cwd":cwd,
         "model":model
     });
-    let mut child = task_runtime::launch(env, root, &spec).unwrap();
+    let mut child = NativeChild::new(task_runtime::launch(env, root, &spec).unwrap());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !root.join("server.sock").exists() {
         assert!(
-            child.try_wait().unwrap().is_none(),
+            child.child_mut().try_wait().unwrap().is_none(),
             "Codex app-server exited before socket readiness"
         );
         assert!(
@@ -225,6 +327,10 @@ pub(super) fn native_codex(
         task_runtime::native::dispatch(env, root)
     })
     .unwrap();
+    assert_eq!(state["adapter"], "codex");
+    assert!(state["session"]
+        .as_str()
+        .is_some_and(|session| !session.is_empty()));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let result = loop {
         let collected = task_runtime::native::collect(env, root);
@@ -252,8 +358,10 @@ pub(super) fn native_codex(
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
     assert_eq!(result["outcome"], "complete");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    assert_eq!(result["session"], state["session"]);
+    assert!(result["turn"].as_str().is_some_and(|turn| !turn.is_empty()));
+    assert_eq!(result["report"]["id"], result["turn"]);
+    child.stop();
     assert!(
         fs::read(&config_source).unwrap() == config_before,
         "selected Codex config changed"

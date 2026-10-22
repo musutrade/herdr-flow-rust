@@ -147,6 +147,18 @@ are the only supported policies. This does not answer pending requests or change
 a user's settings. A native command that needs approval stays blocked for explicit
 handling.
 
+The Codex app-server is itself started through the outer `/usr/bin/bwrap` task
+boundary. On the tested host, a single outer user namespace succeeds but the
+Codex/bootstrap invocation that needs a nested user namespace fails before any
+model turn (observed live1 attempt, 24.80s). The mixed preflight now reproduces
+that nested namespace probe with a bounded child and fails explicitly instead of
+treating an unsupported host as success. A secure fix without weakening the
+runtime would require either a host that permits nested unprivileged user
+namespaces or a reviewed product bootstrap that lets Codex use the outer task
+sandbox as authoritative while suppressing only its redundant inner bwrap.
+Disabling the sandbox, removing the outer boundary, adding CAP_SYS_ADMIN, or
+changing sysctl/AppArmor/global policies is not an acceptable workaround.
+
 Formal reviewer reports and their four continuation outcomes use the
 [independent acceptance protocol](independent-acceptance.md). Native collectors
 register the bound report separately from execution completion.

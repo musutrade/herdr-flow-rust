@@ -150,6 +150,7 @@ fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() 
 #[test]
 #[ignore = "requires a real task-owned Codex developer, real OpenCode coordinator/reviewer and Local delivery"]
 fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
+    acceptance_live::require_nested_userns();
     let temp = temp();
     let base = temp.path();
     let formal_target = base.join("formal.git");

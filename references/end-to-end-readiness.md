@@ -546,8 +546,21 @@ cleanup.
 
 Codex collection binds `turn.json`, not an OpenCode `message_id`/submission file;
 the test uses that producer artifact for event, binding, report and output checks.
-Codex approval policy is `on-request`; pending approvals are not answered
-automatically. Actual approval keys may be used only for authorized in-scope
-prompts. This scenario is not a Codex-coordinator proof, a twenty-task campaign,
-or evidence of global-cache absence; a task-owned Codex receiver/session
-bootstrap is not provided by this change. #38/#32 remain OPEN.
+The test asserts the selected adapter, worker session, turn and report identity,
+and the Codex launcher holds the child behind a bounded RAII guard that kills and
+reaps it on normal completion, readiness/creation/dispatch/collection failure or
+panic. It never waits unbounded. Codex approval policy is `on-request`; pending
+approvals are not answered automatically. Actual approval keys may be used only
+for authorized in-scope prompts. A bounded no-model nested-userns preflight runs
+before the expensive scenario and fails explicitly on unsupported hosts rather
+than skipping or reporting success. This scenario is not a Codex-coordinator
+proof, a twenty-task campaign, or evidence of global-cache absence; a task-owned
+Codex receiver/session bootstrap is not provided by this change. #38/#32 remain
+OPEN.
+
+Codex mixed live attempt1 failed before model work at 24.80s because the Codex
+app-server could not create a nested user namespace under the task-owned outer
+bubblewrap boundary. A single-bwrap probe succeeded while the reproduced nested
+probe failed; this is retained as a host/bootstrap limitation, not a model or
+product-success claim. The mixed test now runs a bounded nested-userns preflight
+and fails explicitly on unsupported hosts; it does not skip or report success.
