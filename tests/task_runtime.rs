@@ -795,3 +795,8 @@ fn production_foreground_watchers_are_owned_and_reclaimed() {
 
 #[path = "common/receiver_live.rs"]
 mod receiver_live;
+
+#[path = "common/native_inventory.rs"]
+mod native_inventory;
+#[path = "common/resource_inventory.rs"]
+mod resource_inventory;

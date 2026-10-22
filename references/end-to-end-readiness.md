@@ -382,3 +382,41 @@ ignored; the absolute CRAP threshold of 10 had no violations. An initial fixture
 compile error was corrected, and an earlier gate run was stopped for observer
 side-effect corrections; these are not live-task completion evidence. No model
 run was performed for this collector-only batch, and #38/#32 remain open.
+
+## Resource observations during a native confirmed restart
+
+The existing opt-in confirmed-restart scenario now records two metadata reports:
+after actual Local delivery confirmation and before custody transfer, then after
+fresh CLI finish and child reaping, before fixture teardown. Captured paths cover
+all five native runtime roots and the actual environment registrations; ordinary
+clones are not invented as registered worktrees. The live snapshot checks the
+exact parent/role task set and four owned waits/events/deliveries, with no mixed,
+unknown or unrelated queue entries. Existing candidate, receipt, target and user
+asset identity assertions still run.
+
+The post-finish snapshot requires absent owned roots/state/cleanup/queue and
+registered paths, zero occupied slots and zero matching marked processes. Only
+the expected missing queue read is allowed, after independent absence checks;
+all other post-finish observation errors fail the scenario. Live process sampling
+errors/truncation remain visible in the report; only structural observation
+errors fail the pre-handoff snapshot. Reports save the actual confirmed candidate,
+intent/receipt and queue IDs; collector keys must match those production IDs.
+Registry absence means this task's entry is absent, not deletion of the shared
+registry file or root. Reports are capped at 1 MiB each
+and stored in the disposable fixture root, excluded from usage totals. Existing
+failure diagnostics retain at most 64 KiB per report, potentially a partial JSON
+report. Successful runs remove reports with fixture teardown.
+
+Outside FD/cwd targets and per-process completeness remain observations, not
+proof of global absence. Reads may update atime; symlink targets are not traversed
+by the base inventory. This is one observed real restart, not a shared-base or
+twenty-task campaign, whole-campaign disk stability, or complete global-cache and
+process discovery proof. No new permission or product isolation policy is added.
+
+Local verification on 2026-10-22 passed the final identity-bound native scenario
+(1/1, 227.60s). It sampled two marked processes before custody transfer and zero
+matches after finish; the actual expected delivery/queue identities and owned
+path cleanup assertions passed. Selected OpenCode configuration bytes were
+unchanged. An earlier run passed in 240.01s before the expected-identity report
+checks were tightened; the final claim uses the later run. Neither run counts as
+a twenty-task campaign or proof of complete process/global-cache discovery.
