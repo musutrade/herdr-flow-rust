@@ -1000,16 +1000,23 @@ environment is `destroy_failed`, delivery remains `cleaning` with
 `shared_removed=true`, the exact intent and receipt are retained, the cleanup plan
 and registry slot remain, owned queue entries are gone, and the workspace is
 missing at its original path while the displaced directory retains its exact
-device/inode. The assertions compare the plan's recorded roots with its
-pending/completed sets instead of assuming which later root was visited. A
-pre-cleanup rejection would leave phase `confirmed`, no plan and the queue entries
-intact; the displaced workspace alone is not accepted as proof of partial cleanup.
+device/inode. A bounded private snapshot of the failed state/plan and CLI statuses
+is registered before the fault and written before the assertions; it contains no
+raw error output. The assertions bind the failed document and plan to the
+original environment instance and the registry entry to the same instance, roots
+and state file. They compare the plan's recorded roots with its pending/completed
+sets instead of assuming which later root was visited. A pre-cleanup rejection
+would leave phase `confirmed`, no plan and the queue entries intact; the displaced
+workspace alone is not accepted as proof of partial cleanup.
 
 An attempted `delivery execute` must be rejected without changing the target or
-user asset. The test then renames the same displaced directory back to the exact
-original workspace path and verifies the inode, runs a fresh unmarked CLI
-`finish`, and requires removal of the remaining roots, registry/state/plan, queue
-and slots while preserving the delivered ref and user asset. A bounded RAII guard
+user asset. A queue directory that is already gone is accepted only when the
+expected temporary root was actually removed; otherwise the persisted queue must
+contain exactly empty owned sections. The test then renames the same displaced
+directory back to the exact original workspace path and verifies the inode, runs
+a fresh unmarked CLI `finish` that returns `finished:true`, and requires removal of
+the remaining roots, registry/state/plan, queue and slots while preserving the
+delivered ref and user asset. A bounded RAII guard
 restores the displaced root before child reaping and handoff cleanup on unwind;
 it never overwrites an unexpected replacement path. No product journal, receipt,
 ACK or application is fabricated, and no raw evidence is uploaded.

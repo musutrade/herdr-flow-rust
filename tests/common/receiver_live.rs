@@ -534,6 +534,7 @@ fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supe
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: true,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -3281,6 +3282,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
         let artifact = delivery_artifact.as_ref().unwrap();
+        let failure_snapshot = base.join("cleanup-failure-snapshot.json");
+        failure_evidence.0.push(failure_snapshot.clone());
         external_cleanup_recovery(
             env,
             &q,
@@ -3294,6 +3297,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 user_identity: user_identity.unwrap(),
                 inventory: inventory.expect("cleanup recovery requires inventory"),
             },
+            &failure_snapshot,
         );
         let selected_config_after =
             fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
@@ -5700,7 +5704,11 @@ struct DisplacedWorkspace {
 
 impl DisplacedWorkspace {
     fn displace(original: &Path, displaced: PathBuf) -> Self {
-        assert!(!displaced.exists(), "fault destination already exists");
+        match fs::symlink_metadata(&displaced) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => panic!("fault destination already exists"),
+            Err(error) => panic!("cannot inspect fault destination: {error}"),
+        }
         let metadata = fs::symlink_metadata(original).unwrap();
         assert!(metadata.is_dir(), "fault target is not a directory");
         let identity = (metadata.dev(), metadata.ino());
@@ -5713,46 +5721,77 @@ impl DisplacedWorkspace {
         }
     }
 
-    fn restore(&mut self) {
+    fn restore_result(&mut self) -> std::result::Result<(), String> {
         if !self.armed {
-            return;
+            return Ok(());
         }
-        assert!(
-            !self.original.exists(),
-            "refusing to overwrite a replacement workspace path"
-        );
-        let metadata = fs::symlink_metadata(&self.displaced).unwrap();
-        assert_eq!(
-            (metadata.dev(), metadata.ino()),
-            self.identity,
-            "displaced workspace identity changed"
-        );
-        fs::rename(&self.displaced, &self.original).unwrap();
-        let restored = fs::symlink_metadata(&self.original).unwrap();
-        assert_eq!(
-            (restored.dev(), restored.ino()),
-            self.identity,
-            "restored workspace identity changed"
-        );
+        match fs::symlink_metadata(&self.original) {
+            Ok(_) => {
+                return Err(format!(
+                    "refusing to overwrite replacement at {}",
+                    self.original.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect original {}: {error}",
+                    self.original.display()
+                ));
+            }
+        }
+        let metadata = fs::symlink_metadata(&self.displaced).map_err(|error| {
+            format!(
+                "cannot inspect displaced {}: {error}",
+                self.displaced.display()
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "displaced {} is not a directory",
+                self.displaced.display()
+            ));
+        }
+        if (metadata.dev(), metadata.ino()) != self.identity {
+            return Err(format!(
+                "displaced {} identity changed",
+                self.displaced.display()
+            ));
+        }
+        fs::rename(&self.displaced, &self.original).map_err(|error| {
+            format!(
+                "cannot restore {} to {}: {error}",
+                self.displaced.display(),
+                self.original.display()
+            )
+        })?;
+        let restored = fs::symlink_metadata(&self.original).map_err(|error| {
+            format!(
+                "cannot inspect restored {}: {error}",
+                self.original.display()
+            )
+        })?;
+        if !restored.is_dir() || (restored.dev(), restored.ino()) != self.identity {
+            return Err(format!(
+                "restored {} identity changed",
+                self.original.display()
+            ));
+        }
         self.armed = false;
+        Ok(())
+    }
+
+    fn restore(&mut self) {
+        if let Err(error) = self.restore_result() {
+            panic!("cleanup fault workspace restore failed: {error}");
+        }
     }
 }
 
 impl Drop for DisplacedWorkspace {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if self.original.exists() {
-            eprintln!(
-                "cleanup fault left displaced workspace; replacement retained at {}",
-                self.original.display()
-            );
-            return;
-        }
-        match fs::rename(&self.displaced, &self.original) {
-            Ok(()) => self.armed = false,
-            Err(error) => eprintln!("cleanup fault workspace restore failed: {error}"),
+        if let Err(error) = self.restore_result() {
+            eprintln!("cleanup fault workspace restore failed: {error}");
         }
     }
 }
@@ -5763,6 +5802,7 @@ fn external_cleanup_recovery(
     server: &mut std::process::Child,
     guard_child: &mut std::process::Child,
     spec: RestartSpec<'_>,
+    failure_snapshot: &Path,
 ) {
     let RestartSpec {
         inventory,
@@ -5775,6 +5815,7 @@ fn external_cleanup_recovery(
     let workspace = env.workspace_root.clone();
     let temporary = env.temp_root.clone();
     let state_file = env.state_file().to_path_buf();
+    let instance_id = env.instance_id.clone();
     let displaced = workspace.with_file_name("workspace-cleanup-fault");
     let workspace_metadata = fs::symlink_metadata(&workspace).unwrap();
     let workspace_identity = (workspace_metadata.dev(), workspace_metadata.ino());
@@ -5813,6 +5854,9 @@ fn external_cleanup_recovery(
 
     let mut fault = DisplacedWorkspace::displace(&workspace, displaced);
     let failed_finish = cli_output(&["delivery", "finish", "--task", "project"]);
+    let plan_path = cleanup_state_path("project").unwrap();
+    let mut snapshot = cleanup_failure_snapshot(&state_file, &plan_path, &failed_finish, None);
+    write_cleanup_failure_snapshot(failure_snapshot, &snapshot);
     assert!(
         !failed_finish.status.success(),
         "fixture workspace fault unexpectedly finished"
@@ -5828,18 +5872,36 @@ fn external_cleanup_recovery(
     )
     .unwrap_or_else(|error| panic!("parse failed state: {error}"));
     assert_eq!(failed_state["state"], "destroy_failed");
+    assert_eq!(failed_state["instance_id"], json!(instance_id));
+    assert_eq!(
+        failed_state["workspace_root"],
+        json!(workspace.to_str().unwrap())
+    );
+    assert_eq!(
+        failed_state["temp_root"],
+        json!(temporary.to_str().unwrap())
+    );
     assert_eq!(failed_state["delivery"]["phase"], "cleaning");
     assert_eq!(failed_state["delivery"]["shared_removed"], true);
     assert_eq!(failed_state["delivery"]["id"], intent_id);
     assert_eq!(failed_state["delivery"]["receipt"], receipt);
-    assert!(is_registered("project").unwrap());
-    assert!(occupied_slots().unwrap() > 0);
+    let registry = load_registry().unwrap();
+    let entry = registry.get("project").unwrap();
+    assert_eq!(entry.instance_id, instance_id);
+    assert_eq!(entry.workspace_root, workspace);
+    assert_eq!(entry.temp_root, temporary);
+    assert_eq!(entry.state_file, state_file);
+    assert_eq!(
+        entry.claimed_roots(),
+        vec![workspace.clone(), temporary.clone()]
+    );
+    assert_eq!(occupied_slots().unwrap(), 1);
 
-    let plan_path = cleanup_state_path("project").unwrap();
     assert!(plan_path.exists());
     let plan: J = serde_json::from_slice(&fs::read(&plan_path).unwrap())
         .unwrap_or_else(|error| panic!("parse cleanup plan: {error}"));
     assert_eq!(plan["task_id"], "project");
+    assert_eq!(plan["instance_id"], json!(instance_id));
     assert_eq!(plan["delivery_confirmed"], true);
     let roots = plan["roots"].as_array().unwrap();
     let pending = plan["pending_root_removals"].as_array().unwrap();
@@ -5870,36 +5932,58 @@ fn external_cleanup_recovery(
         let still_pending = pending.iter().any(|pending| pending == &root["path"]);
         if !still_pending {
             assert!(
-                !path.exists(),
+                !cleanup_path_present(path),
                 "completed cleanup root still exists: {}",
                 path.display()
             );
         } else if path == workspace.as_path() {
-            assert!(!workspace.exists());
-            assert!(fault.displaced.exists());
+            assert!(!cleanup_path_present(&workspace));
+            assert!(cleanup_path_present(&fault.displaced));
         } else {
             assert!(
-                path.exists(),
+                cleanup_path_present(path),
                 "pending cleanup root vanished: {}",
                 path.display()
             );
         }
     }
-    assert!(!workspace.exists());
-    assert!(fault.displaced.exists());
+    assert!(!cleanup_path_present(&workspace));
+    assert!(cleanup_path_present(&fault.displaced));
     let displaced_metadata = fs::symlink_metadata(&fault.displaced).unwrap();
     assert_eq!(
         (displaced_metadata.dev(), displaced_metadata.ino()),
         workspace_identity
     );
-    if q.exists() {
-        let after_cleanup = queue::load_queue(q).unwrap();
-        for section in ["tasks", "waits", "events", "deliveries"] {
+    match fs::symlink_metadata(q) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            assert!(q.starts_with(&temporary));
             assert!(
-                after_cleanup[section].as_object().unwrap().is_empty(),
-                "queue-owned {section} remain after partial cleanup"
+                !cleanup_path_present(&temporary),
+                "queue absent while expected temporary root remains"
+            );
+            assert!(
+                !pending
+                    .iter()
+                    .any(|path| path == &json!(temporary.to_str().unwrap())),
+                "queue absent but temporary root is still pending cleanup"
             );
         }
+        Ok(metadata) => {
+            assert!(metadata.is_dir(), "queue path is not a directory");
+            let queue_file = q.join("queue.json");
+            assert!(
+                fs::symlink_metadata(&queue_file).is_ok(),
+                "queue directory is missing queue.json"
+            );
+            let after_cleanup = queue::load_queue(q).unwrap();
+            for section in ["tasks", "waits", "events", "deliveries"] {
+                assert!(
+                    after_cleanup[section].as_object().unwrap().is_empty(),
+                    "queue-owned {section} remain after partial cleanup"
+                );
+            }
+        }
+        Err(error) => panic!("cannot inspect queue path: {error}"),
     }
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
 
@@ -5913,6 +5997,8 @@ fn external_cleanup_recovery(
         "unexpected replay rejection: {}",
         String::from_utf8_lossy(&replay.stderr)
     );
+    snapshot["replay"] = cli_failure_status(&replay);
+    write_cleanup_failure_snapshot(failure_snapshot, &snapshot);
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
 
     fault.restore();
@@ -5924,16 +6010,20 @@ fn external_cleanup_recovery(
             String::from_utf8_lossy(&final_finish.stderr)
         );
     }
+    let finished: J = serde_json::from_slice(&final_finish.stdout)
+        .unwrap_or_else(|error| panic!("fresh cleanup finish output invalid: {error}"));
+    assert_eq!(finished["finished"], true);
     reaper.wait();
-    assert!(!workspace.exists());
-    assert!(!temporary.exists());
-    assert!(!state_file.exists());
+    assert!(!cleanup_path_present(&workspace));
+    assert!(!cleanup_path_present(&temporary));
+    assert!(!cleanup_path_present(&state_file));
     assert!(!is_registered("project").unwrap());
-    assert!(!plan_path.exists());
+    assert!(!cleanup_path_present(&plan_path));
     assert_eq!(occupied_slots().unwrap(), 0);
-    assert!(!q.exists());
+    assert!(!cleanup_path_present(q));
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
     assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
+    fs::remove_file(failure_snapshot).unwrap();
     inventory.after(&expected_inventory);
     custody.disarm();
 }
@@ -6019,6 +6109,118 @@ fn delivery_evidence_caps_escaped_and_multibyte_payloads() {
     assert_eq!(bounded["truncated"], true);
     assert!(bounded.get("data").is_none());
     assert!(serde_json::to_vec_pretty(&bounded).unwrap().len() <= 60 * 1024);
+}
+
+fn bounded_cleanup_document(path: &Path, limit: usize) -> J {
+    use std::io::Read;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return json!({"missing": true});
+        }
+        Err(error) => return json!({"unreadable": format!("{:?}", error.kind())}),
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = file.take((limit + 1) as u64).read_to_end(&mut bytes) {
+        return json!({"unreadable": format!("{:?}", error.kind())});
+    }
+    if bytes.len() > limit {
+        return json!({"truncated": true, "bytes_at_least": limit + 1});
+    }
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({"invalid_json": true, "bytes": bytes.len()}))
+}
+
+fn cli_failure_status(output: &std::process::Output) -> J {
+    json!({"success": output.status.success(), "code": output.status.code()})
+}
+
+fn cleanup_failure_snapshot(
+    state_file: &Path,
+    plan_path: &Path,
+    finish: &std::process::Output,
+    replay: Option<&std::process::Output>,
+) -> J {
+    json!({
+        "finish": cli_failure_status(finish),
+        "replay": replay.map(cli_failure_status),
+        "state": bounded_cleanup_document(state_file, 24 * 1024),
+        "plan": bounded_cleanup_document(plan_path, 24 * 1024),
+    })
+}
+
+fn write_cleanup_failure_snapshot(path: &Path, value: &J) {
+    util::atomic_write_json(path, &bounded_delivery_evidence(value)).unwrap();
+}
+
+fn cleanup_path_present(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("cannot inspect {}: {error}", path.display()),
+    }
+}
+
+#[test]
+fn cleanup_fault_guard_restores_original_workspace_inode() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = temp.path().join("workspace");
+    fs::create_dir(&original).unwrap();
+    fs::write(original.join("artifact"), "version B").unwrap();
+    let metadata = fs::symlink_metadata(&original).unwrap();
+    let identity = (metadata.dev(), metadata.ino());
+    let displaced = temp.path().join("displaced");
+    let mut fault = DisplacedWorkspace::displace(&original, displaced.clone());
+    assert!(!cleanup_path_present(&original));
+    let moved = fs::symlink_metadata(&displaced).unwrap();
+    assert_eq!((moved.dev(), moved.ino()), identity);
+    fault.restore();
+    let restored = fs::symlink_metadata(&original).unwrap();
+    assert_eq!((restored.dev(), restored.ino()), identity);
+    assert_eq!(
+        fs::read_to_string(original.join("artifact")).unwrap(),
+        "version B"
+    );
+}
+
+#[test]
+fn cleanup_fault_guard_refuses_replacement_dangling_and_mismatched_inode() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let original = temp.path().join("replacement-workspace");
+    fs::create_dir(&original).unwrap();
+    let displaced = temp.path().join("replacement-displaced");
+    let mut replacement = DisplacedWorkspace::displace(&original, displaced.clone());
+    fs::create_dir(&original).unwrap();
+    assert!(replacement.restore_result().is_err());
+    assert!(original.is_dir());
+    assert!(displaced.is_dir());
+    fs::remove_dir(&original).unwrap();
+    replacement.restore();
+
+    let original = temp.path().join("dangling-workspace");
+    fs::create_dir(&original).unwrap();
+    let displaced = temp.path().join("dangling-displaced");
+    let mut dangling = DisplacedWorkspace::displace(&original, displaced);
+    std::os::unix::fs::symlink(temp.path().join("missing"), &original).unwrap();
+    assert!(dangling.restore_result().is_err());
+    assert!(fs::symlink_metadata(&original)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    fs::remove_file(&original).unwrap();
+    dangling.restore();
+
+    let original = temp.path().join("mismatch-workspace");
+    fs::create_dir(&original).unwrap();
+    let displaced = temp.path().join("mismatch-displaced");
+    let mut mismatch = DisplacedWorkspace::displace(&original, displaced.clone());
+    fs::remove_dir_all(&displaced).unwrap();
+    fs::create_dir(&displaced).unwrap();
+    assert!(mismatch.restore_result().is_err());
+    assert!(!cleanup_path_present(&original));
+    assert!(displaced.is_dir());
+    mismatch.armed = false;
 }
 
 fn external_unknown_delivery(
