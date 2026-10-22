@@ -143,6 +143,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_late_acceptance: false,
         apply_unable_restore: false,
         apply_restored_review: false,
+        apply_ambiguous: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -170,6 +171,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_late_acceptance: true,
         apply_unable_restore: false,
         apply_restored_review: false,
+        apply_ambiguous: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -197,6 +199,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_late_acceptance: false,
         apply_unable_restore: true,
         apply_restored_review: false,
+        apply_ambiguous: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -224,7 +227,36 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_late_acceptance: false,
         apply_unable_restore: true,
         apply_restored_review: true,
+        apply_ambiguous: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real OpenCode reviewer and native coordinator; contradictory basis and clarification stop"]
+fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: true,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: true,
+        unavailable_dependency: None,
         base,
         formal_target: &formal_target,
         user_asset: &user_asset,
@@ -277,6 +309,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_late_acceptance: false,
         apply_unable_restore: false,
         apply_restored_review: false,
+        apply_ambiguous: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -658,6 +691,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_late_acceptance: false,
             apply_unable_restore: false,
             apply_restored_review: false,
+            apply_ambiguous: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -828,6 +862,7 @@ struct ReceiverSpec<'a> {
     apply_late_acceptance: bool,
     apply_unable_restore: bool,
     apply_restored_review: bool,
+    apply_ambiguous: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -858,6 +893,7 @@ fn run_native_receiver(
         apply_late_acceptance: false,
         apply_unable_restore: false,
         apply_restored_review: false,
+        apply_ambiguous: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -878,6 +914,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_late_acceptance,
         apply_unable_restore,
         apply_restored_review,
+        apply_ambiguous,
         unavailable_dependency,
         base,
         formal_target,
@@ -944,6 +981,21 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_some()),
         "restored review requires the phase-1 unable mode"
     );
+    assert!(
+        !apply_ambiguous
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && unavailable_dependency.is_none()),
+        "ambiguous requirement requires acceptance-only OpenCode mode"
+    );
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -994,6 +1046,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "repair-native".to_string(),
             "review".to_string(),
         ]
+    } else if apply_ambiguous {
+        vec!["accept-native".to_string(), "project".to_string()]
     } else {
         vec![
             "accept-native".to_string(),
@@ -1001,8 +1055,18 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "review".to_string(),
         ]
     };
-    let notifications = if apply_repair { 4 } else { 2 };
-    let mut artifact_names = vec!["source", "development", "reviewer-checkout"];
+    let notifications = if apply_repair {
+        4
+    } else if apply_ambiguous {
+        1
+    } else {
+        2
+    };
+    let mut artifact_names = if apply_ambiguous {
+        vec!["source", "reviewer-checkout"]
+    } else {
+        vec!["source", "development", "reviewer-checkout"]
+    };
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
@@ -1012,7 +1076,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> = if apply_development {
+    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous {
         artifact_names
             .iter()
             .map(|name| {
@@ -1088,6 +1152,12 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 .join("reviewer-checkout/.herdr-verdict.json"),
         );
     }
+    if apply_ambiguous {
+        evidence_paths.push(
+            env.workspace_root
+                .join("reviewer-checkout/.herdr-verdict.json"),
+        );
+    }
     let mut failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
@@ -1136,7 +1206,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             release=root.join("developer-release.json").display()
         );
     }
-    if apply_acceptance {
+    if apply_acceptance && !apply_ambiguous {
         instruction_text = instruction_text.replace("Exactly one real development result for task review will arrive.", "This is a two-stage protocol in the same coordinator session: first development task review, then independent acceptance task accept-native. Each stage has its own notification. Handle task review as follows.").replace("This is not independent acceptance or delivery.", "This first stage does not establish independent acceptance or delivery.");
         if apply_restored_review {
             instruction_text = instruction_text.replace(
@@ -1168,6 +1238,15 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             }
         });
         instruction_text.push_str(&format!("\nContinuation JSON schema (replace only angle-bracket placeholders with actual observed values; state_version must be an integer): {shape}. The root activity value is an OBJECT, and activity.result_wait is a nested OBJECT. Do not flatten result_wait fields, do not put result_wait at the root, and do not make activity a string. Read tasks.project.state_version after ACK before writing your spec. Validate this shape locally before the single lineage invocation; stop on any schema error rather than fixing and resending."));
+    }
+    if apply_ambiguous {
+        let application = cwd.join("ambiguity-application.json");
+        instruction_text = format!(
+            "Authorized disposable coordinator test. Do not delegate or create sessions. Exactly one real independent acceptance result for task accept-native will arrive. Use the exact OPENCODE_SESSION_ID from the notification for every herdr-flow command. First execute its exact queue ack command and require success; ACK is receipt only. Read current queue.json, task accept-native state_version, its exact pending event, the registered immutable verdict id/binding, and the actual report. Do not rewrite the report. Write an application JSON at {application} with task=accept-native, current state_version, that exact event, verdict=the registered verdict.id, and next_action={{kind:clarify, owner:native coordinator, reason:independent report, condition:existing authorization}}. Only an actual ambiguous report maps to clarify; if the report conclusion is not ambiguous, stop and fail instead of inventing a continuation. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once. Failed attempts are acceptable only with explicit lock-busy evidence; stop on any other error and do not retry. Then run {binary} queue readiness --state-dir {queue_path}, require active_wakeup=true, and finish. Run the ACK, task-apply and readiness in separate direct bash invocations with no echo/wrappers/OR-true and preserve their actual exit status. Do not run task-lineage, revise/continue, create a new activity, deliver, or alter the artifact, requirement, candidate, verdict or old evidence. The application schema above is complete; write only your application JSON in cwd. No repository search is authorized.",
+            application = application.display(),
+            binary = binary,
+            queue_path = queue_path
+        );
     }
     if apply_repair {
         instruction_text = format!(
@@ -1290,7 +1369,50 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         delivery_expected = Some(source_base);
     }
+    let ambiguous_artifact =
+        apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+    if let Some(artifact) = ambiguous_artifact.as_ref() {
+        let application = cwd.join("ambiguity-application.json");
+        let instruction = String::from(
+            "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include blocked checks with criterion=goal and source exactly equal to each conflicting basis reference. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd."
+        );
+        native_review_stage(
+            &mut env,
+            &q,
+            &guard,
+            &registered,
+            ReviewSpec {
+                artifact,
+                reviewer_root: reviewer_root.as_ref().unwrap(),
+                activity: "accept-native",
+                checkout: "reviewer-checkout",
+                instruction: &instruction,
+                expected_waits: &["accept-native"],
+                expect_pass: false,
+                unavailable_dependency: None,
+                development_session: None,
+                prepared_checkout: None,
+                capture_tools: false,
+                expect_ambiguous: true,
+                expected_application: Some(application.as_path()),
+                coordinator_client: Some(&client),
+                coordinator_endpoint: Some(endpoint.as_str()),
+                coordinator_cwd: Some(cwd.as_path()),
+            },
+        );
+        let source = Path::new(artifact["location"].as_str().unwrap());
+        assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
+        assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
     let development_result = if let Some(development_cwd) = development_cwd {
         git(&development_cwd, &["config", "user.name", "Native fixture"]);
         git(
@@ -1598,6 +1720,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     ),
                     prepared_checkout: None,
                     capture_tools: false,
+                    expect_ambiguous: false,
+                    expected_application: None,
+                    coordinator_client: None,
+                    coordinator_endpoint: None,
+                    coordinator_cwd: None,
                 },
             );
             if apply_restored_review {
@@ -1634,6 +1761,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     development_session: None,
                     prepared_checkout: None,
                     capture_tools: false,
+                    expect_ambiguous: false,
+                    expected_application: None,
+                    coordinator_client: None,
+                    coordinator_endpoint: None,
+                    coordinator_cwd: None,
                 },
             );
             if apply_delivery {
@@ -1725,6 +1857,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     development_session: None,
                     prepared_checkout: None,
                     capture_tools: false,
+                    expect_ambiguous: false,
+                    expected_application: None,
+                    coordinator_client: None,
+                    coordinator_endpoint: None,
+                    coordinator_cwd: None,
                 },
             );
             if apply_delivery {
@@ -3372,6 +3509,11 @@ fn restored_review_stage(spec: RestoredReviewSpec<'_>) {
                 .as_str(),
             prepared_checkout: Some(&fresh_cwd),
             capture_tools: true,
+            expect_ambiguous: false,
+            expected_application: None,
+            coordinator_client: None,
+            coordinator_endpoint: None,
+            coordinator_cwd: None,
         },
     );
     let final_state = queue::load_queue(q).unwrap();
@@ -3947,6 +4089,76 @@ fn assert_restored_shape(state: &J, waits: &[&str], coordinator: &J) {
     assert_eq!(state["tasks"]["project"]["pending"], json!([]));
 }
 
+fn assert_ambiguous_application_commands(
+    q: &Path,
+    state: &J,
+    coordinator: &J,
+    event_id: &str,
+    application: &Path,
+    commands: &[ToolCommand],
+) {
+    let session = coordinator["session"]
+        .as_str()
+        .expect("coordinator session");
+    let delivery = delivery_for_event(state, session, event_id).expect("acceptance delivery");
+    let ack = commands
+        .iter()
+        .find(|command| {
+            command.success
+                && command.command.contains("queue ack")
+                && exact_path_argument(&command.command, "--delivery", Path::new(delivery.0))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .expect("exact acceptance ACK");
+    let applies: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.success
+                && command.command.contains("queue task-apply")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    assert_eq!(applies.len(), 1, "one successful ambiguity application");
+    let application_command = applies[0];
+    assert!(exact_path_argument(
+        &application_command.command,
+        "--spec",
+        application
+    ));
+    let readiness = commands
+        .iter()
+        .find(|command| {
+            command.success
+                && command.command.contains("queue readiness")
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .expect("successful ambiguity readiness");
+    for command in [ack, application_command, readiness] {
+        assert!(command.start > 0 && command.start != i64::MAX);
+        assert!(command.end >= command.start && command.end != i64::MAX);
+    }
+    assert!(ack.end <= application_command.start);
+    assert!(application_command.end <= readiness.start);
+    for command in commands.iter().filter(|command| {
+        !command.success
+            && command.command.contains("queue task-apply")
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }) {
+        assert!(
+            lock_busy_evidence(command),
+            "non-busy ambiguity rejection exit={:?}",
+            command.exit
+        );
+    }
+    assert!(
+        commands.iter().all(|command| {
+            !command.command.contains("queue task-lineage")
+                && !command.command.contains("queue task-revise")
+        }),
+        "ambiguity phase must stop without revision or continuation"
+    );
+}
+
 struct ReviewSpec<'a> {
     artifact: &'a J,
     reviewer_root: &'a Path,
@@ -3959,6 +4171,11 @@ struct ReviewSpec<'a> {
     development_session: Option<&'a str>,
     prepared_checkout: Option<&'a Path>,
     capture_tools: bool,
+    expect_ambiguous: bool,
+    expected_application: Option<&'a Path>,
+    coordinator_client: Option<&'a ureq::Agent>,
+    coordinator_endpoint: Option<&'a str>,
+    coordinator_cwd: Option<&'a Path>,
 }
 
 fn native_review_stage(
@@ -3980,9 +4197,15 @@ fn native_review_stage(
         development_session,
         prepared_checkout,
         capture_tools,
+        expect_ambiguous,
+        expected_application,
+        coordinator_client,
+        coordinator_endpoint,
+        coordinator_cwd,
     } = spec;
-    let requirement_before =
-        queue::load_queue(q).unwrap()["tasks"]["project"]["requirements"]["1"].clone();
+    let parent_before = queue::load_queue(q).unwrap()["tasks"]["project"].clone();
+    let requirement_before = parent_before["requirements"]["1"].clone();
+    let revision_before = parent_before["requirement_revision"].clone();
     let cwd = if let Some(prepared) = prepared_checkout {
         assert!(
             queue::load_queue(q).unwrap()["tasks"]
@@ -4001,42 +4224,71 @@ fn native_review_stage(
         acceptance_live::change(q, activity);
         acceptance_live::clone_snapshot(env, artifact, checkout_name)
     };
+    let ambiguity_snapshot = expect_ambiguous.then(|| {
+        (
+            git(&cwd, &["rev-parse", "HEAD"]),
+            fs::read(cwd.join("file")).unwrap(),
+        )
+    });
     let prepared_head = prepared_checkout.map(|_| git(&cwd, &["rev-parse", "HEAD"]));
     let mut reviewer_tool_rows = J::Null;
-    let (reviewer, collected) = if unavailable_dependency.is_some() || capture_tools {
-        if let Some(dependency) = unavailable_dependency {
-            let dependency_path = cwd.join(dependency);
-            assert!(
-                !dependency_path.exists(),
-                "operator dependency unexpectedly present"
-            );
-            let tree = git(&cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
-            assert!(
-                !tree.lines().any(|line| line == dependency),
-                "operator dependency must not be committed in artifact A"
-            );
-        }
-        acceptance_live::native_with_hook(
-            env,
-            q,
-            &cwd,
-            activity_name,
-            reviewer_instruction,
-            || {},
-            |client, endpoint, result| {
-                let session = result["session"].as_str().expect("reviewer result session");
-                reviewer_tool_rows = session_rows(client, endpoint, session, &cwd);
-            },
-        )
-    } else {
-        acceptance_live::native(env, q, &cwd, activity_name, reviewer_instruction)
-    };
+    let (reviewer, collected) =
+        if unavailable_dependency.is_some() || capture_tools || expect_ambiguous {
+            if let Some(dependency) = unavailable_dependency {
+                let dependency_path = cwd.join(dependency);
+                assert!(
+                    !dependency_path.exists(),
+                    "operator dependency unexpectedly present"
+                );
+                let tree = git(&cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
+                assert!(
+                    !tree.lines().any(|line| line == dependency),
+                    "operator dependency must not be committed in artifact A"
+                );
+            }
+            acceptance_live::native_with_hook(
+                env,
+                q,
+                &cwd,
+                activity_name,
+                reviewer_instruction,
+                || {},
+                |client, endpoint, result| {
+                    let session = result["session"].as_str().expect("reviewer result session");
+                    reviewer_tool_rows = session_rows(client, endpoint, session, &cwd);
+                },
+            )
+        } else {
+            acceptance_live::native(env, q, &cwd, activity_name, reviewer_instruction)
+        };
     assert_ne!(reviewer["session"], coordinator["session"]);
     if let Some(development_session) = development_session {
         assert_ne!(reviewer["session"], development_session);
     }
-    let actual_report = util::read_json(&cwd.join(".herdr-verdict.json")).unwrap();
+    let report_path = cwd.join(".herdr-verdict.json");
+    let actual_report_bytes = fs::read(&report_path).unwrap();
+    let actual_report = util::read_json(&report_path).unwrap();
     let state = wait_for_stage(q, guard, coordinator, activity_name);
+    assert_eq!(fs::read(&report_path).unwrap(), actual_report_bytes);
+    let coordinator_commands = match (coordinator_client, coordinator_endpoint, coordinator_cwd) {
+        (Some(client), Some(endpoint), Some(cwd)) => {
+            let rows = session_rows(
+                client,
+                endpoint,
+                coordinator["session"]
+                    .as_str()
+                    .expect("coordinator session"),
+                cwd,
+            );
+            tool_commands(
+                &rows,
+                coordinator["session"]
+                    .as_str()
+                    .expect("coordinator session"),
+            )
+        }
+        _ => Vec::new(),
+    };
     if prepared_checkout.is_some() {
         assert_restored_shape(&state, expected_waits, coordinator);
     } else {
@@ -4223,6 +4475,123 @@ fn native_review_stage(
         assert_eq!(parent["approved"]["verdict"], verdict["id"]);
         assert_eq!(task["phase"], "completed");
         assert_eq!(parent["continuation"]["action"]["kind"], "delivery");
+    } else if expect_ambiguous {
+        assert_eq!(actual_report["conclusion"], "ambiguous");
+        let (head_before, file_before) = ambiguity_snapshot.as_ref().unwrap();
+        assert_eq!(head_before.as_str(), artifact["id"].as_str().unwrap());
+        assert_eq!(
+            git(&cwd, &["rev-parse", "HEAD"]).as_str(),
+            head_before.as_str()
+        );
+        assert_eq!(
+            fs::read(cwd.join("file")).unwrap().as_slice(),
+            file_before.as_slice()
+        );
+        let application = util::read_json(expected_application.unwrap()).unwrap();
+        assert_eq!(application["task"], activity_name);
+        assert_eq!(application["event"], event["id"]);
+        assert_eq!(application["verdict"], verdict["id"]);
+        assert_eq!(
+            application["state_version"].as_u64().unwrap() + 1,
+            task["state_version"].as_u64().unwrap()
+        );
+        assert_eq!(application["next_action"]["kind"], "clarify");
+        assert!(application.get("output").is_none());
+        assert!(application.get("acceptance").is_none());
+        assert_eq!(actual_report["gaps"], json!([]));
+        assert_eq!(actual_report["resolutions"], json!([]));
+        assert_eq!(actual_report["reuses"], json!([]));
+        for key in ["question", "unresolved_after_review"] {
+            let value = actual_report[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("ambiguous report lacks {key}"));
+            assert!(!value.trim().is_empty() && value.len() <= 1000);
+        }
+        let checked: std::collections::BTreeSet<String> = actual_report["agreements_checked"]
+            .as_array()
+            .expect("agreements_checked array")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        for source in [
+            AMBIGUOUS_ORIGINAL,
+            AMBIGUOUS_CHANGE,
+            AMBIGUOUS_SPECIFICATION,
+            AMBIGUOUS_CONFIRMATION,
+            AMBIGUOUS_AUTHORIZATION_SOURCE,
+        ] {
+            assert!(
+                checked.contains(source),
+                "agreements_checked omitted {source}"
+            );
+        }
+        let checks = actual_report["checks"]
+            .as_array()
+            .expect("ambiguous report checks");
+        for source in [
+            AMBIGUOUS_ORIGINAL,
+            AMBIGUOUS_CHANGE,
+            AMBIGUOUS_SPECIFICATION,
+        ] {
+            assert!(
+                checks.iter().any(|check| {
+                    check["criterion"] == "goal"
+                        && check["source"] == json!(source)
+                        && check["status"] == "blocked"
+                }),
+                "ambiguous report lacks a blocked check for {source}"
+            );
+        }
+        assert!(parent["approved"].is_null());
+        assert_eq!(task["phase"], "blocked");
+        assert_eq!(task["pending"], json!([]));
+        assert_eq!(parent["continuation"]["action"]["kind"], "clarify");
+        assert_eq!(parent["continuation"]["phase"], "planned");
+        assert_eq!(parent["continuation"]["verdict"], verdict["id"]);
+        assert_eq!(parent["continuation"]["binding"], event["binding"]);
+        assert_eq!(parent["requirements"]["1"], requirement_before);
+        assert_eq!(parent["requirement_revision"], revision_before);
+        assert_eq!(parent["candidate"], artifact["id"]);
+        assert_eq!(parent["delivery_target"], artifact["id"]);
+        let task_names: std::collections::BTreeSet<_> = state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            task_names,
+            ["accept-native", "project"].into_iter().collect(),
+            "ambiguity phase created or retained another child"
+        );
+        let reviewer_commands = tool_commands(
+            &reviewer_tool_rows,
+            reviewer["session"].as_str().expect("reviewer session"),
+        );
+        let inspection = reviewer_commands
+            .iter()
+            .find(|command| command.command.trim() == "git show HEAD:file")
+            .expect("ambiguous reviewer artifact inspection");
+        assert!(
+            terminal_tool_state(inspection),
+            "artifact inspection not terminal"
+        );
+        assert_eq!(inspection.exit, Some(0));
+        assert_eq!(inspection.output.trim(), "version A");
+        assert!(
+            inspection.start > 0
+                && inspection.start != i64::MAX
+                && inspection.end >= inspection.start
+                && inspection.end != i64::MAX
+        );
+        assert_ambiguous_application_commands(
+            q,
+            &state,
+            coordinator,
+            event["id"].as_str().expect("acceptance event id"),
+            expected_application.expect("ambiguity application path"),
+            &coordinator_commands,
+        );
     } else {
         assert_eq!(actual_report["conclusion"], "failed");
         assert!(parent["approved"].is_null());
