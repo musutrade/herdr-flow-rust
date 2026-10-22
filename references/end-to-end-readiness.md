@@ -7,13 +7,32 @@ remains open. It does not replace its issue acceptance matrix or close #32.
 
 | Boundary | Existing/current evidence | Still required for #38 |
 | --- | --- | --- |
-| Old task state | `tests/lineage.rs::legacy_migration_requires_quiescence_and_preserves_no_approval` refuses migration with a writer, pending operation, executing phase or open PR; preserves old task state and does not create a new approval. | Validate ownership association for actual pre-existing resources and undelivered artifacts; no home-directory sweep or inferred authority over unknown paths. |
-| Delivery and restart | `tests/delivery.rs` covers real local file/Git endpoints, frozen candidates, uncertain delivery, restart and cleanup faults with protocol reviewer fixtures. Real native delivery, repair, recovery and restart runs are documented below. | Actual native role output is now covered for the OpenCode scenarios below; real uncertain-delivery/cleanup-failure interruptions and customer production delivery remain unproven. |
+| Old task state | `tests/lineage.rs::legacy_migration_requires_quiescence_and_preserves_no_approval` refuses migration with a writer, pending operation, executing phase or open PR; preserves old task state and does not create a new approval. | The registered legacy-resource fixture below covers an actual undelivered file and preserved user asset. Unknown legacy paths remain outside inferred authority; no home-directory sweep. |
+| Delivery and restart | `tests/delivery.rs` covers real local file/Git endpoints, frozen candidates, uncertain delivery, restart and cleanup faults with protocol reviewer fixtures. Real native delivery, repair, recovery and restart runs are documented below. | Recorded native tests cover injected lost observation and workspace-displacement cleanup failure, including final registration removal. Arbitrary transport/filesystem failures and customer production delivery are not claimed. |
 | Repeated control state | The twenty-round protocol regression reuses one control directory and shared queue, alternating normal delivery, restore after preparation, and restore after confirmation; confirmed delivery cannot be executed again. A twenty-round real native campaign is recorded below. | Real twenty-task completion is observed below; whole-campaign disk stability and reliable global outside-root cache/session discovery remain unproven. |
 | Native execution | Opt-in installed tests and `tests/common/acceptance_live.rs` run real native roles. OpenCode native coordinator scenarios below execute ACK/application themselves; the driver only registers work and collects. | OpenCode native coordinator behavior is evidenced; Codex coordinator/session bootstrap remains blocked by the host nested-userns/product gap. |
 | Resource lifetime | Protocol regression checks task registration/slots, workspace/temp roots, plan/env/lock records, shared entries, previous deliveries and a pre-existing user asset before fixture teardown; native reports record marked processes and base resources. | Outside-root cache/session and complete process/worktree discovery remain observational; correct native delivery plus teardown is evidenced only for the recorded OpenCode scenarios. |
 | Runtime compatibility | Local readiness review found Codex 0.163.0 and OpenCode 1.19.3; selected OpenCode configuration was exercised unchanged in the native scenarios below. | Codex still requires supported nested-userns/bootstrap behavior; no OpenCode 2.0 upgrade is claimed. |
-| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Real approval handling, dispatch/takeover interruption and delivery-unknown recovery remain; the real ambiguity-to-clarify run below does not cover user-confirmed revision or resumed work. |
+| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Actual approval-block observation, missing-report execution problems and injected delivery-unknown recovery are recorded below. Submitted-worker fresh CLI collection has local evidence below; pre-POST ambiguity, takeover and server restart remain unsupported. User-confirmed requirement revision/resumed work remains outstanding. |
+
+## Outstanding acceptance decisions
+
+The scenarios below do not justify closing #38 or #32. Keep these boundaries
+separate rather than treating another passing normal run as missing evidence:
+
+| Remaining boundary | Current status | Required next step |
+| --- | --- | --- |
+| User-confirmed requirement revision after ambiguity | Actual ambiguous verdict and clarify continuation are evidenced; no user answer has been applied. | Obtain an explicit decision for the conflicting fixture basis, then validate revision and resumed work. Never invent that decision. |
+| Pre-POST dispatch ambiguity | A dispatch journal without a submission journal has no supported recovery that proves an unsent request. | Review a product recovery contract; fail closed without resend meanwhile. |
+| Worker takeover / coordinator or server restart | Submitted-worker collection while the original server lives is a distinct boundary. | A supported takeover/transport restart contract and separate evidence are needed. |
+| Codex native closed loop | Host nested-userns/bootstrap limitations remain. | Use a supported host or reviewed bootstrap support without weakening approvals or outer confinement. |
+| Complete outside-root discovery | Known roots and sampled marked processes are observed; short-lived/unlinked paths and global caches are not exhaustively discovered. | Define and verify adapter-owned resource boundaries; do not infer completeness from root deletion. |
+| Failure exactly during final registry/plan unlink | Native cleanup recovery proves eventual removal after a real partial-cleanup failure; it does not inject a fault at the final unlink instruction. | A reviewed test/product seam is needed for that narrower fault, if required; no journal mutation or timing race is presented as proof. |
+
+The original acceptance matrix remains authoritative. These classifications do
+not waive a criterion or turn an external blocker into a passing result. Local
+results in a batch awaiting publication must remain distinguishable from merged
+checks; no additional model run is required merely to restate these boundaries.
 
 ## Twenty-round protocol regression
 
