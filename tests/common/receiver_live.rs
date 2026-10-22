@@ -75,11 +75,11 @@ fn ask_external_permission(config: &mut J, path: &Path) {
     let external = external
         .as_object_mut()
         .expect("exact permission probe requires an object external_directory policy");
-    external.insert(path.into(), json!("ask"));
+    external.insert(permission_probe_pattern(Path::new(path)), json!("ask"));
 }
 
 #[test]
-fn permission_probe_policy_only_asks_for_the_exact_sentinel() {
+fn permission_probe_policy_only_asks_for_the_dedicated_directory() {
     let temp = temp();
     let sentinel = temp.path().join("sentinel.txt");
     fs::write(&sentinel, "disposable sentinel").unwrap();
@@ -91,7 +91,7 @@ fn permission_probe_policy_only_asks_for_the_exact_sentinel() {
     ask_external_permission(&mut copy, &sentinel);
     let path = sentinel.canonicalize().unwrap();
     assert_eq!(
-        copy["permission"]["external_directory"][path.to_str().unwrap()],
+        copy["permission"]["external_directory"][permission_probe_pattern(&path)],
         "ask"
     );
     assert_eq!(copy["permission"]["external_directory"]["*"], "deny");
@@ -112,11 +112,11 @@ fn permission_probe_policy_only_asks_for_the_exact_sentinel() {
 
 #[test]
 fn permission_request_identity_rejects_wrong_session_message_call_path_or_schema() {
-    let sentinel = Path::new("/tmp/native-permission-sentinel");
+    let sentinel = Path::new("/tmp/native-permission-probe/sentinel");
     let valid = json!({
         "id":"permission-1","sessionID":"ses-reviewer",
         "permission":"external_directory",
-        "patterns":["/tmp/native-permission-sentinel"],
+        "patterns":["/tmp/native-permission-probe/*"],
         "tool":{"messageID":"asst-1","callID":"call-1"}
     });
     assert_eq!(
@@ -125,7 +125,7 @@ fn permission_request_identity_rejects_wrong_session_message_call_path_or_schema
     );
     let old_schema = json!({
         "id":"permission-2","sessionID":"ses-reviewer",
-        "type":"external_directory","pattern":"/tmp/native-permission-sentinel",
+        "type":"external_directory","pattern":"/tmp/native-permission-probe/*",
         "messageID":"asst-2","callID":"call-2"
     });
     assert_eq!(
@@ -145,8 +145,11 @@ fn permission_request_identity_rejects_wrong_session_message_call_path_or_schema
     wrong_call["tool"]["callID"] = json!("");
     reject(&wrong_call);
     let mut wrong_suffix = valid.clone();
-    wrong_suffix["patterns"] = json!(["/tmp/native-permission-sentinel-suffix"]);
+    wrong_suffix["patterns"] = json!(["/tmp/native-permission-probe-suffix/*"]);
     reject(&wrong_suffix);
+    let mut extra_pattern = valid.clone();
+    extra_pattern["patterns"] = json!(["/tmp/native-permission-probe/*", "/tmp/unrelated/*"]);
+    reject(&extra_pattern);
     let mut wrong_type = valid.clone();
     wrong_type["permission"] = json!("bash");
     reject(&wrong_type);
@@ -1957,7 +1960,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         return;
     }
     if let Some(cwd) = approval_cwd.as_ref() {
-        let sentinel = env.temp_root.join("approval-sentinel.txt");
+        let probe_dir = env.temp_root.join("approval-probe");
+        common::create_dir_all(&probe_dir).unwrap();
+        let sentinel = probe_dir.join("sentinel.txt");
         fs::write(&sentinel, "disposable approval probe sentinel\n").unwrap();
         let sentinel = sentinel.canonicalize().unwrap();
         let sentinel_bytes = fs::read(&sentinel).unwrap();
@@ -2897,6 +2902,22 @@ fn bounded_permission_snapshot(permissions: &J, session: &str) -> J {
         .filter(|permission| permission["sessionID"] == session)
         .collect();
     let total = rows.len();
+    let field_truncated = rows.iter().take(8).any(|permission| {
+        ["pattern", "patterns", "title"]
+            .iter()
+            .any(|key| match &permission[*key] {
+                J::String(text) => text.chars().count() > 512,
+                J::Array(items) => {
+                    items.len() > 8
+                        || items
+                            .iter()
+                            .take(8)
+                            .filter_map(J::as_str)
+                            .any(|text| text.chars().count() > 512)
+                }
+                _ => false,
+            })
+    });
     let bounded: Vec<_> = rows
         .into_iter()
         .take(8)
@@ -2929,7 +2950,29 @@ fn bounded_permission_snapshot(permissions: &J, session: &str) -> J {
             })
         })
         .collect();
-    json!({"session":session,"total":total,"truncated":total>8,"permissions":bounded})
+    let mut snapshot = json!({"session":session,"total":total,"truncated":total>8 || field_truncated,"permissions":bounded});
+    while serde_json::to_vec_pretty(&snapshot).unwrap().len() > 60 * 1024 {
+        snapshot["permissions"].as_array_mut().unwrap().pop();
+        snapshot["truncated"] = json!(true);
+    }
+    snapshot
+}
+
+#[test]
+fn permission_snapshot_is_byte_bounded_and_reports_truncation() {
+    let rows = json!((0..8)
+        .map(|index| json!({"id":index,"sessionID":"ses-probe",
+        "patterns":vec!["\u{0001}".repeat(512);8]}))
+        .collect::<Vec<_>>());
+    let snapshot = bounded_permission_snapshot(&rows, "ses-probe");
+    assert_eq!(snapshot["total"], 8);
+    assert_eq!(snapshot["truncated"], true);
+    assert!(serde_json::to_vec_pretty(&snapshot).unwrap().len() <= 60 * 1024);
+    let long_field = json!([{"sessionID":"ses-probe","patterns":["界".repeat(513)]}]);
+    assert_eq!(
+        bounded_permission_snapshot(&long_field, "ses-probe")["truncated"],
+        true
+    );
 }
 
 fn permission_patterns(permission: &J) -> Vec<String> {
@@ -2944,6 +2987,17 @@ fn permission_patterns(permission: &J) -> Vec<String> {
         }
     }
     patterns
+}
+
+fn permission_probe_pattern(sentinel: &Path) -> String {
+    format!(
+        "{}/*",
+        sentinel
+            .parent()
+            .expect("sentinel parent")
+            .to_str()
+            .unwrap()
+    )
 }
 
 fn permission_request_fields(
@@ -2967,14 +3021,8 @@ fn permission_request_fields(
     if permission_type != "external_directory" {
         return Err("permission type is not external_directory".into());
     }
-    let sentinel = sentinel
-        .to_str()
-        .ok_or_else(|| "sentinel path is not UTF-8".to_string())?;
-    if !permission_patterns(permission)
-        .iter()
-        .any(|pattern| pattern == sentinel)
-    {
-        return Err("permission pattern is not the exact sentinel".into());
+    if permission_patterns(permission) != vec![permission_probe_pattern(sentinel)] {
+        return Err("permission pattern is not the exact dedicated sentinel directory".into());
     }
     let message = permission["tool"]["messageID"]
         .as_str()
