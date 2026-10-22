@@ -1051,6 +1051,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "concurrent native turns require isolated OpenCode mode"
     );
+    let selected_config_before = apply_concurrent
+        .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -1120,8 +1122,6 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         4
     } else if apply_ambiguous {
         1
-    } else if apply_concurrent {
-        2
     } else {
         2
     };
@@ -1481,12 +1481,37 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         return;
     }
     if let Some(artifact) = concurrent_artifact.as_ref() {
-        let selected_config_before =
-            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
         let accept_cwd = acceptance_live::clone_snapshot(&env, artifact, "accept-a");
         let develop_cwd = acceptance_live::clone_snapshot(&env, artifact, "develop-b");
         let accept_instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD against all current requirement references. Use direct tools only. Run exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve actual exit status, output and timestamps. Do not edit tracked files or commit. Write .herdr-verdict.json in cwd following acceptance_protocol with actual checks and evidence, and derive the conclusion yourself. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
-        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline, stage/add it, and create one new local Git commit. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline. Use an edit/write tool or a direct shell command. Stage/add the file and create one new local Git commit with the exact direct command `git commit -m \"concurrent B\"`. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
+        let accept_wait_before = queue::load_queue(&q).unwrap()["waits"]["accept-a"].clone();
+        let develop_wait_before = queue::load_queue(&q).unwrap()["waits"]["develop-b"].clone();
+        let report_path = accept_cwd.join(".herdr-verdict.json");
+        let accept_runtime = task_runtime::prepare(&env, "accept-a").unwrap();
+        let develop_runtime = task_runtime::prepare(&env, "develop-b").unwrap();
+        for root in [&accept_runtime, &develop_runtime] {
+            failure_evidence.0.push(root.join("server.log"));
+            failure_evidence.0.push(root.join("creation.json"));
+            failure_evidence.0.push(root.join("dispatch.json"));
+            failure_evidence.0.push(root.join("submission.json"));
+        }
+        failure_evidence.0.push(report_path.clone());
+        let mut accept_turn = acceptance_live::native_prepare(
+            &mut env,
+            &q,
+            &accept_cwd,
+            "accept-a",
+            accept_instruction,
+        );
+        let mut develop_turn = acceptance_live::native_prepare(
+            &mut env,
+            &q,
+            &develop_cwd,
+            "develop-b",
+            develop_instruction,
+        );
         let readiness = herdr_flow::runtime::readiness(
             &q,
             registered["session"].as_str(),
@@ -1497,19 +1522,28 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             readiness["active_wakeup"], true,
             "production receiver readiness was not active before dispatch"
         );
-        let mut accept_turn = acceptance_live::native_start(
-            &mut env,
-            &q,
-            &accept_cwd,
-            "accept-a",
-            accept_instruction,
+        acceptance_live::native_dispatch(&env, &accept_turn);
+        let accept_submission = util::read_json(&accept_turn.root.join("submission.json")).unwrap();
+        let accept_message_id = accept_submission["message_id"]
+            .as_str()
+            .expect("reviewer submission message id");
+        failure_evidence.0.push(
+            accept_turn
+                .root
+                .join("submissions")
+                .join(format!("{accept_message_id}.json")),
         );
-        let mut develop_turn = acceptance_live::native_start(
-            &mut env,
-            &q,
-            &develop_cwd,
-            "develop-b",
-            develop_instruction,
+        acceptance_live::native_dispatch(&env, &develop_turn);
+        let develop_submission =
+            util::read_json(&develop_turn.root.join("submission.json")).unwrap();
+        let develop_message_id = develop_submission["message_id"]
+            .as_str()
+            .expect("developer submission message id");
+        failure_evidence.0.push(
+            develop_turn
+                .root
+                .join("submissions")
+                .join(format!("{develop_message_id}.json")),
         );
         let disabled = cli_output(&["queue", "disable", "--state-dir", q.to_str().unwrap()]);
         assert!(
@@ -1518,18 +1552,6 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             String::from_utf8_lossy(&disabled.stderr)
         );
         assert_eq!(queue::load_queue(&q).unwrap()["notify"], false);
-        failure_evidence
-            .0
-            .push(accept_turn.root.join("submission.json"));
-        failure_evidence
-            .0
-            .push(develop_turn.root.join("submission.json"));
-        failure_evidence
-            .0
-            .push(accept_cwd.join(".herdr-verdict.json"));
-        let accept_submission = util::read_json(&accept_turn.root.join("submission.json")).unwrap();
-        let develop_submission =
-            util::read_json(&develop_turn.root.join("submission.json")).unwrap();
         let accept_result = acceptance_live::native_finish(&env, &mut accept_turn);
         let develop_result = acceptance_live::native_finish(&env, &mut develop_turn);
         let accept_session = accept_result["session"].as_str().unwrap();
@@ -1557,34 +1579,51 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             develop_session,
             &develop_cwd,
         );
-        let accept_completed = exact_assistant_completion_millis(
-            &accept_rows,
-            accept_session,
-            accept_message,
-            "reviewer",
-        );
-        let develop_completed = exact_assistant_completion_millis(
+        let accept_completed =
+            exact_terminal_completion_millis(&accept_rows, &accept_result, &accept_cwd, "reviewer");
+        let develop_completed = exact_terminal_completion_millis(
             &develop_rows,
-            develop_session,
-            develop_message,
+            &develop_result,
+            &develop_cwd,
             "developer",
         );
-        assert!(
-            accept_created < accept_completed,
-            "reviewer submission/completion timestamps are reversed"
+        assert_native_turn_overlap(
+            "reviewer",
+            accept_created,
+            accept_completed,
+            "developer",
+            develop_created,
+            develop_completed,
         );
+        let accept_commands = tool_commands(&accept_rows, accept_session);
+        let inspection = accept_commands
+            .iter()
+            .find(|command| command.command.trim() == "git show HEAD:file")
+            .expect("reviewer direct fixed-A inspection");
         assert!(
-            develop_created < develop_completed,
-            "developer submission/completion timestamps are reversed"
+            terminal_tool_state(inspection) && inspection.success,
+            "reviewer inspection was not a successful terminal direct command"
         );
-        let overlap_start = accept_created.max(develop_created);
-        let overlap_end = accept_completed.min(develop_completed);
+        assert_eq!(inspection.exit, Some(0));
+        assert_eq!(inspection.output.trim(), "version A");
+        assert!(inspection.start > 0 && inspection.start != i64::MAX);
+        assert!(inspection.end >= inspection.start && inspection.end != i64::MAX);
+        assert!(inspection.start as f64 >= accept_created);
+        assert!(inspection.end as f64 <= accept_completed);
+        let develop_commands = tool_commands(&develop_rows, develop_session);
+        let commit = develop_commands
+            .iter()
+            .find(|command| command.command.trim() == "git commit -m \"concurrent B\"")
+            .expect("developer direct commit evidence");
         assert!(
-            overlap_start < overlap_end
-                && accept_created < develop_completed
-                && develop_created < accept_completed,
-            "native reviewer and developer turns did not actually overlap"
+            terminal_tool_state(commit) && commit.success,
+            "developer commit was not a successful terminal direct command"
         );
+        assert_eq!(commit.exit, Some(0));
+        assert!(commit.start > 0 && commit.start != i64::MAX);
+        assert!(commit.end >= commit.start && commit.end != i64::MAX);
+        assert!(commit.start as f64 >= develop_created);
+        assert!(commit.end as f64 <= develop_completed);
         let source = Path::new(artifact["location"].as_str().unwrap());
         assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
         assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
@@ -1595,19 +1634,84 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_ne!(output["id"], artifact["id"]);
         assert_eq!(git(&develop_cwd, &["rev-parse", "HEAD"]), output["id"]);
         assert_eq!(git(&develop_cwd, &["show", "HEAD:file"]), "version B");
+        let committed = std::process::Command::new("git")
+            .current_dir(&develop_cwd)
+            .args(["show", "HEAD:file"])
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        assert_eq!(committed.stdout, b"version B\n");
+        assert_eq!(fs::read(develop_cwd.join("file")).unwrap(), b"version B\n");
+        assert!(!develop_cwd.join(".herdr-verdict.json").exists());
         let report_path = accept_cwd.join(".herdr-verdict.json");
         let report_bytes = fs::read(&report_path).unwrap();
         let actual_report = util::read_json(&report_path).unwrap();
-        let final_state = queue::load_queue(&q).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let final_state = loop {
+            let state = queue::load_queue(&q).unwrap();
+            let events = state["events"].as_object().unwrap();
+            let has_accept_verdict = state["tasks"]["accept-a"]["verdict"].is_object();
+            if state["notify"] == false && events.len() == 2 && has_accept_verdict {
+                break state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for two watcher-attached native events and reviewer verdict"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let project = &final_state["tasks"]["project"];
         let accept_task = &final_state["tasks"]["accept-a"];
         let develop_task = &final_state["tasks"]["develop-b"];
+        assert_eq!(project["requirements"], parent_before["requirements"]);
+        assert_eq!(
+            project["acceptance_round"],
+            parent_before["acceptance_round"]
+        );
+        assert_eq!(
+            project["requirement_revision"],
+            parent_before["requirement_revision"]
+        );
+        assert_eq!(project["candidate"], parent_before["candidate"]);
         assert_eq!(project["candidate"], artifact["id"]);
         assert!(project["approved"].is_null());
-        assert_eq!(project["requirement_revision"], json!(1));
         assert_eq!(accept_task["candidate"], artifact["id"]);
         assert_eq!(accept_task["lineage"]["input"], artifact["id"]);
         assert_eq!(develop_task["lineage"]["input"], artifact["id"]);
+        let task_names: std::collections::BTreeSet<_> = final_state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            task_names,
+            ["accept-a", "develop-b", "project"].into_iter().collect(),
+            "unexpected task set after concurrent native turns"
+        );
+        let coordinator_session = registered["session"].as_str().unwrap();
+        ensure_session(coordinator_session, "coordinator");
+        ensure_session(accept_session, "reviewer");
+        ensure_session(develop_session, "developer");
+        assert_ne!(accept_session, develop_session);
+        assert_ne!(accept_session, coordinator_session);
+        assert_ne!(develop_session, coordinator_session);
+        assert!(!accept_message.trim().is_empty());
+        assert!(!develop_message.trim().is_empty());
+        assert_ne!(accept_message, develop_message);
+        for (name, assignment) in [("accept-a", "accept-a-a1"), ("develop-b", "develop-b-a1")] {
+            assert_eq!(final_state["waits"][name]["id"], name);
+            assert_eq!(final_state["waits"][name]["task"], name);
+            assert_eq!(final_state["waits"][name]["assignment"], assignment);
+        }
+        let accept_binding = progress::binding(&accept_wait_before).unwrap();
+        let develop_binding = progress::binding(&develop_wait_before).unwrap();
+        assert_eq!(accept_submission["context"]["binding"], accept_binding);
+        assert_eq!(develop_submission["context"]["binding"], develop_binding);
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["binding"],
+            accept_binding
+        );
         assert_eq!(
             accept_task["verdict"]["envelope"]["reviewer"]["session"],
             accept_session
@@ -1618,6 +1722,36 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         assert_eq!(accept_task["verdict"]["envelope"]["report"], actual_report);
         assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+        assert_concurrent_event_chain(
+            &q,
+            &final_state,
+            "accept-a",
+            &accept_submission,
+            &accept_result,
+            &accept_wait_before,
+            &accept_turn.root,
+            accept_session,
+            accept_message,
+        );
+        assert_concurrent_event_chain(
+            &q,
+            &final_state,
+            "develop-b",
+            &develop_submission,
+            &develop_result,
+            &develop_wait_before,
+            &develop_turn.root,
+            develop_session,
+            develop_message,
+        );
+        assert_eq!(develop_result["output"], *output);
+        assert!(
+            !project["artifacts"]
+                .as_object()
+                .unwrap()
+                .contains_key(output["id"].as_str().unwrap()),
+            "developer output B was registered on the parent without selection"
+        );
         assert_eq!(final_state["notify"], false);
         assert!(final_state["deliveries"]
             .as_object()
@@ -1626,10 +1760,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             .as_object()
             .into_iter()
             .flatten()
-            .all(|(_, event)| event["applied"] != true));
-        assert_eq!(
-            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap(),
-            selected_config_before
+            .all(|(_, event)| event["acknowledged"] != true && event["applied"] != true));
+        assert_eq!(final_state["events"].as_object().unwrap().len(), 2);
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("concurrent config snapshot"),
+            "selected OpenCode configuration changed during concurrent scenario"
         );
         accept_turn.stop();
         develop_turn.stop();
@@ -2381,20 +2521,39 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
     commands
 }
 
+fn ensure_session(value: &str, label: &str) {
+    assert!(!value.trim().is_empty(), "{label} session is empty");
+}
+
 fn submission_created_millis(value: &J, label: &str) -> f64 {
     let seconds = value
         .as_f64()
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or_else(|| panic!("{label} created_at missing, nonfinite or nonpositive"));
-    seconds * 1000.0
+    let millis = seconds * 1000.0;
+    assert!(
+        millis.is_finite(),
+        "{label} created_at milliseconds overflow"
+    );
+    millis
 }
 
-fn exact_assistant_completion_millis(
-    rows: &J,
-    session: &str,
-    parent_message: &str,
-    label: &str,
-) -> f64 {
+fn exact_terminal_completion_millis(rows: &J, submission: &J, cwd: &Path, label: &str) -> f64 {
+    let session = submission["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} submission session missing"));
+    let message = submission["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} submission message ID missing"));
+    let reply = submission["reply_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} terminal reply ID missing"));
+    let cwd = cwd
+        .to_str()
+        .unwrap_or_else(|| panic!("{label} cwd is not UTF-8"));
     let matches: Vec<_> = rows
         .as_array()
         .expect("native session rows")
@@ -2402,21 +2561,172 @@ fn exact_assistant_completion_millis(
         .filter(|row| {
             row["info"]["sessionID"] == session
                 && row["info"]["role"] == "assistant"
-                && row["info"]["parentID"] == parent_message
+                && row["info"]["id"] == reply
+                && row["info"]["parentID"] == message
+                && row["info"]["path"]["cwd"] == cwd
         })
         .collect();
     assert_eq!(
         matches.len(),
         1,
-        "{label} requires exactly one assistant row for the exact submitted message"
+        "{label} requires exactly one terminal assistant row for the exact reply/message/session/cwd"
     );
-    let millis = matches[0]["info"]["time"]["completed"]
+    matches[0]["info"]["time"]["completed"]
         .as_f64()
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or_else(|| {
-            panic!("{label} assistant completion missing, nonfinite or nonpositive")
-        });
-    millis
+        .unwrap_or_else(|| panic!("{label} assistant completion missing, nonfinite or nonpositive"))
+}
+
+fn assert_native_turn_overlap(
+    left_label: &str,
+    left_created: f64,
+    left_completed: f64,
+    right_label: &str,
+    right_created: f64,
+    right_completed: f64,
+) {
+    assert!(
+        left_created < left_completed,
+        "{left_label} submission/completion timestamps are reversed"
+    );
+    assert!(
+        right_created < right_completed,
+        "{right_label} submission/completion timestamps are reversed"
+    );
+    let overlap_start = left_created.max(right_created);
+    let overlap_end = left_completed.min(right_completed);
+    assert!(
+        overlap_start < overlap_end
+            && left_created < right_completed
+            && right_created < left_completed,
+        "native reviewer and developer turns did not actually overlap"
+    );
+}
+
+#[test]
+fn concurrent_timestamp_binding_rejects_bad_identity_and_allows_multi_tool_rows() {
+    let cwd = Path::new("/tmp/native-concurrent");
+    let submission = json!({"session":"ses-a","message_id":"msg-a","reply_id":"reply-a"});
+    let rows = json!([
+        {"info":{"sessionID":"ses-a","role":"assistant","id":"tool-row","parentID":"msg-a",
+            "path":{"cwd":"/tmp/native-concurrent"},"time":{"completed":2000}}},
+        {"info":{"sessionID":"ses-a","role":"assistant","id":"reply-a","parentID":"msg-a",
+            "path":{"cwd":"/tmp/native-concurrent"},"time":{"completed":3000}}}
+    ]);
+    assert_eq!(
+        exact_terminal_completion_millis(&rows, &submission, cwd, "reviewer"),
+        3000.0
+    );
+    let reject = |f: &dyn Fn()| {
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err());
+    };
+    let mut wrong_parent = rows.clone();
+    wrong_parent[1]["info"]["parentID"] = json!("other-message");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_parent, &submission, cwd, "reviewer");
+    });
+    let mut wrong_session = rows.clone();
+    wrong_session[1]["info"]["sessionID"] = json!("other-session");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_session, &submission, cwd, "reviewer");
+    });
+    let mut wrong_id = submission.clone();
+    wrong_id["reply_id"] = json!("other-reply");
+    reject(&|| {
+        exact_terminal_completion_millis(&rows, &wrong_id, cwd, "reviewer");
+    });
+    let mut wrong_cwd = rows.clone();
+    wrong_cwd[1]["info"]["path"]["cwd"] = json!("/tmp/other");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_cwd, &submission, cwd, "reviewer");
+    });
+    let mut missing_completion = rows.clone();
+    missing_completion[1]["info"]["time"] = json!({});
+    reject(&|| {
+        exact_terminal_completion_millis(&missing_completion, &submission, cwd, "reviewer");
+    });
+    let mut nonfinite_completion = rows.clone();
+    nonfinite_completion[1]["info"]["time"]["completed"] = json!("NaN");
+    reject(&|| {
+        exact_terminal_completion_millis(&nonfinite_completion, &submission, cwd, "reviewer");
+    });
+    reject(&|| {
+        submission_created_millis(&json!({}), "reviewer submission");
+    });
+    reject(&|| {
+        submission_created_millis(&json!(f64::MAX), "reviewer submission");
+    });
+    reject(&|| {
+        assert_native_turn_overlap("left", 3000.0, 2000.0, "right", 1000.0, 4000.0);
+    });
+}
+
+fn assert_concurrent_event_chain(
+    q: &Path,
+    state: &J,
+    wait: &str,
+    submission: &J,
+    result: &J,
+    wait_before: &J,
+    root: &Path,
+    session: &str,
+    message: &str,
+) {
+    let expected_binding = progress::binding(wait_before).unwrap();
+    assert_eq!(submission["context"]["wait"], wait);
+    assert_eq!(result["context"]["wait"], wait);
+    assert_eq!(submission["context"]["binding"], expected_binding);
+    assert_eq!(result["context"]["binding"], expected_binding);
+    assert_eq!(submission["context"]["queue_id"], state["id"]);
+    assert_eq!(result["context"]["queue_id"], state["id"]);
+    assert_eq!(
+        Path::new(submission["context"]["queue_dir"].as_str().unwrap()),
+        q
+    );
+    assert_eq!(
+        Path::new(result["context"]["queue_dir"].as_str().unwrap()),
+        q
+    );
+    assert_eq!(submission["session"], session);
+    assert_eq!(submission["message_id"], message);
+    assert_eq!(result["session"], session);
+    assert_eq!(result["message_id"], message);
+    let events: Vec<_> = state["events"]
+        .as_object()
+        .expect("queue events")
+        .iter()
+        .filter(|(_, event)| event["wait"] == wait)
+        .collect();
+    assert_eq!(events.len(), 1, "exactly one event for {wait}");
+    let (event_id, event) = events[0];
+    assert_eq!(event["task"], wait);
+    assert_eq!(event["binding"], expected_binding);
+    assert_eq!(
+        event["evidence"],
+        json!(q.join("results").join(format!("{wait}.json")))
+    );
+    assert_ne!(event["acknowledged"], true);
+    assert_ne!(event["applied"], true);
+    let signal = util::read_json(Path::new(
+        event["evidence"].as_str().expect("event evidence"),
+    ))
+    .unwrap();
+    assert_eq!(signal["wait"], wait);
+    assert_eq!(signal["outcome"], "complete");
+    let submission_path = root.join("submissions").join(format!("{message}.json"));
+    assert_eq!(signal["evidence"], json!(submission_path));
+    let actual_submission = util::read_json(&submission_path).unwrap();
+    assert_eq!(actual_submission["message_id"], submission["message_id"]);
+    assert_eq!(actual_submission["created_at"], submission["created_at"]);
+    assert_eq!(actual_submission, *result);
+    assert_eq!(actual_submission["reply_id"], result["reply_id"]);
+    assert_eq!(
+        state["deliveries"]
+            .as_object()
+            .and_then(|deliveries| deliveries.get(event_id.as_str()))
+            .is_none(),
+        true
+    );
 }
 
 fn exact_path_argument(command: &str, flag: &str, path: &Path) -> bool {

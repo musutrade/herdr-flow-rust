@@ -236,7 +236,7 @@ impl NativeTurn {
     }
 }
 
-pub(super) fn native_start(
+pub(super) fn native_prepare(
     env: &mut TaskEnvironment,
     q: &Path,
     cwd: &Path,
@@ -259,7 +259,7 @@ pub(super) fn native_start(
     let model: J =
         serde_json::from_str(&std::env::var("HERDR_LIVE_OPENCODE_MODEL").unwrap()).unwrap();
     let spec = json!({"adapter":"opencode","binary":std::env::var("HERDR_LIVE_OPENCODE_BINARY").unwrap(),"cwd":cwd,"model":model,"port":port()});
-    let mut child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
+    let child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
     ready(spec["port"].as_u64().unwrap() as u16);
     let instruction=format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
     let state = retry_unstarted(&root, "creation.json", || {
@@ -268,10 +268,6 @@ pub(super) fn native_start(
             &root,
             &json!({"queue_dir":q,"wait":name,"instruction":instruction}),
         )
-    })
-    .unwrap();
-    retry_unstarted(&root, "dispatch.json", || {
-        task_runtime::native::dispatch(env, &root)
     })
     .unwrap();
     let endpoint = format!("http://127.0.0.1:{}", spec["port"].as_u64().unwrap());
@@ -288,6 +284,25 @@ pub(super) fn native_start(
         state,
         child,
     }
+}
+
+pub(super) fn native_dispatch(env: &TaskEnvironment, turn: &NativeTurn) {
+    retry_unstarted(&turn.root, "dispatch.json", || {
+        task_runtime::native::dispatch(env, &turn.root)
+    })
+    .unwrap();
+}
+
+pub(super) fn native_start(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+) -> NativeTurn {
+    let mut turn = native_prepare(env, q, cwd, name, instruction);
+    native_dispatch(env, &turn);
+    turn
 }
 
 pub(super) fn native_finish(env: &TaskEnvironment, turn: &mut NativeTurn) -> J {
