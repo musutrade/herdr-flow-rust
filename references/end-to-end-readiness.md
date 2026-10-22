@@ -1060,13 +1060,16 @@ history shows one matching user prompt and one terminal reply. The existing
 coordinator ACKs/applies the single event through the normal receiver path.
 
 A test-only reversible custody guard reacquires the exact environment instance on
-success with bounded lock retries. On error/panic it reacquires the same instance
-without erasing failed state, leaving bounded journals available for failure
-evidence; it does not reuse the delivery `HandoffGuard`, whose cleanup contract is
-deliberately different. The worker child remains under RAII and is stopped and
-reaped only after collection; selected config and final roots/slots must be
-unchanged/zero. A focused no-model control covers same-instance reacquisition and
-failure-state preservation, with explicit teardown after the control.
+success and on error/panic with bounded lock retries, storing the same instance
+back into the outer owned-environment wrapper. It never reuses the delivery
+`HandoffGuard`, whose cleanup contract is deliberately different. On failure the
+worker child is reaped by RAII before the outer wrapper destroys that same
+instance; a bounded private snapshot retains the pre-failure journal metadata and
+CLI statuses without raw error output. On success the worker is stopped before the
+normal final teardown. Selected config and final roots/slots must be
+unchanged/zero. A no-model catch-unwind control verifies outer ownership cleanup,
+and a registry-root guard restores `HERDR_TASK_ENV_ROOT` and tears down on test
+assertion failure.
 
 This scenario has not yet been run as a live model acceptance. It is not a crash
 or server-restart proof, and it does not cover a dispatch interruption after

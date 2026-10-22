@@ -2746,12 +2746,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             review_instruction.to_string()
         };
         let (worker, result) = if apply_worker_recovery {
+            let failure_snapshot = base.join("worker-recovery-failure.json");
+            failure_evidence.0.push(failure_snapshot.clone());
             recover_submitted_worker(
                 &mut env,
                 &q,
                 &development_cwd,
                 "review",
                 &review_instruction,
+                &mut failure_evidence,
+                &failure_snapshot,
             )
         } else {
             match development_adapter {
@@ -3472,26 +3476,32 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     assert_eq!(occupied_slots().unwrap(), 0);
 }
 
-struct WorkerCustody {
+struct WorkerCustody<'a> {
+    outer: &'a mut super::OwnedEnvironment,
     task_id: String,
     instance_id: String,
     armed: bool,
 }
 
-impl WorkerCustody {
-    fn release(env: &mut TaskEnvironment) -> Self {
-        assert!(env.owns_lock(), "worker custody requires owned environment");
-        let task_id = env.task_id.clone();
-        let instance_id = env.instance_id.clone();
-        env.release_ownership();
+impl<'a> WorkerCustody<'a> {
+    fn release(outer: &'a mut super::OwnedEnvironment) -> Self {
+        assert!(
+            outer.owns_lock(),
+            "worker custody requires owned environment"
+        );
+        let task_id = outer.task_id.clone();
+        let instance_id = outer.instance_id.clone();
+        outer.cleanup_on_drop = false;
+        outer.release_ownership();
         Self {
+            outer,
             task_id,
             instance_id,
             armed: true,
         }
     }
 
-    fn resume(&mut self) -> TaskEnvironment {
+    fn resume(mut self) {
         assert!(self.armed, "worker custody already resolved");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -3501,8 +3511,10 @@ impl WorkerCustody {
                         env.instance_id, self.instance_id,
                         "worker custody instance changed"
                     );
+                    self.outer.env = Some(env);
+                    self.outer.cleanup_on_drop = true;
                     self.armed = false;
-                    return env;
+                    return;
                 }
                 Err(error)
                     if error.kind == herdr_flow::error::ErrorKind::StateBusy
@@ -3529,6 +3541,9 @@ impl WorkerCustody {
                             "worker custody instance changed; preserving {}",
                             self.task_id
                         );
+                    } else {
+                        self.outer.env = Some(env);
+                        self.outer.cleanup_on_drop = true;
                     }
                     return;
                 }
@@ -3547,21 +3562,26 @@ impl WorkerCustody {
     }
 }
 
-impl Drop for WorkerCustody {
+impl Drop for WorkerCustody<'_> {
     fn drop(&mut self) {
         self.cleanup();
     }
 }
 
-fn worker_submission_files(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root.join("submissions"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .collect()
+fn worker_submission_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(root.join("submissions")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 fn worker_collect_busy(stderr: &str) -> bool {
@@ -3569,20 +3589,71 @@ fn worker_collect_busy(stderr: &str) -> bool {
         || stderr.contains("OpenCode submission is busy")
 }
 
-fn collect_worker_with_fresh_cli(root: &Path, message: &str) -> J {
+fn wait_worker_event(q: &Path, name: &str) -> J {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = queue::load_queue(q).unwrap();
+        let events: Vec<_> = state["events"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, event)| event["wait"] == name)
+            .map(|(_, event)| event.clone())
+            .collect();
+        assert!(events.len() <= 1, "duplicate worker events");
+        if let Some(event) = events.into_iter().next() {
+            return event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker event was not attached after signalled collection"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn write_worker_snapshot(path: &Path, value: &J) {
+    util::atomic_write_json(path, &bounded_delivery_evidence(value)).unwrap();
+}
+
+fn collect_worker_with_fresh_cli(
+    root: &Path,
+    task_id: &str,
+    message: &str,
+    snapshot_path: &Path,
+    snapshot: &mut J,
+) -> J {
     let deadline = Instant::now() + Duration::from_secs(300);
     loop {
-        let output = cli_output(&[
-            "task-runtime",
-            "collect",
-            "--task",
-            "project",
-            "--state-dir",
-            root.to_str().expect("worker root UTF-8"),
-        ]);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "fresh worker collection deadline for {message}"
+        );
+        let output = cli_output_with_timeout(
+            &[
+                "task-runtime",
+                "collect",
+                "--task",
+                task_id,
+                "--state-dir",
+                root.to_str().expect("worker root UTF-8"),
+            ],
+            remaining.min(Duration::from_secs(60)),
+        );
+        assert!(
+            Instant::now() < deadline,
+            "fresh worker collection deadline for {message}"
+        );
+        let status = json!({"success": output.status.success(), "code": output.status.code()});
         if output.status.success() {
             let journal: J = serde_json::from_slice(&output.stdout)
                 .unwrap_or_else(|error| panic!("fresh worker collect output invalid: {error}"));
+            snapshot["cli"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"status":status,"phase":journal["phase"]}));
+            write_worker_snapshot(snapshot_path, snapshot);
             if journal["phase"] == "signalled" {
                 assert_eq!(journal["message_id"], json!(message));
                 return journal;
@@ -3596,6 +3667,11 @@ fn collect_worker_with_fresh_cli(root: &Path, message: &str) -> J {
                 journal["phase"]
             );
         } else {
+            snapshot["cli"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"status":status}));
+            write_worker_snapshot(snapshot_path, snapshot);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 worker_collect_busy(&stderr),
@@ -3612,15 +3688,18 @@ fn collect_worker_with_fresh_cli(root: &Path, message: &str) -> J {
 }
 
 fn recover_submitted_worker(
-    env: &mut TaskEnvironment,
+    env: &mut super::OwnedEnvironment,
     q: &Path,
     cwd: &Path,
     name: &str,
     instruction: &str,
+    failure_evidence: &mut FailureEvidence,
+    failure_snapshot: &Path,
 ) -> (J, J) {
     let mut turn = acceptance_live::native_start(env, q, cwd, name, instruction);
     let root = turn.root.clone();
     let instance_id = env.instance_id.clone();
+    let task_id = env.task_id.clone();
     let state: J = util::read_json(root.join("state.json")).unwrap();
     let creation_before = util::read_json(root.join("creation.json")).unwrap();
     let dispatch_before = fs::read(root.join("dispatch.json")).unwrap();
@@ -3637,16 +3716,48 @@ fn recover_submitted_worker(
         .expect("worker submission message")
         .to_string();
     let context = submission_before["context"].clone();
+    let dispatch: J = serde_json::from_slice(&dispatch_before).unwrap();
+    let report_path = root.join("submissions").join(format!("{message}.json"));
+    failure_evidence.0.push(report_path);
+    let mut failure_metadata = json!({
+        "task_id": task_id.clone(),
+        "session": session.clone(),
+        "message": message.clone(),
+        "endpoint": turn.endpoint.clone(),
+        "cwd": cwd.to_str().expect("worker cwd UTF-8"),
+        "submission_phase": submission_before["phase"],
+        "creation": {
+            "phase": creation_before["phase"],
+            "session": creation_before["session"],
+            "packet_sha256": creation_before["packet_sha256"],
+            "queue_id": creation_before["queue_id"],
+        },
+        "dispatch": {
+            "phase": dispatch["phase"],
+            "session": dispatch["session"],
+            "packet_sha256": dispatch["packet_sha256"],
+        },
+        "submission": {
+            "phase": submission_before["phase"],
+            "session": submission_before["session"],
+            "message_id": submission_before["message_id"],
+            "context": context.clone(),
+        },
+        "cli": []
+    });
+    write_worker_snapshot(failure_snapshot, &failure_metadata);
     assert_eq!(submission_before["phase"], "submitted");
     assert_eq!(state["session"], json!(session));
     assert_eq!(state["adapter"], "opencode");
     assert_eq!(state["cwd"], json!(cwd.to_str().expect("worker cwd UTF-8")));
+    assert_eq!(state["endpoint"], json!(turn.endpoint));
+    assert_eq!(submission_before["model"], state["model"]);
+    assert_eq!(submission_before["cwd"], state["cwd"]);
     assert_eq!(creation_before["phase"], "bound");
     assert_eq!(creation_before["session"], json!(session));
     assert_eq!(creation_before["wait"], json!(name));
     assert_eq!(creation_before["queue_dir"], json!(q));
     let packet_sha = creation_before["packet_sha256"].clone();
-    let dispatch: J = serde_json::from_slice(&dispatch_before).unwrap();
     assert_eq!(dispatch["phase"], "sending");
     assert_eq!(dispatch["session"], json!(session));
     assert_eq!(dispatch["packet_sha256"], packet_sha);
@@ -3663,6 +3774,7 @@ fn recover_submitted_worker(
             runtime["port"].as_u64().expect("worker runtime port")
         )
     );
+    assert_eq!(runtime["model"], state["model"]);
     let queue_before = queue::load_queue(q).unwrap();
     let queue_id = queue_before["id"].clone();
     let wait_before = queue_before["waits"][name].clone();
@@ -3682,10 +3794,23 @@ fn recover_submitted_worker(
         context["producer_identity"]["cwd"],
         json!(cwd.to_str().expect("worker cwd UTF-8"))
     );
-    assert_eq!(worker_submission_files(&root).len(), 1);
+    assert_eq!(context["producer_identity"]["model"], state["model"]);
+    assert!(submission_before["report"].is_null());
+    failure_metadata["packet_sha256"] = packet_sha.clone();
+    failure_metadata["queue_id"] = queue_id.clone();
+    failure_metadata["wait"] = json!(name);
+    failure_metadata["binding"] = binding.clone();
+    failure_metadata["context"] = context.clone();
+    write_worker_snapshot(failure_snapshot, &failure_metadata);
 
     let mut custody = WorkerCustody::release(env);
-    let result = collect_worker_with_fresh_cli(&root, &message);
+    let result = collect_worker_with_fresh_cli(
+        &root,
+        &task_id,
+        &message,
+        failure_snapshot,
+        &mut failure_metadata,
+    );
 
     let submission_after = util::read_json(root.join("submission.json")).unwrap();
     assert_eq!(submission_after, result);
@@ -3706,75 +3831,90 @@ fn recover_submitted_worker(
         dispatch_before
     );
     assert_eq!(util::read_json(root.join("runtime.json")).unwrap(), runtime);
-    assert_eq!(worker_submission_files(&root).len(), 1);
-    let queue_after = queue::load_queue(q).unwrap();
-    assert_eq!(queue_after["id"], queue_id);
-    let events: Vec<_> = queue_after["events"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(_, event)| event["wait"] == name)
-        .collect();
-    assert_eq!(events.len(), 1, "one worker event expected");
-    assert_eq!(events[0].1["outcome"], "complete");
+    assert_eq!(worker_submission_files(&root).unwrap().len(), 1);
+    let event = wait_worker_event(q, name);
+    assert_eq!(event["outcome"], "complete");
 
     let rows = session_rows(&turn.client, &turn.endpoint, &session, cwd);
-    let user_rows = rows
+    let user_rows: Vec<_> = rows
         .as_array()
         .expect("worker session rows")
         .iter()
-        .filter(|row| row["info"]["role"] == "user" && row["info"]["id"] == json!(message))
-        .count();
-    assert_eq!(user_rows, 1, "one matching user prompt expected");
+        .filter(|row| row["info"]["role"] == "user")
+        .collect();
+    assert_eq!(user_rows.len(), 1, "exactly one user prompt expected");
+    assert_eq!(user_rows[0]["info"]["id"], json!(message));
+    assert_eq!(user_rows[0]["info"]["sessionID"], json!(session));
     exact_terminal_completion_millis(&rows, &result, cwd, "worker recovery");
     assert_eq!(result["outcome"], "complete");
+    assert!(result["report"]
+        .as_str()
+        .is_some_and(|report| !report.is_empty()));
 
     turn.stop();
-    let resumed = custody.resume();
-    assert_eq!(resumed.instance_id, instance_id);
-    *env = resumed;
+    custody.resume();
+    assert_eq!(env.instance_id, instance_id);
     (state, result)
 }
 
+struct RegistryRootGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl RegistryRootGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("HERDR_TASK_ENV_ROOT");
+        std::env::set_var("HERDR_TASK_ENV_ROOT", path);
+        Self { previous }
+    }
+}
+
+impl Drop for RegistryRootGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("HERDR_TASK_ENV_ROOT", value),
+            None => std::env::remove_var("HERDR_TASK_ENV_ROOT"),
+        }
+    }
+}
+
 #[test]
-fn worker_custody_reacquires_the_same_instance_and_preserves_failure_state() {
+fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
     let root = temp.path();
-    std::env::set_var("HERDR_TASK_ENV_ROOT", root.join("registry"));
+    let _registry = RegistryRootGuard::set(&root.join("registry"));
 
-    let mut env = create_environment(
-        "worker-custody-success",
-        &root.join("success-workspace"),
-        vec![],
-        &root.join("success-temporary"),
-    )
-    .unwrap();
-    let instance_id = env.instance_id.clone();
-    let mut custody = WorkerCustody::release(&mut env);
-    let resumed = custody.resume();
-    assert_eq!(resumed.instance_id, instance_id);
-    destroy_environment(&resumed).unwrap();
+    let mut outer = super::environment_with(root, "worker-custody-success", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let custody = WorkerCustody::release(&mut outer);
+    custody.resume();
+    assert_eq!(outer.instance_id, instance_id);
+    destroy_environment(&outer).unwrap();
     assert!(!is_registered("worker-custody-success").unwrap());
-    assert!(!root.join("success-workspace").exists());
 
-    let mut env = create_environment(
-        "worker-custody-failure",
-        &root.join("failure-workspace"),
-        vec![],
-        &root.join("failure-temporary"),
-    )
-    .unwrap();
-    let instance_id = env.instance_id.clone();
-    let custody = WorkerCustody::release(&mut env);
+    let mut outer = super::environment_with(root, "worker-custody-failure", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let custody = WorkerCustody::release(&mut outer);
     drop(custody);
     assert!(is_registered("worker-custody-failure").unwrap());
-    let restored = restore_environment("worker-custody-failure").unwrap();
-    assert_eq!(restored.instance_id, instance_id);
-    destroy_environment(&restored).unwrap();
+    assert_eq!(outer.instance_id, instance_id);
+    drop(outer);
     assert!(!is_registered("worker-custody-failure").unwrap());
     assert!(!root.join("failure-workspace").exists());
-    assert!(!root.join("failure-temporary").exists());
+
+    let mut outer = super::environment_with(root, "worker-custody-panic", vec![]);
+    let instance_id = outer.instance_id.clone();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _custody = WorkerCustody::release(&mut outer);
+        panic!("fixture custody panic");
+    }));
+    assert!(unwound.is_err());
+    assert!(is_registered("worker-custody-panic").unwrap());
+    assert_eq!(outer.instance_id, instance_id);
+    drop(outer);
+    assert!(!is_registered("worker-custody-panic").unwrap());
+    assert!(!root.join("workspace").exists());
 }
 
 fn exact_original_event(state: &J) -> Option<(String, J)> {
@@ -5894,6 +6034,10 @@ fn confirm_delivery(
 }
 
 fn cli_output(args: &[&str]) -> std::process::Output {
+    cli_output_with_timeout(args, Duration::from_secs(60))
+}
+
+fn cli_output_with_timeout(args: &[&str], timeout: Duration) -> std::process::Output {
     use std::io::{Read, Seek, SeekFrom};
     fn read_bounded(file: &mut std::fs::File) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -5913,7 +6057,7 @@ fn cli_output(args: &[&str]) -> std::process::Output {
                 .unwrap(),
         ),
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + timeout;
     loop {
         let status = child.child.as_mut().unwrap().try_wait().unwrap();
         if let Some(status) = status {
