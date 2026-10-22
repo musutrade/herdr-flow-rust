@@ -574,3 +574,51 @@ has no verified external-sandbox bootstrap option that preserves native approval
 policy; turn-level externalSandbox does not prevent the observed startup probe.
 A supported host or separately reviewed upstream/product bootstrap is required.
 No host security settings, approvals or outer task confinement were changed.
+
+## Native same-session ACK/stall recovery
+
+`installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver` is an
+opt-in development-only scenario. It uses the existing real native worker and
+receiver harness, but the coordinator is instructed to ACK the first delivery and
+then stop without applying it. The task's `apply_timeout_seconds` is 60 seconds;
+the deadline starts when the result arrives, not when it is ACKed. The production
+queue watcher therefore emits a `progress_stall` event for the acknowledged but
+unapplied result. The coordinator must ACK that alarm delivery, run
+`queue event-current` for the exact stall event, select the original event by its
+exact ID (both events share the same wait), and apply the original collector
+output once. The driver never ticks, ACKs, applies, edits a deadline, or writes
+watch/heartbeat state.
+
+The test preserves an intermediate ACK-only snapshot before recovery. At that
+snapshot it requires no stall event yet, exactly one delivery containing only the
+exact original event, the original event acknowledged but unapplied, and no
+completed first-turn task-apply command. The coordinator and worker sessions must
+differ, and the worker's actual collector report and release receipt must name
+that worker. Final checks require the original event applied, the stall event not
+applied, `next_action.kind=complete`, one successful task-apply (failed attempts
+are allowed only with lock-busy shell evidence), one new artifact equal to the
+collector output, the actual release receipt, and exactly two distinct
+acknowledged delivery identities for the coordinator session. Tool records are
+ordered by their timestamps and use shell exit metadata: successful ACK,
+event-current, task-apply and readiness calls must use the exact disposable queue
+path. Readiness must name the stall delivery and coordinator session in
+`last_confirmed_receipt`, not merely report `active_wakeup`. The first-turn ACK
+snapshot is retained as bounded summary failure evidence (counts and identities,
+not a full tool transcript). Readiness must execute after successful task-apply;
+its checked_at must fall within that tool invocation and its returned JSON must
+equal the persisted readiness document. Transient `active` and
+`delivery_status` values are recorded only as observations and are not assumed
+to persist.
+
+This is same-session omission and stall recovery, not a process-crash or server-
+restart proof. There is no supported OpenCode coordinator transport restart API;
+do not delete runtime state or start a second server to simulate one. The scenario
+does not claim independent acceptance, customer delivery, Codex parity, or a
+twenty-task campaign. #38 and #32 remain OPEN.
+
+Primary live verification passed in 126.75 seconds after the post-apply readiness
+checks were added; selected OpenCode configuration bytes were unchanged. An
+earlier run passed in 115.96 seconds before that tightening and is not used as
+evidence for the final chronology assertions. The initial non-live compile
+failure (undeclared Value::Null) was corrected to the existing J alias; its log
+is retained during this unfinished acceptance work.
