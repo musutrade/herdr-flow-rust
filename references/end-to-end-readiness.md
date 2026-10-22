@@ -716,3 +716,7 @@ passed. Actual restoration and a fresh review would be a separate phase. Existin
 synthetic `unable`/restore and execution-problem coverage remains the version-matrix
 overlap; this scenario adds the missing real reviewer dependency-failure path. No
 product/API/isolation change is made and #38/#32 remain OPEN.
+
+Primary verification: the real unavailable-dependency scenario passed in 127.05 seconds; the selected OpenCode configuration remained unchanged. The initial local compile failure was corrected and retained as failure evidence. The dependency is recorded as a requirement basis source and enforced by this scenario's reviewer instructions and observed execution; it is not a required parent acceptance criterion enforced by the core pass validator. This test therefore does not prove that the core rejects a hypothetical passing report that omits this dependency check. The relative command uses the fixed reviewer session cwd; tool cwd is not independently sampled. Actual dependency restoration and a fresh passing review remain outside this phase.
+
+Independent non-live gates passed: stable coverage and Rust 1.85 all-target suites each reported 483 passed, zero failed, 17 ignored. CRAP checked 4800 functions at 77.2% line coverage with zero violations of the absolute threshold 10; formatting, lint policy, Clippy and rustdoc passed. Ignored live scenarios are not counted as executed by these suites; the unavailable-dependency scenario was run separately as reported above.

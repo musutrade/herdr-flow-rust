@@ -1208,7 +1208,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         let review_instruction = if unavailable_dependency.is_some() {
             format!("{review_instruction} Do not create, install, copy or synthesize required-dependency-fixture; it is operator-provided acceptance environment tooling and is not part of your committed artifact.")
         } else {
-            review_instruction
+            review_instruction.to_string()
         };
         let (worker, result) = match development_adapter {
             DevelopmentAdapter::OpenCode => acceptance_live::native(
@@ -1216,7 +1216,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 &q,
                 &development_cwd,
                 "review",
-                review_instruction,
+                &review_instruction,
             ),
             DevelopmentAdapter::Codex => acceptance_live::native_codex(
                 &mut env,
@@ -1224,7 +1224,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 &development_cwd,
                 worker_root.as_ref().unwrap(),
                 "review",
-                review_instruction,
+                &review_instruction,
             ),
         };
         assert_ne!(worker["session"], registered["session"]);
@@ -3332,7 +3332,9 @@ fn native_review_stage(
             .expect("unable report checks");
         let dependency_check = checks
             .iter()
-            .find(|check| check["criterion"] == "goal")
+            .find(|check| {
+                check["criterion"] == "goal" && check["source"] == UNAVAILABLE_DEPENDENCY_SOURCE
+            })
             .expect("dependency check");
         assert_eq!(dependency_check["status"], "blocked");
         assert_eq!(dependency_check["source"], UNAVAILABLE_DEPENDENCY_SOURCE);
@@ -3341,10 +3343,10 @@ fn native_review_stage(
             .is_some_and(|value| value.contains(dependency)));
         assert!(actual_report["blocker"]
             .as_str()
-            .is_some_and(|value| { !value.is_empty() && value.contains(dependency) }));
+            .is_some_and(|value| { value.contains(dependency) && value.contains("127") }));
         assert!(actual_report["restore_condition"]
             .as_str()
-            .is_some_and(|value| !value.is_empty()));
+            .is_some_and(|value| value.contains(dependency)));
         let commands = tool_commands(
             &reviewer_tool_rows,
             reviewer["session"].as_str().expect("reviewer session"),
@@ -3371,7 +3373,12 @@ fn native_review_stage(
                 || missing_output.contains("no such file")
                 || missing_output.contains("cannot access")
         );
-        assert!(command.start > 0 && command.end >= command.start);
+        assert!(
+            command.start > 0
+                && command.start != i64::MAX
+                && command.end >= command.start
+                && command.end != i64::MAX
+        );
         assert!(!cwd.join(dependency).exists());
     }
     let parent = &state["tasks"]["project"];
@@ -3395,8 +3402,16 @@ fn native_review_stage(
             "requirement/source authorization changed"
         );
         assert_eq!(parent["candidate"], artifact["id"]);
-        assert!(state["tasks"].get("repair").is_none());
-        assert!(state["tasks"].get("accept-native").is_some());
+        let task_names: std::collections::BTreeSet<_> = state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            task_names,
+            ["project", "review", "accept-native"].into_iter().collect()
+        );
         assert!(
             !cwd.join(dependency).exists(),
             "operator dependency appeared"

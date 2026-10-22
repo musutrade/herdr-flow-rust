@@ -290,6 +290,12 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
     assert_eq!(result["outcome"], "complete");
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .build()
+        .into();
+    let endpoint = format!("http://127.0.0.1:{}", spec["port"].as_u64().unwrap());
     after_collect(&client, &endpoint, &result);
     child.stop();
     println!("real native {name}: exact session collected and server stopped");
