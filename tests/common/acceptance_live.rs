@@ -300,7 +300,7 @@ pub(super) fn native_start(
     name: &str,
     instruction: &str,
 ) -> NativeTurn {
-    let mut turn = native_prepare(env, q, cwd, name, instruction);
+    let turn = native_prepare(env, q, cwd, name, instruction);
     native_dispatch(env, &turn);
     turn
 }

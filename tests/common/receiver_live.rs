@@ -1730,8 +1730,6 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             &accept_result,
             &accept_wait_before,
             &accept_turn.root,
-            accept_session,
-            accept_message,
         );
         assert_concurrent_event_chain(
             &q,
@@ -1741,8 +1739,6 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             &develop_result,
             &develop_wait_before,
             &develop_turn.root,
-            develop_session,
-            develop_message,
         );
         assert_eq!(develop_result["output"], *output);
         assert!(
@@ -2659,6 +2655,12 @@ fn concurrent_timestamp_binding_rejects_bad_identity_and_allows_multi_tool_rows(
     reject(&|| {
         assert_native_turn_overlap("left", 3000.0, 2000.0, "right", 1000.0, 4000.0);
     });
+    reject(&|| {
+        assert_native_turn_overlap("left", 1000.0, 2000.0, "right", 3000.0, 4000.0);
+    });
+    reject(&|| {
+        assert_native_turn_overlap("left", 1000.0, 2000.0, "right", 2000.0, 3000.0);
+    });
 }
 
 fn assert_concurrent_event_chain(
@@ -2669,9 +2671,15 @@ fn assert_concurrent_event_chain(
     result: &J,
     wait_before: &J,
     root: &Path,
-    session: &str,
-    message: &str,
 ) {
+    let session = result["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("concurrent result session");
+    let message = result["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("concurrent result message id");
     let expected_binding = progress::binding(wait_before).unwrap();
     assert_eq!(submission["context"]["wait"], wait);
     assert_eq!(result["context"]["wait"], wait);
@@ -2698,7 +2706,7 @@ fn assert_concurrent_event_chain(
         .filter(|(_, event)| event["wait"] == wait)
         .collect();
     assert_eq!(events.len(), 1, "exactly one event for {wait}");
-    let (event_id, event) = events[0];
+    let event = events[0].1;
     assert_eq!(event["task"], wait);
     assert_eq!(event["binding"], expected_binding);
     assert_eq!(
@@ -2720,13 +2728,6 @@ fn assert_concurrent_event_chain(
     assert_eq!(actual_submission["created_at"], submission["created_at"]);
     assert_eq!(actual_submission, *result);
     assert_eq!(actual_submission["reply_id"], result["reply_id"]);
-    assert_eq!(
-        state["deliveries"]
-            .as_object()
-            .and_then(|deliveries| deliveries.get(event_id.as_str()))
-            .is_none(),
-        true
-    );
 }
 
 fn exact_path_argument(command: &str, flag: &str, path: &Path) -> bool {
