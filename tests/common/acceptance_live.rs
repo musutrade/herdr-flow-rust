@@ -101,7 +101,7 @@ fn native_driver_retries_busy_only_before_a_creation_or_dispatch_journal() {
 }
 
 pub(super) fn require_nested_userns() {
-    let mut child = std::process::Command::new("bwrap")
+    let child = std::process::Command::new("bwrap")
         .args([
             "--unshare-user",
             "--ro-bind",
@@ -153,36 +153,44 @@ impl NativeChild {
     }
 
     fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            wait_bounded_child(&mut child, "native child");
+        self.terminate()
+            .unwrap_or_else(|error| panic!("native child cleanup failed: {error}"));
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+            wait_bounded_child(child)?;
         }
+        self.child.take();
+        Ok(())
     }
 }
 
 impl Drop for NativeChild {
     fn drop(&mut self) {
-        self.stop();
+        if let Err(error) = self.terminate() {
+            eprintln!("native child cleanup failed: {error}");
+        }
     }
 }
 
-fn wait_bounded_child(child: &mut std::process::Child, label: &str) {
+fn wait_bounded_child(child: &mut std::process::Child) -> std::io::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Ok(None) => {
-                eprintln!("{label} did not exit within 5s after kill");
-                return;
-            }
-            Err(error) => {
-                eprintln!("{label} wait failed after kill: {error}");
-                return;
-            }
+        if child.try_wait()?.is_some() {
+            return Ok(());
         }
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "native child did not exit within 5s after kill",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
