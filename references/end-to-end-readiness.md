@@ -448,8 +448,15 @@ the final check, every prior target ref/commit, user device/inode/bytes and
 content are checked again.
 
 The outer base, retained formal/user outputs and reports live until final
-assertions; there is no per-round `TempDir` teardown. The shared registry file and
-root remain bounded control state, while task roots, queue, plans and slots are
-removed by each finish. This is two observed rounds, not a twenty-round campaign,
-a whole-campaign disk-stability proof, or a claim of persistent shared queue or
-global-cache absence.
+assertions; there is no per-round `TempDir` teardown. After each round the fixture
+enumerates base and shared-registry entries with fallible `read_dir` calls,
+rejects unexpected retained entries, requires the exact rolling report pair,
+round formal/user entries and allowed registry files, and requires the registry
+index plus envs/plans/locks to contain no retained task state. A normalized
+metadata footprint of the shared registry must be equal after round 1 and round
+2, while workspace/temporary roots must remain absent. The non-live negative
+control adds an unexpected retained file and verifies the retained-control check
+rejects it. Reports are counted separately from the exact formal/user exclusions;
+no broad exclusion hides retained control. This is two observed rounds, not a
+twenty-round campaign, a whole-campaign disk-stability proof, or a claim of
+persistent shared queue or global-cache absence.

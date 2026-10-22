@@ -155,7 +155,6 @@ fn installed_real_opencode_two_rounds_share_one_outer_base() {
     let round1 = base.join("round-1");
     let round2 = base.join("round-2");
     common::create_dir(&round1).unwrap();
-    common::create_dir(&round2).unwrap();
     let formal1 = round1.join("formal.git");
     let user1 = round1.join("user-owned.txt");
     let formal2 = round2.join("formal.git");
@@ -167,44 +166,45 @@ fn installed_real_opencode_two_rounds_share_one_outer_base() {
         user2.clone(),
     ];
 
-    run_native_receiver_in(
-        true, true, true, false, false, base, &formal1, &user1, &excluded,
-    );
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    run_native_receiver_in(ReceiverSpec {
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: true,
+        apply_repair: false,
+        apply_restart: false,
+        base,
+        formal_target: &formal1,
+        user_asset: &user1,
+        excluded: &excluded,
+    });
     let commit1 = git(&formal1, &["rev-parse", "refs/heads/main"]);
     let identity1 = user_identity(&user1);
     assert_round_output(&formal1, &user1, &commit1, identity1);
+    assert_report_pair(base);
+    let control1 = retained_control(base, &["round-1"]).unwrap();
+    common::create_dir(&round2).unwrap();
 
-    run_native_receiver_in(
-        true, true, true, true, true, base, &formal2, &user2, &excluded,
-    );
+    run_native_receiver_in(ReceiverSpec {
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: true,
+        apply_repair: true,
+        apply_restart: true,
+        base,
+        formal_target: &formal2,
+        user_asset: &user2,
+        excluded: &excluded,
+    });
     let commit2 = git(&formal2, &["rev-parse", "refs/heads/main"]);
     let identity2 = user_identity(&user2);
     assert_round_output(&formal1, &user1, &commit1, identity1);
     assert_round_output(&formal2, &user2, &commit2, identity2);
-    assert!(base.join("registry").exists());
-    assert!(!base.join("workspace").exists());
-    assert!(!base.join("temporary").exists());
+    assert_report_pair(base);
+    let control2 = retained_control(base, &["round-1", "round-2"]).unwrap();
+    assert_eq!(control1, control2, "shared control footprint changed");
     assert!(!is_registered("project").unwrap());
     assert_eq!(occupied_slots().unwrap(), 0);
-    let reports = [
-        base.join("inventory-before.json"),
-        base.join("inventory-after.json"),
-    ];
-    for report in &reports {
-        let len = fs::metadata(report).unwrap().len();
-        assert!(len > 0 && len <= 1024 * 1024, "unbounded report");
-    }
-    let report_count = fs::read_dir(base)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("inventory-")
-        })
-        .count();
-    assert_eq!(report_count, 2, "reports must remain a rolling pair");
 }
 
 fn user_identity(path: &Path) -> (u64, u64) {
@@ -225,6 +225,168 @@ fn assert_round_output(target: &Path, user_asset: &Path, commit: &str, identity:
     );
 }
 
+fn sorted_names(path: &Path) -> Result<Vec<String>, String> {
+    let entries =
+        fs::read_dir(path).map_err(|error| format!("read_dir {}: {error}", path.display()))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("entry {}: {error}", path.display()))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn assert_report_pair(base: &Path) {
+    let names = sorted_names(base).unwrap();
+    let reports: Vec<&str> = names
+        .iter()
+        .filter(|name| name.starts_with("inventory-"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        reports,
+        vec!["inventory-after.json", "inventory-before.json"],
+        "reports must be one rolling pair"
+    );
+    for report in reports {
+        let path = base.join(report);
+        let len = fs::metadata(&path).unwrap().len();
+        assert!(len > 0 && len <= 1024 * 1024, "unbounded report {report}");
+    }
+}
+
+fn control_footprint(path: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for name in sorted_names(path)? {
+        let child = path.join(name);
+        let metadata = fs::symlink_metadata(&child)
+            .map_err(|error| format!("control metadata {}: {error}", child.display()))?;
+        let kind = if metadata.is_dir() {
+            "dir"
+        } else if metadata.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        let relative = child
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .display()
+            .to_string();
+        out.push(format!("{relative}:{kind}"));
+        if metadata.is_dir() {
+            control_footprint(&child, root, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn retained_control(base: &Path, rounds: &[&str]) -> Result<Vec<String>, String> {
+    let mut expected = vec![
+        "inventory-after.json".to_string(),
+        "inventory-before.json".to_string(),
+        "registry".to_string(),
+    ];
+    expected.extend(rounds.iter().map(|round| (*round).to_string()));
+    expected.sort();
+    if sorted_names(base)? != expected {
+        return Err(format!(
+            "unexpected retained base entries under {}",
+            base.display()
+        ));
+    }
+    for round in rounds {
+        let round = base.join(*round);
+        let expected = vec!["formal.git".to_string(), "user-owned.txt".to_string()];
+        if sorted_names(&round)? != expected {
+            return Err(format!(
+                "unexpected retained round entries under {}",
+                round.display()
+            ));
+        }
+    }
+    for owned in ["workspace", "temporary"] {
+        if base.join(owned).exists() {
+            return Err(format!("owned root {} remains", base.join(owned).display()));
+        }
+    }
+    let registry = base.join("registry");
+    let expected = vec![
+        "envs".to_string(),
+        "locks".to_string(),
+        "plans".to_string(),
+        "registry.json".to_string(),
+        "registry.lock".to_string(),
+    ];
+    if sorted_names(&registry)? != expected {
+        return Err(format!(
+            "unexpected shared registry entries under {}",
+            registry.display()
+        ));
+    }
+    for subdir in ["envs", "plans", "locks"] {
+        let names = sorted_names(&registry.join(subdir))?;
+        if !names.is_empty() {
+            return Err(format!(
+                "retained {subdir} entries under {}: {names:?}",
+                registry.display()
+            ));
+        }
+    }
+    let index: J = serde_json::from_slice(
+        &fs::read(registry.join("registry.json"))
+            .map_err(|error| format!("read registry index: {error}"))?,
+    )
+    .map_err(|error| format!("parse registry index: {error}"))?;
+    let entries = index
+        .get("entries")
+        .and_then(J::as_object)
+        .ok_or_else(|| "registry index entries missing".to_string())?;
+    if !entries.is_empty() {
+        return Err("registry index retains entries".to_string());
+    }
+    let mut footprint = Vec::new();
+    control_footprint(&registry, &registry, &mut footprint)?;
+    Ok(footprint)
+}
+
+#[test]
+fn retained_control_rejects_unexpected_entries() {
+    let temp = temp();
+    let base = temp.path().join("base");
+    common::create_dir(&base).unwrap();
+    for round in ["round-1", "round-2"] {
+        let round = base.join(round);
+        common::create_dir(&round).unwrap();
+        common::create_dir(&round.join("formal.git")).unwrap();
+        fs::write(round.join("user-owned.txt"), "unrelated user asset").unwrap();
+    }
+    fs::write(base.join("inventory-before.json"), "{}").unwrap();
+    fs::write(base.join("inventory-after.json"), "{}").unwrap();
+    let registry = base.join("registry");
+    common::create_dir(&registry).unwrap();
+    for subdir in ["envs", "plans", "locks"] {
+        common::create_dir(&registry.join(subdir)).unwrap();
+    }
+    fs::write(registry.join("registry.json"), r#"{"entries":{}}"#).unwrap();
+    fs::write(registry.join("registry.lock"), "").unwrap();
+    assert!(retained_control(&base, &["round-1", "round-2"]).is_ok());
+    fs::write(base.join("unexpected-retained"), "leak").unwrap();
+    assert!(retained_control(&base, &["round-1", "round-2"]).is_err());
+}
+
+struct ReceiverSpec<'a> {
+    apply_development: bool,
+    apply_acceptance: bool,
+    apply_delivery: bool,
+    apply_repair: bool,
+    apply_restart: bool,
+    base: &'a Path,
+    formal_target: &'a Path,
+    user_asset: &'a Path,
+    excluded: &'a [PathBuf],
+}
+
 fn run_native_receiver(
     apply_development: bool,
     apply_acceptance: bool,
@@ -232,34 +394,36 @@ fn run_native_receiver(
     apply_repair: bool,
     apply_restart: bool,
 ) {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
     let formal_target = temp.path().join("formal.git");
     let user_asset = temp.path().join("user-owned.txt");
     let excluded = vec![formal_target.clone(), user_asset.clone()];
-    run_native_receiver_in(
+    run_native_receiver_in(ReceiverSpec {
         apply_development,
         apply_acceptance,
         apply_delivery,
         apply_repair,
         apply_restart,
-        temp.path(),
-        &formal_target,
-        &user_asset,
-        &excluded,
-    );
+        base: temp.path(),
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &excluded,
+    });
 }
 
-fn run_native_receiver_in(
-    apply_development: bool,
-    apply_acceptance: bool,
-    apply_delivery: bool,
-    apply_repair: bool,
-    apply_restart: bool,
-    base: &Path,
-    formal_target: &Path,
-    user_asset: &Path,
-    excluded: &[PathBuf],
-) {
+fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
+    let ReceiverSpec {
+        apply_development,
+        apply_acceptance,
+        apply_delivery,
+        apply_repair,
+        apply_restart,
+        base,
+        formal_target,
+        user_asset,
+        excluded,
+    } = spec;
     assert!(
         !apply_delivery || apply_acceptance,
         "delivery requires the native acceptance stage"
@@ -272,7 +436,6 @@ fn run_native_receiver_in(
         !apply_restart || (apply_repair && apply_delivery),
         "restart requires repair/delivery"
     );
-    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -306,10 +469,11 @@ fn run_native_receiver_in(
         &reviewer_root,
         &repair_root,
         &final_reviewer_root,
-    ] {
-        if let Some(runtime) = runtime {
-            runtime_roots.push(runtime.clone());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        runtime_roots.push(runtime.clone());
     }
     let expected_tasks = if apply_repair {
         vec![
@@ -985,13 +1149,15 @@ fn run_native_receiver_in(
         let artifact = delivery_artifact.as_ref().unwrap();
         let (inventory, expected_inventory) = external_driver_delivery(
             &mut env,
-            &q,
-            formal_target,
-            user_asset,
-            artifact,
-            delivery_expected.as_ref().unwrap(),
-            user_identity.unwrap(),
-            inventory.expect("delivery requires inventory"),
+            DeliverySpec {
+                q: &q,
+                target: formal_target,
+                user_asset,
+                artifact,
+                expected: delivery_expected.as_ref().unwrap(),
+                user_identity: user_identity.unwrap(),
+                inventory: inventory.expect("delivery requires inventory"),
+            },
         );
         for child in [&mut server, &mut guard_child] {
             child.wait().unwrap();
@@ -1288,16 +1454,29 @@ fn external_supervisor_restart(
 
 // Trusted, unmarked external driver. The native coordinator only approved the
 // continuation; this process owns the environment and the Local executor.
-fn external_driver_delivery(
-    env: &mut TaskEnvironment,
-    q: &Path,
-    target: &Path,
-    user_asset: &Path,
-    artifact: &J,
-    expected: &str,
+struct DeliverySpec<'a> {
+    q: &'a Path,
+    target: &'a Path,
+    user_asset: &'a Path,
+    artifact: &'a J,
+    expected: &'a str,
     user_identity: (u64, u64),
     inventory: super::native_inventory::NativeInventory,
+}
+
+fn external_driver_delivery(
+    env: &mut TaskEnvironment,
+    spec: DeliverySpec<'_>,
 ) -> (super::native_inventory::NativeInventory, J) {
+    let DeliverySpec {
+        q,
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+        inventory,
+    } = spec;
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(user_asset).unwrap();
     assert_eq!((m.dev(), m.ino()), user_identity);
