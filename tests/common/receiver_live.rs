@@ -5651,6 +5651,26 @@ struct DeliverySpec<'a> {
     inventory: super::native_inventory::NativeInventory,
 }
 
+fn bounded_delivery_evidence(value: &J) -> J {
+    let bytes = serde_json::to_vec_pretty(value).unwrap();
+    if bytes.len() <= 60 * 1024 {
+        return value.clone();
+    }
+    json!({"truncated": true, "original_bytes": bytes.len(),
+        "reason": "delivery diagnostic exceeded 60KiB; payload omitted"})
+}
+
+#[test]
+fn delivery_evidence_caps_escaped_and_multibyte_payloads() {
+    let small = json!({"phase":"unknown"});
+    assert_eq!(bounded_delivery_evidence(&small), small);
+    let large = json!({"data": "\u{0001}界".repeat(20000)});
+    let bounded = bounded_delivery_evidence(&large);
+    assert_eq!(bounded["truncated"], true);
+    assert!(bounded.get("data").is_none());
+    assert!(serde_json::to_vec_pretty(&bounded).unwrap().len() <= 60 * 1024);
+}
+
 fn external_unknown_delivery(
     mut env: super::OwnedEnvironment,
     q: &Path,
@@ -5697,24 +5717,36 @@ fn external_unknown_delivery(
     assert_eq!(fs::read(user_asset).unwrap(), user_before);
     let executor = LostObservation::default();
     let unknown = delivery::execute(&mut env, &executor).unwrap();
-    let persisted = env.delivery.clone();
     custody = env.into_handoff();
+    use std::io::Read;
+    let mut state_bytes = Vec::new();
+    fs::File::open(&state_file)
+        .unwrap()
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut state_bytes)
+        .unwrap();
+    assert!(
+        state_bytes.len() <= 1024 * 1024,
+        "environment state exceeds 1MiB"
+    );
+    let persisted_document: J = serde_json::from_slice(&state_bytes).unwrap();
+    let persisted = &persisted_document["delivery"];
     util::atomic_write_json(
         unknown_evidence,
-        &json!({
+        &bounded_delivery_evidence(&json!({
             "returned": {
                 "phase": unknown["phase"], "id": unknown["id"],
                 "request": unknown["request"], "artifact": unknown["artifact"],
-                "receipt": unknown["receipt"], "problem": unknown["problem"],
-                "execution_error": unknown["execution_error"],
+                "receipt": unknown["receipt"], "has_problem": unknown["problem"].is_string(),
+                "has_execution_error": unknown["execution_error"].is_string(),
             },
             "persisted": {
                 "phase": persisted["phase"], "id": persisted["id"],
                 "request": persisted["request"], "artifact": persisted["artifact"],
-                "receipt": persisted["receipt"], "problem": persisted["problem"],
-                "execution_error": persisted["execution_error"],
+                "receipt": persisted["receipt"], "has_problem": persisted["problem"].is_string(),
+                "has_execution_error": persisted["execution_error"].is_string(),
             }
-        }),
+        })),
     )
     .unwrap();
     assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
@@ -5747,7 +5779,7 @@ fn external_unknown_delivery(
         .unwrap_or_else(|error| panic!("unknown reconcile output invalid: {error}"));
     util::atomic_write_json(
         confirmation_evidence,
-        &json!({
+        &bounded_delivery_evidence(&json!({
             "pre": {
                 "candidate": expected_unknown["candidate"],
                 "intent": expected_unknown["intent"],
@@ -5758,7 +5790,7 @@ fn external_unknown_delivery(
                 "id": confirmed["id"], "artifact": confirmed["artifact"],
                 "request": confirmed["request"], "receipt": confirmed["receipt"],
             }
-        }),
+        })),
     )
     .unwrap();
     assert_eq!(confirmed["phase"], "confirmed");

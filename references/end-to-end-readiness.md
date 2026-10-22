@@ -961,7 +961,8 @@ while the persisted intent remains `unknown` with no receipt. This is a
 test-injected lost observation, not a provider/network crash or a fabricated
 confirmation.
 
-Before custody transfer the test records a truthful `before_unknown` inventory
+After releasing custody and before fresh reconciliation, the test records a
+truthful `before_unknown` inventory
 with a null receipt and unknown observation metadata; it does not call the
 confirmed-result inventory API or invent a receipt. A fresh unmarked CLI process
 then runs `delivery reconcile` with the real Local observer, which confirms the
@@ -969,5 +970,14 @@ actual B target and receipt, followed by `finish`. No execute path is invoked af
 restart. Assertions bind the exact intent/artifact/request/ref and confirmed
 receipt, target commit/content, unchanged user asset, one wrapper execution, and
 absent owned roots/registry/state/queue/slots. The existing confirmed restart
-scenario remains separate and unchanged. The scenario has not yet been run; no
-model-success or general external-failure claim is made. #38/#32 remain OPEN.
+scenario remains separate and unchanged. #38/#32 remain OPEN.
+
+Primary live validation (2026-10-22): attempt 1 passed in 106.81s including
+build, with selected configuration unchanged. Real native development/acceptance,
+actual Local mutation, persisted UNKNOWN, fresh reconciliation and finish passed.
+After this run only diagnostic limits changed: environment state reads are capped
+at 1MiB, selected evidence at 60KiB, and raw error text is omitted. A payload over
+the diagnostic cap is replaced with an explicit truncation marker; that marker
+does not preserve exact identity fields. The live run does not cover these later
+diagnostic limits; focused non-model validation covers them separately. No general
+provider/network-failure or process-discovery completeness claim is made.
