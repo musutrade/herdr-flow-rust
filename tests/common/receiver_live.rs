@@ -263,6 +263,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -295,6 +296,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -327,6 +329,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -359,6 +362,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -391,6 +395,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -423,6 +428,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -455,6 +461,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_approval_block: true,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -487,6 +494,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_approval_block: false,
         apply_missing_report: true,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -553,6 +561,40 @@ fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() 
 }
 
 #[test]
+#[ignore = "requires real native repair/confirmed delivery, fixture-owned workspace cleanup fault and fresh finish"]
+fn installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_supervisor() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("formal.git");
+    let user_asset = base.join("user-owned.txt");
+    let excluded = vec![formal_target.clone(), user_asset.clone()];
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: true,
+        apply_repair: true,
+        apply_restart: true,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: false,
+        apply_cleanup_recovery: true,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &excluded,
+    });
+}
+
+#[test]
 #[ignore = "requires a real task-owned Codex developer, real OpenCode coordinator/reviewer and Local delivery"]
 fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
     acceptance_live::require_nested_userns();
@@ -578,6 +620,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -964,6 +1007,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_approval_block: false,
             apply_missing_report: false,
             apply_unknown_delivery: false,
+            apply_cleanup_recovery: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1139,6 +1183,7 @@ struct ReceiverSpec<'a> {
     apply_approval_block: bool,
     apply_missing_report: bool,
     apply_unknown_delivery: bool,
+    apply_cleanup_recovery: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1174,6 +1219,7 @@ fn run_native_receiver(
         apply_approval_block: false,
         apply_missing_report: false,
         apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1199,6 +1245,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_approval_block,
         apply_missing_report,
         apply_unknown_delivery,
+        apply_cleanup_recovery,
         unavailable_dependency,
         base,
         formal_target,
@@ -1350,10 +1397,31 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "unknown delivery requires native development/acceptance and external delivery"
     );
+    assert!(
+        !apply_cleanup_recovery
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && apply_acceptance
+                && apply_delivery
+                && apply_repair
+                && apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && !apply_unknown_delivery
+                && unavailable_dependency.is_none()),
+        "cleanup recovery requires the native repair/restart delivery fixture"
+    );
     let selected_config_before = (apply_concurrent
         || apply_approval_block
         || apply_missing_report
-        || apply_unknown_delivery)
+        || apply_unknown_delivery
+        || apply_cleanup_recovery)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1518,6 +1586,12 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             base.join("inventory-before.json"),
             base.join("inventory-after.json"),
             base.join("campaign-summary.json"),
+        ]);
+    }
+    if apply_cleanup_recovery {
+        evidence_paths.extend([
+            env.state_file().to_path_buf(),
+            cleanup_state_path("project").unwrap(),
         ]);
     }
     if apply_ack_stall_recovery {
@@ -3200,6 +3274,35 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     .as_ref()
                     .expect("unknown-delivery config snapshot"),
             "selected OpenCode configuration changed during unknown-delivery scenario"
+        );
+        return;
+    }
+    if apply_cleanup_recovery {
+        queue_child.kill().unwrap();
+        queue_child.wait().unwrap();
+        let artifact = delivery_artifact.as_ref().unwrap();
+        external_cleanup_recovery(
+            env,
+            &q,
+            &mut server,
+            &mut guard_child,
+            RestartSpec {
+                target: formal_target,
+                user_asset,
+                artifact,
+                expected: delivery_expected.as_ref().unwrap(),
+                user_identity: user_identity.unwrap(),
+                inventory: inventory.expect("cleanup recovery requires inventory"),
+            },
+        );
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("cleanup-recovery config snapshot"),
+            "selected OpenCode configuration changed during cleanup-recovery scenario"
         );
         return;
     }
@@ -5580,6 +5683,253 @@ fn external_supervisor_restart(
     assert!(!state_file.exists());
     assert!(!is_registered("project").unwrap());
     assert!(!cleanup_state_path("project").unwrap().exists());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    assert!(!q.exists());
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+    assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
+    inventory.after(&expected_inventory);
+    custody.disarm();
+}
+
+struct DisplacedWorkspace {
+    original: PathBuf,
+    displaced: PathBuf,
+    identity: (u64, u64),
+    armed: bool,
+}
+
+impl DisplacedWorkspace {
+    fn displace(original: &Path, displaced: PathBuf) -> Self {
+        assert!(!displaced.exists(), "fault destination already exists");
+        let metadata = fs::symlink_metadata(original).unwrap();
+        assert!(metadata.is_dir(), "fault target is not a directory");
+        let identity = (metadata.dev(), metadata.ino());
+        fs::rename(original, &displaced).unwrap();
+        Self {
+            original: original.to_path_buf(),
+            displaced,
+            identity,
+            armed: true,
+        }
+    }
+
+    fn restore(&mut self) {
+        if !self.armed {
+            return;
+        }
+        assert!(
+            !self.original.exists(),
+            "refusing to overwrite a replacement workspace path"
+        );
+        let metadata = fs::symlink_metadata(&self.displaced).unwrap();
+        assert_eq!(
+            (metadata.dev(), metadata.ino()),
+            self.identity,
+            "displaced workspace identity changed"
+        );
+        fs::rename(&self.displaced, &self.original).unwrap();
+        let restored = fs::symlink_metadata(&self.original).unwrap();
+        assert_eq!(
+            (restored.dev(), restored.ino()),
+            self.identity,
+            "restored workspace identity changed"
+        );
+        self.armed = false;
+    }
+}
+
+impl Drop for DisplacedWorkspace {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.original.exists() {
+            eprintln!(
+                "cleanup fault left displaced workspace; replacement retained at {}",
+                self.original.display()
+            );
+            return;
+        }
+        match fs::rename(&self.displaced, &self.original) {
+            Ok(()) => self.armed = false,
+            Err(error) => eprintln!("cleanup fault workspace restore failed: {error}"),
+        }
+    }
+}
+
+fn external_cleanup_recovery(
+    mut env: super::OwnedEnvironment,
+    q: &Path,
+    server: &mut std::process::Child,
+    guard_child: &mut std::process::Child,
+    spec: RestartSpec<'_>,
+) {
+    let RestartSpec {
+        inventory,
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+    } = spec;
+    let workspace = env.workspace_root.clone();
+    let temporary = env.temp_root.clone();
+    let state_file = env.state_file().to_path_buf();
+    let displaced = workspace.with_file_name("workspace-cleanup-fault");
+    let workspace_metadata = fs::symlink_metadata(&workspace).unwrap();
+    let workspace_identity = (workspace_metadata.dev(), workspace_metadata.ino());
+    let mut custody;
+    let mut reaper = ChildReaper::new(server, guard_child);
+    let confirmed = confirm_delivery(
+        &mut env,
+        q,
+        target,
+        user_asset,
+        artifact,
+        expected,
+        user_identity,
+    );
+    let artifact_id = artifact["id"].as_str().unwrap();
+    let intent_id = confirmed["id"].clone();
+    let receipt = confirmed["receipt"].clone();
+    let expected_inventory = inventory.before(&confirmed);
+    custody = env.into_handoff();
+
+    let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
+    if !reconcile.status.success() {
+        reaper.kill();
+        custody.cleanup();
+        panic!(
+            "fresh cleanup reconcile failed: {}",
+            String::from_utf8_lossy(&reconcile.stderr)
+        );
+    }
+    let reconciled: J = serde_json::from_slice(&reconcile.stdout)
+        .unwrap_or_else(|error| panic!("cleanup reconcile output invalid: {error}"));
+    assert_eq!(reconciled["phase"], "confirmed");
+    assert_eq!(reconciled["id"], intent_id);
+    assert_eq!(reconciled["receipt"], receipt);
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+
+    let mut fault = DisplacedWorkspace::displace(&workspace, displaced);
+    let failed_finish = cli_output(&["delivery", "finish", "--task", "project"]);
+    assert!(
+        !failed_finish.status.success(),
+        "fixture workspace fault unexpectedly finished"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_finish.stderr).contains("cleanup"),
+        "cleanup fault did not reach cleanup: {}",
+        String::from_utf8_lossy(&failed_finish.stderr)
+    );
+
+    let failed_state: J = serde_json::from_slice(
+        &fs::read(&state_file).unwrap_or_else(|error| panic!("read failed state: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse failed state: {error}"));
+    assert_eq!(failed_state["state"], "destroy_failed");
+    assert_eq!(failed_state["delivery"]["phase"], "cleaning");
+    assert_eq!(failed_state["delivery"]["shared_removed"], true);
+    assert_eq!(failed_state["delivery"]["id"], intent_id);
+    assert_eq!(failed_state["delivery"]["receipt"], receipt);
+    assert!(is_registered("project").unwrap());
+    assert!(occupied_slots().unwrap() > 0);
+
+    let plan_path = cleanup_state_path("project").unwrap();
+    assert!(plan_path.exists());
+    let plan: J = serde_json::from_slice(&fs::read(&plan_path).unwrap())
+        .unwrap_or_else(|error| panic!("parse cleanup plan: {error}"));
+    assert_eq!(plan["task_id"], "project");
+    assert_eq!(plan["delivery_confirmed"], true);
+    let roots = plan["roots"].as_array().unwrap();
+    let pending = plan["pending_root_removals"].as_array().unwrap();
+    let root_paths: Vec<&str> = roots
+        .iter()
+        .map(|root| root["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(root_paths.len(), 2);
+    assert!(root_paths.contains(&workspace.to_str().unwrap()));
+    assert!(root_paths.contains(&temporary.to_str().unwrap()));
+    let workspace_root = roots
+        .iter()
+        .find(|root| root["path"] == json!(workspace.to_str().unwrap()))
+        .unwrap();
+    assert_eq!(
+        workspace_root["identity"]["dev"],
+        json!(workspace_identity.0)
+    );
+    assert_eq!(
+        workspace_root["identity"]["ino"],
+        json!(workspace_identity.1)
+    );
+    assert!(pending
+        .iter()
+        .any(|path| path == &json!(workspace.to_str().unwrap())));
+    for root in roots {
+        let path = Path::new(root["path"].as_str().unwrap());
+        let still_pending = pending.iter().any(|pending| pending == &root["path"]);
+        if !still_pending {
+            assert!(
+                !path.exists(),
+                "completed cleanup root still exists: {}",
+                path.display()
+            );
+        } else if path == workspace.as_path() {
+            assert!(!workspace.exists());
+            assert!(fault.displaced.exists());
+        } else {
+            assert!(
+                path.exists(),
+                "pending cleanup root vanished: {}",
+                path.display()
+            );
+        }
+    }
+    assert!(!workspace.exists());
+    assert!(fault.displaced.exists());
+    let displaced_metadata = fs::symlink_metadata(&fault.displaced).unwrap();
+    assert_eq!(
+        (displaced_metadata.dev(), displaced_metadata.ino()),
+        workspace_identity
+    );
+    if q.exists() {
+        let after_cleanup = queue::load_queue(q).unwrap();
+        for section in ["tasks", "waits", "events", "deliveries"] {
+            assert!(
+                after_cleanup[section].as_object().unwrap().is_empty(),
+                "queue-owned {section} remain after partial cleanup"
+            );
+        }
+    }
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+
+    let replay = cli_output(&["delivery", "execute", "--task", "project"]);
+    assert!(
+        !replay.status.success(),
+        "delivery replayed after cleanup fault"
+    );
+    assert!(
+        String::from_utf8_lossy(&replay.stderr).contains("no longer active"),
+        "unexpected replay rejection: {}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_target_untouched(target, user_asset, user_identity, artifact_id);
+
+    fault.restore();
+    let final_finish = cli_output(&["delivery", "finish", "--task", "project"]);
+    if !final_finish.status.success() {
+        reaper.kill();
+        panic!(
+            "fresh cleanup finish failed: {}",
+            String::from_utf8_lossy(&final_finish.stderr)
+        );
+    }
+    reaper.wait();
+    assert!(!workspace.exists());
+    assert!(!temporary.exists());
+    assert!(!state_file.exists());
+    assert!(!is_registered("project").unwrap());
+    assert!(!plan_path.exists());
     assert_eq!(occupied_slots().unwrap(), 0);
     assert!(!q.exists());
     assert_target_untouched(target, user_asset, user_identity, artifact_id);
