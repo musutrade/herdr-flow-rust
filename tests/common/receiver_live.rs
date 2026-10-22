@@ -140,6 +140,8 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_restart: false,
         apply_ack_stall_recovery: true,
         apply_late_acceptance: false,
+        apply_unable_restore: false,
+        unavailable_dependency: None,
         base,
         formal_target: &formal_target,
         user_asset: &user_asset,
@@ -164,6 +166,34 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_restart: false,
         apply_ack_stall_recovery: false,
         apply_late_acceptance: true,
+        apply_unable_restore: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real OpenCode and an absent operator-provided reviewer dependency; unable verdict and restore continuation"]
+fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: true,
+        unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
         user_asset: &user_asset,
@@ -214,6 +244,8 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_restart: false,
         apply_ack_stall_recovery: false,
         apply_late_acceptance: false,
+        apply_unable_restore: false,
+        unavailable_dependency: None,
         base,
         formal_target: &formal_target,
         user_asset: &user_asset,
@@ -592,6 +624,8 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_restart: round.repair,
             apply_ack_stall_recovery: false,
             apply_late_acceptance: false,
+            apply_unable_restore: false,
+            unavailable_dependency: None,
             base,
             formal_target: &round.formal,
             user_asset: &round.user,
@@ -759,6 +793,8 @@ struct ReceiverSpec<'a> {
     apply_restart: bool,
     apply_ack_stall_recovery: bool,
     apply_late_acceptance: bool,
+    apply_unable_restore: bool,
+    unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
     user_asset: &'a Path,
@@ -786,6 +822,8 @@ fn run_native_receiver(
         apply_restart,
         apply_ack_stall_recovery: false,
         apply_late_acceptance: false,
+        apply_unable_restore: false,
+        unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
         user_asset: &user_asset,
@@ -803,6 +841,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_restart,
         apply_ack_stall_recovery,
         apply_late_acceptance,
+        apply_unable_restore,
+        unavailable_dependency,
         base,
         formal_target,
         user_asset,
@@ -840,6 +880,19 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && !apply_restart
                 && !apply_ack_stall_recovery),
         "late acceptance requires OpenCode development+acceptance mode"
+    );
+    assert!(
+        !apply_unable_restore
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && apply_development
+                && apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && unavailable_dependency.is_some()),
+        "unable restore requires OpenCode development+acceptance with a dependency"
     );
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -962,6 +1015,12 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     if apply_ack_stall_recovery {
         evidence_paths.push(base.join("ack-only-snapshot.json"));
+    }
+    if apply_unable_restore {
+        evidence_paths.push(
+            env.workspace_root
+                .join("reviewer-checkout/.herdr-verdict.json"),
+        );
     }
     let mut failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
@@ -1097,7 +1156,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         }
     }
     let development_cwd = apply_development.then(|| {
-        if apply_ack_stall_recovery {
+        if let Some(dependency) = unavailable_dependency {
+            setup_in_queue_with_unavailable_dependency(&env, "development", &q, dependency, None).1
+        } else if apply_ack_stall_recovery {
             setup_in_queue_with_apply_timeout(&env, "development", &q, Some(60.0)).1
         } else {
             setup_in_queue(&env, "development", &q).1
@@ -1143,6 +1204,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. This is the deliberately incomplete first development for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, edit and stage/add that file, then create one new local Git commit. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         } else {
             "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. Complete the authorized development assignment: replace the contents of the file named `file` with exactly `version B` followed by a newline, edit and stage/add that file, and create one new local Git commit. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+        };
+        let review_instruction = if unavailable_dependency.is_some() {
+            format!("{review_instruction} Do not create, install, copy or synthesize required-dependency-fixture; it is operator-provided acceptance environment tooling and is not part of your committed artifact.")
+        } else {
+            review_instruction
         };
         let (worker, result) = match development_adapter {
             DevelopmentAdapter::OpenCode => acceptance_live::native(
@@ -1412,7 +1478,30 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         return;
     }
     if apply_acceptance {
-        if apply_repair {
+        if apply_unable_restore {
+            let development_artifact = &development_result.as_ref().unwrap()["output"];
+            native_review_stage(
+                &mut env,
+                &q,
+                &guard,
+                &registered,
+                ReviewSpec {
+                    artifact: development_artifact,
+                    reviewer_root: reviewer_root.as_ref().unwrap(),
+                    activity: "accept-native",
+                    checkout: "reviewer-checkout",
+                    instruction: "Independently inspect the fixed artifact against the original requirement. A separate mandatory acceptance validation requires the operator-provided tool ./required-dependency-fixture --check. Execute exactly `./required-dependency-fixture --check` directly in cwd; do not append echo/status printing, pipes, shell wrappers, or OR-true; preserve the native exit status. Do not create, install, copy or synthesize it, and do not infer availability from the artifact file. If the tool is unavailable, write .herdr-verdict.json with conclusion unable, a blocked check for criterion goal using the exact requirement basis source, a blocker containing the actual missing path/exit, and a concrete restore_condition for installing that operator tool. Do not claim a product failure, repair gap, approval or pass. If the tool is available, derive the conclusion from its actual output.",
+                    expected_waits: &["review", "accept-native"],
+                    expect_pass: false,
+                    unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
+                    development_session: Some(
+                        development_result.as_ref().unwrap()["session"]
+                            .as_str()
+                            .unwrap(),
+                    ),
+                },
+            );
+        } else if apply_repair {
             let development_artifact = &development_result.as_ref().unwrap()["output"];
             let failed_state = native_review_stage(
                 &mut env,
@@ -1427,6 +1516,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     instruction: "Independently inspect the exact candidate against the original requirement. This candidate is deliberately incomplete for the bounded repair fixture. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks, grounded gaps and evidence. Do not assume the conclusion; derive it yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet.",
                     expected_waits: &["review", "accept-first"],
                     expect_pass: false,
+                    unavailable_dependency: None,
+                    development_session: None,
                 },
             );
             if apply_delivery {
@@ -1514,6 +1605,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                     instruction: &final_instruction,
                     expected_waits: &["review", "accept-first", "repair-native", "accept-final"],
                     expect_pass: true,
+                    unavailable_dependency: None,
+                    development_session: None,
                 },
             );
             if apply_delivery {
@@ -1710,9 +1803,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         inventory.after(&expected_inventory);
     } else {
         destroy_environment(&env).unwrap();
-        for child in [&mut server, &mut guard_child, &mut queue_child] {
-            child.wait().unwrap();
-        }
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
     }
     assert!(!env.workspace_root.exists());
     assert!(!env.temp_root.exists());
@@ -2305,6 +2398,7 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
                 String::from_utf8_lossy(&output.stderr)
             );
         },
+        |_, _, _| {},
     );
     assert_ne!(reviewer["session"], coordinator["session"]);
     assert_ne!(reviewer["session"], development["session"]);
@@ -3127,6 +3221,8 @@ struct ReviewSpec<'a> {
     instruction: &'a str,
     expected_waits: &'a [&'a str],
     expect_pass: bool,
+    unavailable_dependency: Option<&'a str>,
+    development_session: Option<&'a str>,
 }
 
 fn native_review_stage(
@@ -3144,7 +3240,11 @@ fn native_review_stage(
         instruction: reviewer_instruction,
         expected_waits,
         expect_pass,
+        unavailable_dependency,
+        development_session,
     } = spec;
+    let requirement_before =
+        queue::load_queue(q).unwrap()["tasks"]["project"]["requirements"]["1"].clone();
     acceptance_live::change(
         q,
         json!({"kind":"candidate","candidate":artifact["id"],"reason":"real independent acceptance"}),
@@ -3153,9 +3253,37 @@ fn native_review_stage(
     activity["kind"] = json!("activity");
     acceptance_live::change(q, activity);
     let cwd = acceptance_live::clone_snapshot(env, artifact, checkout_name);
-    let (reviewer, collected) =
-        acceptance_live::native(env, q, &cwd, activity_name, reviewer_instruction);
+    let mut reviewer_tool_rows = J::Null;
+    let (reviewer, collected) = if let Some(dependency) = unavailable_dependency {
+        let dependency_path = cwd.join(dependency);
+        assert!(
+            !dependency_path.exists(),
+            "operator dependency unexpectedly present"
+        );
+        let tree = git(&cwd, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(
+            !tree.lines().any(|line| line == dependency),
+            "operator dependency must not be committed in artifact A"
+        );
+        acceptance_live::native_with_hook(
+            env,
+            q,
+            &cwd,
+            activity_name,
+            reviewer_instruction,
+            || {},
+            |client, endpoint, result| {
+                let session = result["session"].as_str().expect("reviewer result session");
+                reviewer_tool_rows = session_rows(client, endpoint, session, &cwd);
+            },
+        )
+    } else {
+        acceptance_live::native(env, q, &cwd, activity_name, reviewer_instruction)
+    };
     assert_ne!(reviewer["session"], coordinator["session"]);
+    if let Some(development_session) = development_session {
+        assert_ne!(reviewer["session"], development_session);
+    }
     let actual_report = util::read_json(&cwd.join(".herdr-verdict.json")).unwrap();
     let state = wait_for_stage(q, guard, coordinator, activity_name);
     assert_stage_shape(&state, expected_waits, coordinator);
@@ -3197,6 +3325,55 @@ fn native_review_stage(
     );
     let report = util::read_json(Path::new(signal["evidence"].as_str().unwrap())).unwrap();
     assert_eq!(report["session"], reviewer["session"]);
+    if let Some(dependency) = unavailable_dependency {
+        assert_eq!(actual_report["conclusion"], "unable");
+        let checks = actual_report["checks"]
+            .as_array()
+            .expect("unable report checks");
+        let dependency_check = checks
+            .iter()
+            .find(|check| check["criterion"] == "goal")
+            .expect("dependency check");
+        assert_eq!(dependency_check["status"], "blocked");
+        assert_eq!(dependency_check["source"], UNAVAILABLE_DEPENDENCY_SOURCE);
+        assert!(dependency_check["evidence"]
+            .as_str()
+            .is_some_and(|value| value.contains(dependency)));
+        assert!(actual_report["blocker"]
+            .as_str()
+            .is_some_and(|value| { !value.is_empty() && value.contains(dependency) }));
+        assert!(actual_report["restore_condition"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        let commands = tool_commands(
+            &reviewer_tool_rows,
+            reviewer["session"].as_str().expect("reviewer session"),
+        );
+        let command = commands
+            .iter()
+            .find(|command| {
+                command.command.contains(dependency) && command.command.contains("--check")
+            })
+            .expect("missing dependency command evidence");
+        assert!(
+            terminal_tool_state(command),
+            "missing dependency command not terminal"
+        );
+        assert_eq!(command.exit, Some(127));
+        assert_eq!(
+            command.command.trim(),
+            format!("./{dependency} --check"),
+            "reviewer did not execute the exact dependency command"
+        );
+        let missing_output = command.output.to_ascii_lowercase();
+        assert!(
+            missing_output.contains("not found")
+                || missing_output.contains("no such file")
+                || missing_output.contains("cannot access")
+        );
+        assert!(command.start > 0 && command.end >= command.start);
+        assert!(!cwd.join(dependency).exists());
+    }
     let parent = &state["tasks"]["project"];
     assert_eq!(parent["candidate"], artifact["id"]);
     assert_eq!(parent["delivery_target"], artifact["id"]);
@@ -3206,7 +3383,25 @@ fn native_review_stage(
     assert_eq!(parent["continuation"]["phase"], "planned");
     assert_eq!(parent["continuation"]["verdict"], verdict["id"]);
     assert_eq!(parent["continuation"]["binding"], event["binding"]);
-    if expect_pass {
+    if let Some(dependency) = unavailable_dependency {
+        assert_eq!(actual_report["conclusion"], "unable");
+        assert!(parent["approved"].is_null());
+        assert_eq!(task["phase"], "blocked");
+        assert_eq!(parent["continuation"]["action"]["kind"], "restore");
+        assert_eq!(parent["continuation"]["phase"], "planned");
+        assert_eq!(parent["continuation"]["execution_problem"], J::Null);
+        assert_eq!(
+            state["tasks"]["project"]["requirements"]["1"], requirement_before,
+            "requirement/source authorization changed"
+        );
+        assert_eq!(parent["candidate"], artifact["id"]);
+        assert!(state["tasks"].get("repair").is_none());
+        assert!(state["tasks"].get("accept-native").is_some());
+        assert!(
+            !cwd.join(dependency).exists(),
+            "operator dependency appeared"
+        );
+    } else if expect_pass {
         assert_eq!(actual_report["conclusion"], "passed");
         assert_eq!(parent["approved"]["candidate"], artifact["id"]);
         assert_eq!(parent["approved"]["activity"], activity_name);

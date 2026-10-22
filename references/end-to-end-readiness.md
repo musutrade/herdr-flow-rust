@@ -680,3 +680,39 @@ wrappers are required by the prompt, but arbitrary trailing shell syntax is not
 excluded by that path check. The changed completed guard submission is associated
 by the observed timeline; exact ACK and event/tool identities provide the event
 evidence, not a separately verified submission-context event binding.
+
+## Native reviewer unavailable restore continuation
+
+`installed_real_opencode_unable_restore_is_applied_by_native_receiver` is an
+opt-in phase-1 scenario. The immutable requirement is recorded before any
+dispatch with a test-only setup parameter: the product requirement remains the
+file-version requirement, while a separate mandatory acceptance source requires
+the operator-provided disposable tool `./required-dependency-fixture --check`.
+The tool is not part of artifact A and is not created by the developer or
+reviewer. The test verifies it is absent before review and after the scenario,
+and that it is not in artifact A's committed tree.
+
+A real OpenCode reviewer inspects a fixed snapshot of A and directly executes the
+exact missing dependency command. Its actual tool record must be terminal with
+nonzero exit 127 and the missing-path error; it must not use wrappers or echo to
+mask the exit. The reviewer writes the actual immutable `unable` report with a
+blocked check, exact requirement source, observed-path evidence, blocker and
+restore condition. The test rejects another conclusion honestly; it never writes
+or rewrites the verdict.
+
+The real coordinator ACKs the notification as receipt only and applies the
+unable verdict ID with `next_action.kind=restore`. Assertions require the child
+to be blocked with empty pending, parent `approved=null`, restore/planned
+continuation, exact verdict binding/report, unchanged candidate A, unchanged
+requirement revision and authorization, and no repair, delivery or new
+development child. The parent continuation has no execution-problem substitution;
+the model's actual unable report is distinct from a no-verdict native crash.
+Signal, submission message-id and reviewer report identity are checked, along
+with bounded child/resource cleanup.
+
+Phase 1 stops after the restore continuation is recorded. It does not claim that
+the dependency was installed, that a fresh review ran, or that a restored review
+passed. Actual restoration and a fresh review would be a separate phase. Existing
+synthetic `unable`/restore and execution-problem coverage remains the version-matrix
+overlap; this scenario adds the missing real reviewer dependency-failure path. No
+product/API/isolation change is made and #38/#32 remain OPEN.
