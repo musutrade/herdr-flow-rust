@@ -453,10 +453,20 @@ enumerates base and shared-registry entries with fallible `read_dir` calls,
 rejects unexpected retained entries, requires the exact rolling report pair,
 round formal/user entries and allowed registry files, and requires the registry
 index plus envs/plans/locks to contain no retained task state. A normalized
-metadata footprint of the shared registry must be equal after round 1 and round
+path/type footprint of the shared registry must be equal after round 1 and round
 2, while workspace/temporary roots must remain absent. The non-live negative
 control adds an unexpected retained file and verifies the retained-control check
 rejects it. Reports are counted separately from the exact formal/user exclusions;
-no broad exclusion hides retained control. This is two observed rounds, not a
+no broad exclusion hides retained control. Registry file byte sizes and lock
+contents are not compared; this is a normalized-state/path check. This is two observed rounds, not a
 twenty-round campaign, a whole-campaign disk-stability proof, or a claim of
 persistent shared queue or global-cache absence.
+
+Observed validation (2026-10-22): the final two-round live run passed in 284.23s.
+Each round sampled two marked processes before finish and zero matching processes
+after finish/reaping; per-round retained-control and final prior-output checks
+passed. The selected OpenCode configuration remained byte-identical. The first
+attempt completed round 1 but failed in round 2 because the developer wrote
+`INCOMPLETE` instead of the required literal `version INCOMPLETE`; its bounded
+failure evidence was retained. The prompt was clarified without relaxing the
+assertion, and the complete campaign was rerun successfully.

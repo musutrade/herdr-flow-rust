@@ -358,7 +358,7 @@ fn retained_control_rejects_unexpected_entries() {
     for round in ["round-1", "round-2"] {
         let round = base.join(round);
         common::create_dir(&round).unwrap();
-        common::create_dir(&round.join("formal.git")).unwrap();
+        common::create_dir(round.join("formal.git")).unwrap();
         fs::write(round.join("user-owned.txt"), "unrelated user asset").unwrap();
     }
     fs::write(base.join("inventory-before.json"), "{}").unwrap();
@@ -366,7 +366,7 @@ fn retained_control_rejects_unexpected_entries() {
     let registry = base.join("registry");
     common::create_dir(&registry).unwrap();
     for subdir in ["envs", "plans", "locks"] {
-        common::create_dir(&registry.join(subdir)).unwrap();
+        common::create_dir(registry.join(subdir)).unwrap();
     }
     fs::write(registry.join("registry.json"), r#"{"entries":{}}"#).unwrap();
     fs::write(registry.join("registry.lock"), "").unwrap();
@@ -706,7 +706,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             &["config", "user.email", "native@example.invalid"],
         );
         let review_instruction = if apply_repair {
-            "This is the deliberately incomplete first review for a bounded repair fixture. Do not complete the requirement: change file to exactly version INCOMPLETE and commit it locally. Do not write an acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+            "This is the deliberately incomplete first review for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, then commit it locally. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. Do not write an acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         } else {
             "Complete the authorized development assignment: change file to exactly version B and commit locally. Do not write an acceptance verdict. The complete assignment is to write file and commit it here. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         };
