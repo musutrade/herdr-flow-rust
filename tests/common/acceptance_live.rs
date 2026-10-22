@@ -243,6 +243,45 @@ pub(super) fn native_prepare(
     name: &str,
     instruction: &str,
 ) -> NativeTurn {
+    native_prepare_inner(
+        env,
+        q,
+        cwd,
+        name,
+        instruction,
+        " Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.",
+        |_| {},
+    )
+}
+
+pub(super) fn native_prepare_permission_probe<F: FnOnce(&mut J)>(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+    configure: F,
+) -> NativeTurn {
+    native_prepare_inner(
+        env,
+        q,
+        cwd,
+        name,
+        instruction,
+        " This is an explicit disposable permission-policy probe: attempt only the exact external sentinel path supplied in the instruction; do not approve or answer any permission/question, and do not read any other external path.",
+        configure,
+    )
+}
+
+fn native_prepare_inner<F: FnOnce(&mut J)>(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+    suffix: &str,
+    configure: F,
+) -> NativeTurn {
     let root = task_runtime::prepare(env, name).unwrap();
     common::create_dir_all(root.join("config/opencode")).unwrap();
     fs::copy(
@@ -255,13 +294,14 @@ pub(super) fn native_prepare(
     let config_path = root.join("config/opencode/opencode.json");
     let mut config = util::read_json(&config_path).unwrap();
     config["tools"]["task"] = json!(false);
+    configure(&mut config);
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let model: J =
         serde_json::from_str(&std::env::var("HERDR_LIVE_OPENCODE_MODEL").unwrap()).unwrap();
     let spec = json!({"adapter":"opencode","binary":std::env::var("HERDR_LIVE_OPENCODE_BINARY").unwrap(),"cwd":cwd,"model":model,"port":port()});
     let child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
     ready(spec["port"].as_u64().unwrap() as u16);
-    let instruction=format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
+    let instruction = format!("{instruction}{suffix}");
     let state = retry_unstarted(&root, "creation.json", || {
         task_runtime::native::create(
             env,

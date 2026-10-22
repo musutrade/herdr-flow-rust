@@ -866,3 +866,23 @@ coverage with zero absolute-threshold-10 violations. Formatting, lint policy,
 Clippy and rustdoc passed. The final diagnostic ordering/count correction passed
 its focused regression on both toolchains and a fresh Clippy check; no model
 scenario or acceptance assertion changed after live attempt 2.
+
+## Native permission-block observation
+
+The opt-in `installed_real_opencode_approval_block_stops_without_result` scenario
+uses one real OpenCode reviewer on fixed artifact A and a test-owned sentinel
+outside its cwd. The disposable configuration copy sets exactly that sentinel path
+to `ask`; other selected permission rules and the selected file remain unchanged.
+The reviewer is asked to inspect A and attempt the exact sentinel with `cat`; it
+must not approve or answer any permission prompt and must not write a verdict.
+
+The production session/collector must report `native_status=blocked` for the exact
+session while the native phase remains nonterminal (not `phase=blocked`). The test
+binds the actual `/permission` request id, session, message, call ID, path and tool
+input to the exact submitted native message, with no driver ACK, apply, verdict or
+tick. It asserts no report, event, delivery, verdict or applied result; parent
+requirement, candidate, round, revision, authorization and approval remain
+unchanged and the task pending list is empty. Detection is bounded; the child is
+then stopped/reaped and the owned environment is destroyed. The scenario has not
+yet been run and claims neither a partial-result execution_problem nor any
+acceptance conclusion. This is execution blockage only. #38/#32 remain OPEN.
