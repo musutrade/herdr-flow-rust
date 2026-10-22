@@ -13,7 +13,7 @@ remains open. It does not replace its issue acceptance matrix or close #32.
 | Native execution | Opt-in installed tests and `tests/common/acceptance_live.rs` run real native roles. OpenCode native coordinator scenarios below execute ACK/application themselves; the driver only registers work and collects. | OpenCode native coordinator behavior is evidenced; Codex coordinator/session bootstrap remains blocked by the host nested-userns/product gap. |
 | Resource lifetime | Protocol regression checks task registration/slots, workspace/temp roots, plan/env/lock records, shared entries, previous deliveries and a pre-existing user asset before fixture teardown; native reports record marked processes and base resources. | Outside-root cache/session and complete process/worktree discovery remain observational; correct native delivery plus teardown is evidenced only for the recorded OpenCode scenarios. |
 | Runtime compatibility | Local readiness review found Codex 0.163.0 and OpenCode 1.19.3; selected OpenCode configuration was exercised unchanged in the native scenarios below. | Codex still requires supported nested-userns/bootstrap behavior; no OpenCode 2.0 upgrade is claimed. |
-| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Real approval handling, dispatch/takeover interruption and delivery-unknown recovery remain; the ambiguity scenario must be independently run before claiming a real ambiguous result. |
+| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Real approval handling, dispatch/takeover interruption and delivery-unknown recovery remain; the real ambiguity-to-clarify run below does not cover user-confirmed revision or resumed work. |
 
 ## Twenty-round protocol regression
 
@@ -794,7 +794,21 @@ one event/delivery, unchanged artifact/requirement/candidate/revision/authorizat
 `approved=null`, and a blocked child with empty pending. No dependency installation,
 new activity, requirement revision, user-confirmed resolution or delivery occurs.
 
-This is phase 1 only. It is implemented but not yet run; no model-success claim is
-made. A real operator/user confirmation, revised requirement and resumed work
-remain a separate scenario. #38 and #32 remain OPEN; the Codex host/bootstrap
-blocker and all prior evidence limits are unchanged.
+Primary live validation (2026-10-22): attempt 1 passed in 77.79s including build,
+with the selected OpenCode configuration unchanged. The actual reviewer produced
+an ambiguous report, and the native coordinator acknowledged and applied its
+immutable verdict to a planned clarify continuation. Snapshot HEAD/file and report
+bytes remained unchanged; the actual model-written application was bound to the
+exact event, verdict and child version. Cleanup assertions passed.
+
+This is phase 1 only. A real operator/user confirmation, revised requirement and
+resumed work remain a separate scenario. Exact argument checks are not a complete
+shell parser and do not prove the absence of every trailing shell construct.
+#38 and #32 remain OPEN; the Codex host/bootstrap blocker and all prior evidence
+limits are unchanged.
+
+Independent non-live verification: stable coverage and Rust 1.85 all-target suites
+each passed 484 tests with zero failures and 19 ignored. Formatting, lint policy,
+Clippy and rustdoc passed. CRAP checked 4800 functions at 77.2% line coverage with
+zero violations of the absolute threshold 10. Stable and Rust 1.85 release builds
+passed; all builds used this worktree’s own target directory.

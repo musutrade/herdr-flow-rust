@@ -1062,7 +1062,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     } else {
         2
     };
-    let mut artifact_names = vec!["source", "development", "reviewer-checkout"];
+    let mut artifact_names = if apply_ambiguous {
+        vec!["source", "reviewer-checkout"]
+    } else {
+        vec!["source", "development", "reviewer-checkout"]
+    };
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
@@ -1072,7 +1076,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> = if apply_development {
+    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous {
         artifact_names
             .iter()
             .map(|name| {
@@ -1370,7 +1374,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
-        let instruction = format!(
+        let instruction = String::from(
             "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include blocked checks with criterion=goal and source exactly equal to each conflicting basis reference. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd."
         );
         native_review_stage(
@@ -4220,6 +4224,12 @@ fn native_review_stage(
         acceptance_live::change(q, activity);
         acceptance_live::clone_snapshot(env, artifact, checkout_name)
     };
+    let ambiguity_snapshot = expect_ambiguous.then(|| {
+        (
+            git(&cwd, &["rev-parse", "HEAD"]),
+            fs::read(cwd.join("file")).unwrap(),
+        )
+    });
     let prepared_head = prepared_checkout.map(|_| git(&cwd, &["rev-parse", "HEAD"]));
     let mut reviewer_tool_rows = J::Null;
     let (reviewer, collected) =
@@ -4259,6 +4269,7 @@ fn native_review_stage(
     let actual_report_bytes = fs::read(&report_path).unwrap();
     let actual_report = util::read_json(&report_path).unwrap();
     let state = wait_for_stage(q, guard, coordinator, activity_name);
+    assert_eq!(fs::read(&report_path).unwrap(), actual_report_bytes);
     let coordinator_commands = match (coordinator_client, coordinator_endpoint, coordinator_cwd) {
         (Some(client), Some(endpoint), Some(cwd)) => {
             let rows = session_rows(
@@ -4466,6 +4477,27 @@ fn native_review_stage(
         assert_eq!(parent["continuation"]["action"]["kind"], "delivery");
     } else if expect_ambiguous {
         assert_eq!(actual_report["conclusion"], "ambiguous");
+        let (head_before, file_before) = ambiguity_snapshot.as_ref().unwrap();
+        assert_eq!(head_before.as_str(), artifact["id"].as_str().unwrap());
+        assert_eq!(
+            git(&cwd, &["rev-parse", "HEAD"]).as_str(),
+            head_before.as_str()
+        );
+        assert_eq!(
+            fs::read(cwd.join("file")).unwrap().as_slice(),
+            file_before.as_slice()
+        );
+        let application = util::read_json(expected_application.unwrap()).unwrap();
+        assert_eq!(application["task"], activity_name);
+        assert_eq!(application["event"], event["id"]);
+        assert_eq!(application["verdict"], verdict["id"]);
+        assert_eq!(
+            application["state_version"].as_u64().unwrap() + 1,
+            task["state_version"].as_u64().unwrap()
+        );
+        assert_eq!(application["next_action"]["kind"], "clarify");
+        assert!(application.get("output").is_none());
+        assert!(application.get("acceptance").is_none());
         assert_eq!(actual_report["gaps"], json!([]));
         assert_eq!(actual_report["resolutions"], json!([]));
         assert_eq!(actual_report["reuses"], json!([]));
