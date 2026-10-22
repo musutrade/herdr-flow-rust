@@ -622,3 +622,35 @@ earlier run passed in 115.96 seconds before that tightening and is not used as
 evidence for the final chronology assertions. The initial non-live compile
 failure (undeclared Value::Null) was corrected to the existing J alias; its log
 is retained during this unfinished acceptance work.
+
+## Fixed-snapshot late-result rejection
+
+`installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_receiver`
+is an opt-in development+acceptance scenario. A real OpenCode reviewer inspects a
+fixed Git snapshot A and writes the actual immutable verdict. Its result is
+collected and its event is attached while A is still current, but queue
+notifications are disabled through the supported CLI after native dispatch and
+before terminal collection. The driver then creates a real fixture Git commit B
+in a separate clone, registers/selects B under the queue lock, and re-enables
+notifications. B is driver-owned setup, not a concurrent developer claim.
+
+This tests delayed delivery of a pre-collected result, not collection after
+replacement. At collection the event is unacknowledged, unapplied, pending and
+undelivered. After B selection `event-current` is false. The same real coordinator
+receives the delayed delivery, ACKs it as receipt only, runs `event-current` for
+the exact event (expected nonzero), and attempts exactly one stale application
+with the registered verdict ID (expected nonzero stale rejection). It never
+claims application success, runs no readiness, and does not rewrite the verdict.
+The driver never ACKs, applies, writes a verdict, ticks, or manually edits
+queue/task state; only the supported notification toggle and lineage
+artifact/candidate setup are used.
+
+Bounded assertions compare protected task/result fields rather than claiming
+broad no-mutation across watcher heartbeats: original event remains
+acknowledged/unapplied/pending, parent approval is null, candidate is B, no
+successful stale task-apply exists, no `progress_stall` is emitted for inactive
+A, and A's fixed HEAD/content plus the reviewer report bytes are unchanged.
+Actual failed tool metadata/output, separate shell invocations, temporal evidence,
+and bounded child teardown are checked. The fixture is not process/server crash
+recovery, a concurrent developer proof, independent delivery, or #38 completion.
+#38 and #32 remain OPEN.
