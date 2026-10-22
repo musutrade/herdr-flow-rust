@@ -181,7 +181,11 @@ fn setup_in_queue(
     git(&source, &["add", "file"]);
     git(&source, &["commit", "-qm", "A"]);
     let sha = git(&source, &["rev-parse", "HEAD"]);
-    let cwd = env.workspace_root.join("acceptance");
+    let cwd = env.workspace_root.join(if role == "development" {
+        "development"
+    } else {
+        "acceptance"
+    });
     git(
         &env.workspace_root,
         &[
@@ -192,6 +196,11 @@ fn setup_in_queue(
         ],
     );
     let now = herdr_flow::util::now();
+    let (wait_owner, wait_reason) = if role == "development" {
+        ("developer", "development")
+    } else {
+        ("reviewer", "review")
+    };
     let mut state = queue::load_queue(q).unwrap();
     progress::lineage::action(&mut state,&json!({"kind":"plan","task":"project","goal":"verify file",
         "basis":{"original":[if role=="development" {"change file to version B and commit locally"} else {"file must contain version A"}],"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
@@ -209,7 +218,7 @@ fn setup_in_queue(
         json!({"kind":"artifact","artifact":{"id":sha,"adapter":"git","location":source}}),
         json!({"kind":"candidate","candidate":sha,"reason":"review"}),
         json!({"kind":"activity","activity":"review","role":role,"input":sha,"session_epoch":1,
-            "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":"reviewer","reason":"review","condition":"report","timeout_seconds":600}}),
+            "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":wait_owner,"reason":wait_reason,"condition":"report","timeout_seconds":600}}),
     ] {
         let mut spec = spec;
         spec["task"] = json!("project");

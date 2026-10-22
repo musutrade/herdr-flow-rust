@@ -783,7 +783,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         ]
     };
     let notifications = if apply_repair { 4 } else { 2 };
-    let mut artifact_names = vec!["source", "acceptance", "reviewer-checkout"];
+    let mut artifact_names = vec!["source", "reviewer-checkout"];
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
@@ -844,7 +844,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             base.join("campaign-summary.json"),
         ]);
     }
-    let _failure_evidence = FailureEvidence(evidence_paths);
+    let mut failure_evidence = FailureEvidence(evidence_paths);
     let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
     let mut config = util::read_json(Path::new(&selected)).unwrap();
     // Only an explicit operator opt-in may widen the disposable copy's directory
@@ -893,6 +893,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             developer_release=developer_release.display(), repair_release=repair_release.display()
         );
     }
+    instruction_text.push_str(" Use only the supplied queue path. Never create, copy, rename, edit or probe queue, guard or state directories. Stop and fail on any non-lock-busy error; never fabricate task-apply, output, event, verdict or readiness, and never create a replacement or duplicate artifact.");
     fs::write(&instructions, instruction_text).unwrap();
     let items = config
         .as_object_mut()
@@ -999,13 +1000,55 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             &["config", "user.email", "native@example.invalid"],
         );
         let review_instruction = if apply_repair {
-            "This is the deliberately incomplete first review for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, then commit it locally. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. Do not write an acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+            "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. This is the deliberately incomplete first development for a bounded repair fixture. Do not complete the requirement: replace the contents of the file named `file` with the literal text `version INCOMPLETE` followed by a newline, edit and stage/add that file, then create one new local Git commit. The word `version` is part of the required file contents; do not write only `INCOMPLETE`. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         } else {
-            "Complete the authorized development assignment: change file to exactly version B and commit locally. Do not write an acceptance verdict. The complete assignment is to write file and commit it here. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
+            "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. Complete the authorized development assignment: replace the contents of the file named `file` with exactly `version B` followed by a newline, edit and stage/add that file, and create one new local Git commit. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         };
         let (worker, result) =
             acceptance_live::native(&mut env, &q, &development_cwd, "review", review_instruction);
         assert_ne!(worker["session"], registered["session"]);
+        let worker_report = worker_root
+            .as_ref()
+            .unwrap()
+            .join("submissions")
+            .join(format!("{}.json", result["message_id"].as_str().unwrap()));
+        assert!(
+            worker_report.exists(),
+            "developer collector report is missing"
+        );
+        failure_evidence.0.push(worker_report);
+        let output = &result["output"];
+        let output_id = output["id"].as_str().expect("developer output id");
+        let input_id = output["input"].as_str().expect("developer input id");
+        assert_ne!(output_id, input_id, "developer did not create a new commit");
+        let output_cwd = Path::new(
+            output["location"]
+                .as_str()
+                .expect("developer output location"),
+        );
+        assert_eq!(
+            git(output_cwd, &["rev-parse", "HEAD"]),
+            output_id,
+            "developer HEAD is not the collected output"
+        );
+        let expected_content = if apply_repair {
+            "version INCOMPLETE"
+        } else {
+            "version B"
+        };
+        let show = format!("{output_id}:file");
+        let committed = std::process::Command::new("git")
+            .current_dir(output_cwd)
+            .args(["show", &show])
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        assert_eq!(
+            committed.stdout.as_slice(),
+            format!("{expected_content}\n").as_bytes(),
+            "developer committed the wrong file content"
+        );
+        assert!(!development_cwd.join(".herdr-verdict.json").exists());
         util::atomic_write_json(&developer_release,
             &json!({"session":worker["session"],"runtime":worker_root,"status":"server stopped and reaped after terminal collection"})).unwrap();
         Some(result)

@@ -497,3 +497,12 @@ and the real event was acknowledged but not applied before the deadline.
 The retained summary contains only rounds 1–3. Bounded failure evidence was
 retained and the selected configuration bytes were unchanged. This is not
 twenty-task acceptance; no failed round was retried or counted as complete.
+The fixture now identifies the developer role explicitly despite the legacy
+activity name `review`, uses a development-named cwd and developer/development
+wait labels, and asks for the literal file contents with edit/add/commit while
+forbidding verdicts. Immediately after developer collection the fixture requires
+a new output commit, exact committed content, and no `.herdr-verdict.json`, and
+adds that worker report to bounded failure evidence before coordinator waits.
+Coordinator instructions require the exact collector output, forbid copying,
+editing or probing queue/guard/state, and require stopping on non-busy errors.
+The failed attempt and its evidence remain retained; assertions were not relaxed.
