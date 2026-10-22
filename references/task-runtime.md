@@ -254,3 +254,22 @@ evidence. Readiness must name the stall delivery and coordinator session, run af
 successful application, and match the persisted document and invocation time. It does
 not cover a coordinator/server crash or restart; no supported OpenCode transport
 restart API is added.
+### Fixed-snapshot late-result boundary
+
+The opt-in `installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_receiver`
+scenario collects a real reviewer result for fixed snapshot A while A is current,
+but disables notifications after dispatch and before collection. A driver-owned
+fixture Git commit B is registered/selected afterward, notifications are
+re-enabled, and the same coordinator receives the delayed A event. The coordinator
+ACKs receipt only, confirms `event-current` is false, and makes one expected
+nonzero stale `task-apply` attempt with the registered verdict ID. No driver
+ACK/apply/verdict/tick/manual state edit occurs. Assertions preserve A's fixed
+HEAD/content, report bytes and verdict ID, verify the exact model-written
+application bound to the actual --spec path and conclusion-derived next action, require the original event to
+remain acknowledged/unapplied/pending, candidate B and null approval, exact
+event/delivery totals and signal/report identity, and exactly one terminal stale
+apply with the production obsolete error. No immediate pre-deadline A stall is
+observed; overdue stall suppression is not demonstrated because the default
+deadline is 600 seconds. This is delayed delivery of a pre-collected result, not
+collection after replacement and not a concurrent developer proof. No
+product/API/isolation or crash-restart behavior is added.

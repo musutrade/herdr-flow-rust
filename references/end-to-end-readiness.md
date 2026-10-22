@@ -622,3 +622,61 @@ earlier run passed in 115.96 seconds before that tightening and is not used as
 evidence for the final chronology assertions. The initial non-live compile
 failure (undeclared Value::Null) was corrected to the existing J alias; its log
 is retained during this unfinished acceptance work.
+
+## Fixed-snapshot late-result rejection
+
+`installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_receiver`
+is an opt-in development+acceptance scenario. A real OpenCode reviewer inspects a
+fixed Git snapshot A and writes the actual immutable verdict. Its result is
+collected and its event is attached while A is still current, but queue
+notifications are disabled through the supported CLI after native dispatch and
+before terminal collection. The driver then creates a real fixture Git commit B
+in a separate clone, registers/selects B under the queue lock, and re-enables
+notifications. B is driver-owned setup, not a concurrent developer claim.
+
+This tests delayed delivery of a pre-collected result, not collection after
+replacement. At collection the event is unacknowledged, unapplied, pending and
+undelivered. After B selection `event-current` is false. The same real coordinator
+receives the delayed delivery, ACKs it as receipt only, runs `event-current` for
+the exact event (expected nonzero), and attempts exactly one stale application
+with the registered verdict ID (expected nonzero stale rejection). It never
+claims application success, runs no readiness, and does not rewrite the verdict.
+The driver never ACKs, applies, writes a verdict, ticks, or manually edits
+queue/task state; only the supported notification toggle and lineage
+artifact/candidate setup are used.
+
+Bounded assertions compare protected task/result fields rather than claiming
+broad no-mutation across watcher heartbeats. The model-written
+`late-application.json` is read and must name the exact task, stale event, child
+state version and registered verdict ID; the actual failed command must use that
+exact file as its single --spec argument. It must have the conclusion-derived
+`next_action` and no fabricated output/acceptance fields. The coordinator must
+have a completed late turn; exactly one terminal stale `task-apply` with the exact
+production obsolete error is required, with no successful application and no
+other non-busy rejection. Original event remains acknowledged/unapplied/pending,
+parent approval is null, candidate is B, and A's fixed HEAD/content plus the
+reviewer report bytes and verdict ID are unchanged. Event/delivery totals, the
+unique accept event, exact delivery binding, and the signal/submission-message/
+report session/output chain are checked. No immediate pre-deadline
+`progress_stall` is observed; because the default apply deadline is 600 seconds,
+overdue stall suppression is not demonstrated by this bounded scenario.
+Actual failed tool terminal state/exit and output, separate shell invocations,
+temporal evidence, and bounded child teardown are checked. The fixture is not
+process/server crash recovery, a concurrent developer proof, independent delivery,
+or #38 completion. #38 and #32 remain OPEN.
+
+Primary live3 passed in 130.25 seconds, with selected configuration bytes
+unchanged. Live1 failed after reviewer collection because the test read the
+queue before its watcher had converted the signal into an event; the fixture now
+waits read-only up to 30 seconds with notifications disabled. Live2 failed because
+the coordinator appended status-printing shell commands, masking the native
+nonzero exits as zero. Direct calls preserving tool exit metadata are now explicit
+in the instructions; negative assertions were not relaxed. Both failure logs and
+bounded diagnostics remain available during this unfinished acceptance work.
+
+The --spec check binds one exact quoted or unquoted application path and checks
+tool exit/error evidence; it is not a complete shell parser. Direct calls without
+wrappers are required by the prompt, but arbitrary trailing shell syntax is not
+excluded by that path check. The changed completed guard submission is associated
+by the observed timeline; exact ACK and event/tool identities provide the event
+evidence, not a separately verified submission-context event binding.

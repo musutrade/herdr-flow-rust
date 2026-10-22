@@ -218,6 +218,17 @@ pub(super) fn native(
     name: &str,
     instruction: &str,
 ) -> (J, J) {
+    native_with_hook(env, q, cwd, name, instruction, || {})
+}
+
+pub(super) fn native_with_hook<F: FnOnce()>(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+    after_dispatch: F,
+) -> (J, J) {
     let root = task_runtime::prepare(env, name).unwrap();
     common::create_dir_all(root.join("config/opencode")).unwrap();
     fs::copy(
@@ -249,6 +260,7 @@ pub(super) fn native(
         task_runtime::native::dispatch(env, &root)
     })
     .unwrap();
+    after_dispatch();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let result = loop {
         let collected = task_runtime::native::collect(env, &root);
