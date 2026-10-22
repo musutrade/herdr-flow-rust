@@ -2289,6 +2289,11 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
         .expect("collected acceptance event");
     assert_eq!(event["applied"], false);
     assert_eq!(event["acknowledged"], false);
+    assert_eq!(event["binding"], collected["context"]["binding"]);
+    assert_eq!(
+        event["evidence"],
+        json!(q.join("results/accept-native.json"))
+    );
     assert!(state["tasks"]["accept-native"]["pending"]
         .as_array()
         .is_some_and(|pending| pending.iter().any(|item| item == &event_id)));
@@ -2414,6 +2419,15 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
         );
         std::thread::sleep(Duration::from_millis(100));
     };
+    for index in [ack_index, event_current_index, task_apply_index] {
+        assert!(
+            commands[index].start > 0
+                && commands[index].start != i64::MAX
+                && commands[index].end >= commands[index].start
+                && commands[index].end != i64::MAX,
+            "missing or invalid late-recovery tool timestamps"
+        );
+    }
     assert!(commands[ack_index].end <= commands[event_current_index].start);
     assert!(commands[event_current_index].end <= commands[task_apply_index].start);
     assert!(
