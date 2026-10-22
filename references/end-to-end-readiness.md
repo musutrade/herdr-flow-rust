@@ -58,9 +58,11 @@ remove task-owned transcripts, evidence, sessions and state as required by #38.
 Repository development/CI failure logs are separate from those task-owned
 resources and are retained for review under the ongoing development handoff.
 
-No actual twenty-task result, autonomous coordinator, or fully upgraded legacy
-resource set is claimed by this document. These remain explicit next acceptance
-work rather than boxes inferred from unit-test counts.
+The observed twenty-round OpenCode campaign below covers task-owned roots,
+marked processes and exact delivery identities, but not complete outside-root
+cache/session/process discovery, autonomous Codex coordination or a fully
+upgraded legacy resource set. Those remain explicit limits rather than boxes
+inferred from unit-test counts.
 
 ## Owned production watcher bootstrap
 
@@ -981,3 +983,58 @@ the diagnostic cap is replaced with an explicit truncation marker; that marker
 does not preserve exact identity fields. The live run does not cover these later
 diagnostic limits; focused non-model validation covers them separately. No general
 provider/network-failure or process-discovery completeness claim is made.
+
+## Native confirmed delivery cleanup-fault recovery
+
+The opt-in
+`installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_supervisor`
+scenario reuses the real failed-review/repair/fresh-acceptance and confirmed
+Local Git delivery fixture. After confirmation and a fresh unmarked reconcile,
+the test atomically renames only the disposable workspace root to a fixture-owned
+sibling. The temporary root, queue, state, delivery intent/receipt, target and
+user asset are not moved or edited. This is a fixture filesystem fault, not a
+product or adapter failure.
+
+The first fresh CLI `finish` must fail after entering cleanup: the persisted
+environment is `destroy_failed`, delivery remains `cleaning` with
+`shared_removed=true`, the exact intent and receipt are retained, the cleanup plan
+and registry slot remain, owned queue entries are gone, and the workspace is
+missing at its original path while the displaced directory retains its exact
+device/inode. A bounded private snapshot of the failed state/plan and CLI statuses
+is registered before the fault and written before the assertions; it contains no
+raw error output. The assertions bind the failed document and plan to the
+original environment instance and the registry entry to the same instance, roots
+and state file. They compare the plan's recorded roots with its pending/completed
+sets instead of assuming which later root was visited. A pre-cleanup rejection
+would leave phase `confirmed`, no plan and the queue entries intact; the displaced
+workspace alone is not accepted as proof of partial cleanup.
+
+An attempted `delivery execute` must be rejected without changing the target or
+user asset. A queue directory that is already gone is accepted only when the
+expected temporary root was actually removed; otherwise the persisted queue must
+contain exactly empty owned sections. The test then renames the same displaced
+directory back to the exact original workspace path and verifies the inode, runs
+a fresh unmarked CLI `finish` that returns `finished:true`, and requires removal of
+the remaining roots, registry/state/plan, queue and slots while preserving the
+delivered ref and user asset. A bounded RAII guard
+restores the displaced root before child reaping and handoff cleanup on unwind;
+it never overwrites an unexpected replacement path. No product journal, receipt,
+ACK or application is fabricated, and no raw evidence is uploaded.
+
+Primary attempt 1 (2026-10-22) failed after 226.28s at the occupied-slot
+assertion, after the real native stages and first failed cleanup. The fixture
+expected one slot, but `occupied_slots()` counts the environment document and
+cleanup plan separately. The corrected assertion requires exactly two, exactly
+one registered environment, and matching document/plan/registry instance identity.
+This was a fixture assertion failure, not evidence of a second leaked environment;
+the failure is retained locally. Attempt 2 passed in 189.46s including build,
+with selected configuration unchanged. It verified actual partial cleanup,
+retained cleaning state and plan, replay rejection, restoration of the original
+workspace inode, fresh `finished:true`, and final resource/target/user checks. The twenty-round campaign and earlier native delivery/restart evidence
+remain separate. #38/#32 remain OPEN.
+
+The final inventory sample includes the bounded failure snapshot in base usage.
+The snapshot is removed only after that sample passes, so this sample proves the
+asserted owned-root/registry cleanup, not an exact formal-output-only base listing.
+The outer disposable fixture is removed at teardown; the snapshot is preserved
+only on a failed assertion through the bounded development failure evidence path.
