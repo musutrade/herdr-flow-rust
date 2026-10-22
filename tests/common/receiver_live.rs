@@ -1350,7 +1350,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "unknown delivery requires native development/acceptance and external delivery"
     );
-    let selected_config_before = (apply_concurrent || apply_approval_block || apply_missing_report)
+    let selected_config_before = (apply_concurrent
+        || apply_approval_block
+        || apply_missing_report
+        || apply_unknown_delivery)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -3168,6 +3171,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         queue_child.kill().unwrap();
         queue_child.wait().unwrap();
         let artifact = delivery_artifact.as_ref().unwrap();
+        let unknown_evidence = base.join("unknown-delivery-journal.json");
+        let confirmation_evidence = base.join("unknown-delivery-confirmation.json");
+        failure_evidence.0.push(unknown_evidence.clone());
+        failure_evidence.0.push(confirmation_evidence.clone());
         external_unknown_delivery(
             env,
             &q,
@@ -3182,6 +3189,17 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 user_identity: user_identity.unwrap(),
                 inventory: inventory.expect("unknown delivery requires inventory"),
             },
+            &unknown_evidence,
+            &confirmation_evidence,
+        );
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("unknown-delivery config snapshot"),
+            "selected OpenCode configuration changed during unknown-delivery scenario"
         );
         return;
     }
@@ -5588,7 +5606,15 @@ impl Executor for LostObservation {
     }
 
     fn execute(&self, intent: &J) -> herdr_flow::Result<()> {
-        self.executions.fetch_add(1, Ordering::SeqCst);
+        if self
+            .executions
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(herdr_flow::FlowError::progress(
+                "test executor already performed its single Local mutation",
+            ));
+        }
         delivery::local::Local.execute(intent)
     }
 
@@ -5597,6 +5623,20 @@ impl Executor for LostObservation {
             "test-injected lost observation after one Local execution".into(),
         ))
     }
+}
+
+#[test]
+fn lost_observation_allows_one_execution_attempt_and_never_confirms() {
+    let executor = LostObservation::default();
+    let invalid = json!({});
+    assert!(executor.execute(&invalid).is_err());
+    assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
+    assert!(executor.execute(&invalid).is_err());
+    assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        executor.observe(&invalid),
+        Ok(Observation::Unknown(_))
+    ));
 }
 
 // Trusted, unmarked external driver. The native coordinator only approved the
@@ -5617,6 +5657,8 @@ fn external_unknown_delivery(
     server: &mut std::process::Child,
     guard_child: &mut std::process::Child,
     spec: DeliverySpec<'_>,
+    unknown_evidence: &Path,
+    confirmation_evidence: &Path,
 ) {
     let DeliverySpec {
         q: delivery_queue,
@@ -5645,14 +5687,42 @@ fn external_unknown_delivery(
         "authorization":"deliver"
     });
     request["state_version"] = state["tasks"]["project"]["state_version"].clone();
+
+    let mut custody;
+    let mut reaper = ChildReaper::new(server, guard_child);
     let intent = delivery::prepare(&mut env, q, &request, &delivery::local::Local).unwrap();
     let intent_id = intent["id"].clone();
     assert_eq!(intent["artifact"]["id"], artifact_id);
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), expected);
+    assert_eq!(fs::read(user_asset).unwrap(), user_before);
     let executor = LostObservation::default();
     let unknown = delivery::execute(&mut env, &executor).unwrap();
-    let mut reaper = ChildReaper::new(server, guard_child);
-    let mut custody = env.into_handoff();
+    let persisted = env.delivery.clone();
+    custody = env.into_handoff();
+    util::atomic_write_json(
+        unknown_evidence,
+        &json!({
+            "returned": {
+                "phase": unknown["phase"], "id": unknown["id"],
+                "request": unknown["request"], "artifact": unknown["artifact"],
+                "receipt": unknown["receipt"], "problem": unknown["problem"],
+                "execution_error": unknown["execution_error"],
+            },
+            "persisted": {
+                "phase": persisted["phase"], "id": persisted["id"],
+                "request": persisted["request"], "artifact": persisted["artifact"],
+                "receipt": persisted["receipt"], "problem": persisted["problem"],
+                "execution_error": persisted["execution_error"],
+            }
+        }),
+    )
+    .unwrap();
     assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
+    assert_eq!(persisted["phase"], unknown["phase"]);
+    assert_eq!(persisted["id"], unknown["id"]);
+    assert_eq!(persisted["request"], unknown["request"]);
+    assert_eq!(persisted["artifact"], unknown["artifact"]);
+    assert!(persisted["receipt"].is_null());
     assert_eq!(unknown["phase"], "unknown");
     assert!(unknown["receipt"].is_null());
     assert_eq!(unknown["id"], intent_id);
@@ -5660,6 +5730,8 @@ fn external_unknown_delivery(
     assert_eq!(unknown["request"], request);
     assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), artifact_id);
     assert_eq!(fs::read(user_asset).unwrap(), user_before);
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
     let expected_unknown = inventory.before_unknown(&unknown);
 
     let reconcile = cli_output(&["delivery", "reconcile", "--task", "project"]);
@@ -5673,7 +5745,25 @@ fn external_unknown_delivery(
     }
     let confirmed: J = serde_json::from_slice(&reconcile.stdout)
         .unwrap_or_else(|error| panic!("unknown reconcile output invalid: {error}"));
+    util::atomic_write_json(
+        confirmation_evidence,
+        &json!({
+            "pre": {
+                "candidate": expected_unknown["candidate"],
+                "intent": expected_unknown["intent"],
+                "receipt": expected_unknown["receipt"],
+                "queue_keys": expected_unknown["queue_keys"],
+            },
+            "confirmed": {
+                "id": confirmed["id"], "artifact": confirmed["artifact"],
+                "request": confirmed["request"], "receipt": confirmed["receipt"],
+            }
+        }),
+    )
+    .unwrap();
     assert_eq!(confirmed["phase"], "confirmed");
+    assert_eq!(confirmed["id"], expected_unknown["intent"]);
+    assert_eq!(confirmed["artifact"]["id"], expected_unknown["candidate"]);
     assert_eq!(confirmed["id"], intent_id);
     assert_eq!(confirmed["artifact"]["id"], artifact_id);
     assert_eq!(confirmed["request"], request);
@@ -5685,6 +5775,8 @@ fn external_unknown_delivery(
     assert_eq!(confirmed["receipt"]["ref"], "refs/heads/main");
     assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), artifact_id);
     assert_eq!(fs::read(user_asset).unwrap(), user_before);
+    let m = fs::metadata(user_asset).unwrap();
+    assert_eq!((m.dev(), m.ino()), user_identity);
 
     let finish = cli_output(&["delivery", "finish", "--task", "project"]);
     if !finish.status.success() {
@@ -5696,6 +5788,7 @@ fn external_unknown_delivery(
         );
     }
     reaper.wait();
+    assert_eq!(executor.executions.load(Ordering::SeqCst), 1);
     assert!(!workspace.exists());
     assert!(!temporary.exists());
     assert!(!state_file.exists());
@@ -5703,13 +5796,13 @@ fn external_unknown_delivery(
     assert!(!cleanup_state_path("project").unwrap().exists());
     assert_eq!(occupied_slots().unwrap(), 0);
     assert!(!q.exists());
+    assert_eq!(git(target, &["rev-parse", "refs/heads/main"]), artifact_id);
     assert_eq!(git(target, &["show", "refs/heads/main:file"]), "version B");
     assert_eq!(fs::read(user_asset).unwrap(), user_before);
     let m = fs::metadata(user_asset).unwrap();
     assert_eq!((m.dev(), m.ino()), user_identity);
-    inventory.after(&confirmed);
+    inventory.after(&expected_unknown);
     custody.disarm();
-    let _ = expected_unknown;
 }
 
 fn external_driver_delivery(
