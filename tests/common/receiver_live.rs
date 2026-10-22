@@ -3575,7 +3575,12 @@ fn worker_submission_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
         Err(error) => return Err(error),
     };
     let mut files = Vec::new();
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= 64 {
+            return Err(std::io::Error::other(
+                "worker submissions directory exceeds 64 entries",
+            ));
+        }
         let path = entry?.path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
             files.push(path);
@@ -3675,8 +3680,8 @@ fn collect_worker_with_fresh_cli(
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 worker_collect_busy(&stderr),
-                "fresh worker collect failed: {}",
-                stderr
+                "fresh worker collect failed with non-retryable status {:?}",
+                output.status.code()
             );
         }
         assert!(
@@ -3700,11 +3705,11 @@ fn recover_submitted_worker(
     let root = turn.root.clone();
     let instance_id = env.instance_id.clone();
     let task_id = env.task_id.clone();
-    let state: J = util::read_json(root.join("state.json")).unwrap();
-    let creation_before = util::read_json(root.join("creation.json")).unwrap();
+    let state: J = util::read_json(&root.join("state.json")).unwrap();
+    let creation_before = util::read_json(&root.join("creation.json")).unwrap();
     let dispatch_before = fs::read(root.join("dispatch.json")).unwrap();
     let runtime_before = fs::read(root.join("runtime.json")).unwrap();
-    let submission_before = util::read_json(root.join("submission.json")).unwrap();
+    let submission_before = util::read_json(&root.join("submission.json")).unwrap();
     let session = submission_before["session"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -3803,7 +3808,7 @@ fn recover_submitted_worker(
     failure_metadata["context"] = context.clone();
     write_worker_snapshot(failure_snapshot, &failure_metadata);
 
-    let mut custody = WorkerCustody::release(env);
+    let custody = WorkerCustody::release(env);
     let result = collect_worker_with_fresh_cli(
         &root,
         &task_id,
@@ -3812,25 +3817,28 @@ fn recover_submitted_worker(
         &mut failure_metadata,
     );
 
-    let submission_after = util::read_json(root.join("submission.json")).unwrap();
+    let submission_after = util::read_json(&root.join("submission.json")).unwrap();
     assert_eq!(submission_after, result);
     assert_eq!(submission_after["phase"], "signalled");
     assert_eq!(submission_after["session"], json!(session));
     assert_eq!(submission_after["message_id"], json!(message));
     assert_eq!(submission_after["context"], context);
     assert_eq!(
-        util::read_json(root.join("state.json")).unwrap()["session"],
+        util::read_json(&root.join("state.json")).unwrap()["session"],
         json!(session)
     );
     assert_eq!(
-        util::read_json(root.join("creation.json")).unwrap(),
+        util::read_json(&root.join("creation.json")).unwrap(),
         creation_before
     );
     assert_eq!(
         fs::read(root.join("dispatch.json")).unwrap(),
         dispatch_before
     );
-    assert_eq!(util::read_json(root.join("runtime.json")).unwrap(), runtime);
+    assert_eq!(
+        util::read_json(&root.join("runtime.json")).unwrap(),
+        runtime
+    );
     assert_eq!(worker_submission_files(&root).unwrap().len(), 1);
     let event = wait_worker_event(q, name);
     assert_eq!(event["outcome"], "complete");
@@ -3901,7 +3909,8 @@ fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
     assert_eq!(outer.instance_id, instance_id);
     drop(outer);
     assert!(!is_registered("worker-custody-failure").unwrap());
-    assert!(!root.join("failure-workspace").exists());
+    assert!(!root.join("workspace").exists());
+    assert!(!root.join("temporary").exists());
 
     let mut outer = super::environment_with(root, "worker-custody-panic", vec![]);
     let instance_id = outer.instance_id.clone();
@@ -6073,11 +6082,7 @@ fn cli_output_with_timeout(args: &[&str], timeout: Duration) -> std::process::Ou
                 let _ = process.kill();
                 let _ = process.wait();
             }
-            panic!(
-                "delivery CLI timed out; stdout={:?}; stderr={:?}",
-                String::from_utf8_lossy(&read_bounded(&mut stdout_file)),
-                String::from_utf8_lossy(&read_bounded(&mut stderr_file))
-            );
+            panic!("bounded CLI timed out; stdout/stderr omitted");
         }
         std::thread::sleep(Duration::from_millis(50));
     }

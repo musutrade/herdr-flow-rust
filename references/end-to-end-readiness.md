@@ -1071,7 +1071,15 @@ unchanged/zero. A no-model catch-unwind control verifies outer ownership cleanup
 and a registry-root guard restores `HERDR_TASK_ENV_ROOT` and tears down on test
 assertion failure.
 
-This scenario has not yet been run as a live model acceptance. It is not a crash
+Primary live validation (2026-10-22): attempt 1 passed in 65.63s including build,
+with selected configuration unchanged. The fresh CLI collection, exact native
+identity, actual coordinator ACK/application and final cleanup assertions passed.
+The first non-live compile attempt failed on seven missing path borrows; these
+were corrected before the passing non-live/live runs and the compiler log is
+retained. After the live run, the shared CLI timeout diagnostic was changed to
+omit stdout/stderr; scenario and success assertions were unchanged.
+
+It is not a crash
 or server-restart proof, and it does not cover a dispatch interruption after
 `dispatch.json` but before `submission.json`: no supported API
 can prove that the POST was not sent, so that boundary remains fail-closed.
