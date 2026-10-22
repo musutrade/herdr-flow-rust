@@ -131,6 +131,14 @@ fixture file and create a new Git commit, collected as the activity's output.
 These inputs are copied only into disposable test environments. Failures are
 reported and the test environment is cancelled/destroyed, not marked delivered.
 
+A separate opt-in mixed test runs the Codex developer through task-owned
+`native::create/dispatch/collect` and then the existing real OpenCode coordinator
+and reviewer. It copies only selected Codex config/auth into the worker `c/`
+directory, uses Codex `on-request` approvals without automatic answers, and
+checks the actual `turn.json`/queue event/apply evidence. This is a mixed
+Codex-worker/OpenCode-coordinator proof, not a Codex coordinator or twenty-task
+claim.
+
 Codex turns declare `externalSandbox` because the enclosing task-specific
 bubblewrap namespace is the enforced filesystem boundary. Native approval policy
 defaults to `untrusted`. An explicitly authorized runtime may select

@@ -171,6 +171,97 @@ pub(super) fn native(
     println!("real native {name}: exact session collected and server stopped");
     (state, result)
 }
+pub(super) fn native_codex(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    root: &Path,
+    name: &str,
+    instruction: &str,
+) -> (J, J) {
+    let config_source = std::env::var_os("HERDR_LIVE_CODEX_CONFIG")
+        .map(std::path::PathBuf::from)
+        .expect("HERDR_LIVE_CODEX_CONFIG required for Codex developer");
+    let config_before = fs::read(&config_source).unwrap();
+    fs::copy(&config_source, root.join("c/config.toml")).unwrap();
+    let auth_source = std::env::var_os("HERDR_LIVE_CODEX_AUTH").map(std::path::PathBuf::from);
+    let auth_before = auth_source.as_ref().map(|path| fs::read(path).unwrap());
+    if let Some(path) = &auth_source {
+        fs::copy(path, root.join("c/auth.json")).unwrap();
+    }
+    let binary = std::env::var("HERDR_LIVE_CODEX_BINARY").unwrap();
+    let model: J = serde_json::from_str(&std::env::var("HERDR_LIVE_CODEX_MODEL").unwrap()).unwrap();
+    let spec = json!({
+        "adapter":"codex",
+        "approval_policy":"on-request",
+        "driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
+        "binary":binary,
+        "cwd":cwd,
+        "model":model
+    });
+    let mut child = task_runtime::launch(env, root, &spec).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !root.join("server.sock").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "Codex app-server exited before socket readiness"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Codex app-server socket readiness deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let instruction = format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
+    let state = retry_unstarted(root, "creation.json", || {
+        task_runtime::native::create(
+            env,
+            root,
+            &json!({"queue_dir":q,"wait":name,"instruction":instruction}),
+        )
+    })
+    .unwrap();
+    retry_unstarted(root, "turn.json", || {
+        task_runtime::native::dispatch(env, root)
+    })
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    let result = loop {
+        let collected = task_runtime::native::collect(env, root);
+        if collected
+            .as_ref()
+            .is_err_and(|error| error.kind == herdr_flow::error::ErrorKind::StateBusy)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let r = collected.unwrap_or_else(|error| panic!("codex native collection: {error}"));
+        if r["phase"] == "signalled" {
+            break r;
+        }
+        assert_ne!(
+            r["phase"], "blocked",
+            "Codex native approval/user-input blocked the role; no automatic approval"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Codex native role {name} unresolved: {}",
+            r["phase"]
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    };
+    assert_eq!(result["outcome"], "complete");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(fs::read(&config_source).unwrap(), config_before);
+    if let (Some(path), Some(before)) = (&auth_source, auth_before) {
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+    println!("real Codex native {name}: exact turn collected and server stopped");
+    (state, result)
+}
+
 fn apply(q: &Path, name: &str, result: &J, next: &str) -> J {
     let current = queue::load_queue(q).unwrap();
     let guard = util::read_json(

@@ -148,6 +148,29 @@ fn installed_real_opencode_confirmed_delivery_restarts_in_external_supervisor() 
 }
 
 #[test]
+#[ignore = "requires a real task-owned Codex developer, real OpenCode coordinator/reviewer and Local delivery"]
+fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("formal.git");
+    let user_asset = base.join("user-owned.txt");
+    let excluded = vec![formal_target.clone(), user_asset.clone()];
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::Codex,
+        apply_development: true,
+        apply_acceptance: true,
+        apply_delivery: true,
+        apply_repair: false,
+        apply_restart: false,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &excluded,
+    });
+}
+
+#[test]
 #[ignore = "requires two completed real native rounds: normal delivery then repair/restart on one outer base"]
 fn installed_real_opencode_two_rounds_share_one_outer_base() {
     let temp = temp();
@@ -510,6 +533,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
         );
         let started = Instant::now();
         run_native_receiver_in(ReceiverSpec {
+            development_adapter: DevelopmentAdapter::OpenCode,
             apply_development: true,
             apply_acceptance: true,
             apply_delivery: true,
@@ -667,7 +691,14 @@ fn retained_control_rejects_unexpected_entries() {
     assert!(retained_control(&base, &["round-1", "round-2"]).is_err());
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DevelopmentAdapter {
+    OpenCode,
+    Codex,
+}
+
 struct ReceiverSpec<'a> {
+    development_adapter: DevelopmentAdapter,
     apply_development: bool,
     apply_acceptance: bool,
     apply_delivery: bool,
@@ -692,6 +723,7 @@ fn run_native_receiver(
     let user_asset = temp.path().join("user-owned.txt");
     let excluded = vec![formal_target.clone(), user_asset.clone()];
     run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
         apply_development,
         apply_acceptance,
         apply_delivery,
@@ -706,6 +738,7 @@ fn run_native_receiver(
 
 fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     let ReceiverSpec {
+        development_adapter,
         apply_development,
         apply_acceptance,
         apply_delivery,
@@ -1004,14 +1037,32 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         } else {
             "You are the developer role, not a reviewer or acceptance role. The queue task and activity are historically named `review`; that legacy name does not change your role. Complete the authorized development assignment: replace the contents of the file named `file` with exactly `version B` followed by a newline, edit and stage/add that file, and create one new local Git commit. The new commit HEAD must differ from the input commit. Do not write .herdr-verdict.json or any acceptance verdict. No herdr-flow command is needed. Do not search for tools, instructions, sibling directories, coordinator state, or files outside cwd."
         };
-        let (worker, result) =
-            acceptance_live::native(&mut env, &q, &development_cwd, "review", review_instruction);
+        let (worker, result) = match development_adapter {
+            DevelopmentAdapter::OpenCode => acceptance_live::native(
+                &mut env,
+                &q,
+                &development_cwd,
+                "review",
+                review_instruction,
+            ),
+            DevelopmentAdapter::Codex => acceptance_live::native_codex(
+                &mut env,
+                &q,
+                &development_cwd,
+                worker_root.as_ref().unwrap(),
+                "review",
+                review_instruction,
+            ),
+        };
         assert_ne!(worker["session"], registered["session"]);
-        let worker_report = worker_root
-            .as_ref()
-            .unwrap()
-            .join("submissions")
-            .join(format!("{}.json", result["message_id"].as_str().unwrap()));
+        let worker_report = match development_adapter {
+            DevelopmentAdapter::OpenCode => worker_root
+                .as_ref()
+                .unwrap()
+                .join("submissions")
+                .join(format!("{}.json", result["message_id"].as_str().unwrap())),
+            DevelopmentAdapter::Codex => worker_root.as_ref().unwrap().join("turn.json"),
+        };
         assert!(
             worker_report.exists(),
             "developer collector report is missing"
@@ -1179,18 +1230,23 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         let (event_id, event) = events.iter().next().unwrap();
         assert_eq!(event["wait"], "review");
-        assert_eq!(event["binding"], result["context"]["binding"]);
+        let expected_binding = match development_adapter {
+            DevelopmentAdapter::OpenCode => result["context"]["binding"].clone(),
+            DevelopmentAdapter::Codex => result["binding"].clone(),
+        };
+        assert_eq!(event["binding"], expected_binding);
         assert_eq!(event["outcome"], result["outcome"]);
         assert_eq!(event["evidence"], json!(q.join("results/review.json")));
         let signal = util::read_json(Path::new(event["evidence"].as_str().unwrap())).unwrap();
-        assert_eq!(
-            signal["evidence"],
-            json!(worker_root
+        let expected_signal_evidence = match development_adapter {
+            DevelopmentAdapter::OpenCode => worker_root
                 .as_ref()
                 .unwrap()
                 .join("submissions")
-                .join(format!("{}.json", result["message_id"].as_str().unwrap())))
-        );
+                .join(format!("{}.json", result["message_id"].as_str().unwrap())),
+            DevelopmentAdapter::Codex => worker_root.as_ref().unwrap().join("turn.json"),
+        };
+        assert_eq!(signal["evidence"], json!(expected_signal_evidence));
         let report = util::read_json(Path::new(signal["evidence"].as_str().unwrap())).unwrap();
         assert_eq!(report["output"], *output);
         assert_eq!(report["session"], result["session"]);
