@@ -265,7 +265,7 @@ ACKs receipt only, confirms `event-current` is false, and makes one expected
 nonzero stale `task-apply` attempt with the registered verdict ID. No driver
 ACK/apply/verdict/tick/manual state edit occurs. Assertions preserve A's fixed
 HEAD/content, report bytes and verdict ID, verify the exact model-written
-application and conclusion-derived next action, require the original event to
+application bound to the actual --spec path and conclusion-derived next action, require the original event to
 remain acknowledged/unapplied/pending, candidate B and null approval, exact
 event/delivery totals and signal/report identity, and exactly one terminal stale
 apply with the production obsolete error. No immediate pre-deadline A stall is

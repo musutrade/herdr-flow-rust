@@ -648,7 +648,8 @@ artifact/candidate setup are used.
 Bounded assertions compare protected task/result fields rather than claiming
 broad no-mutation across watcher heartbeats. The model-written
 `late-application.json` is read and must name the exact task, stale event, child
-state version and registered verdict ID, with the conclusion-derived
+state version and registered verdict ID; the actual failed command must use that
+exact file as its single --spec argument. It must have the conclusion-derived
 `next_action` and no fabricated output/acceptance fields. The coordinator must
 have a completed late turn; exactly one terminal stale `task-apply` with the exact
 production obsolete error is required, with no successful application and no
@@ -663,3 +664,19 @@ Actual failed tool terminal state/exit and output, separate shell invocations,
 temporal evidence, and bounded child teardown are checked. The fixture is not
 process/server crash recovery, a concurrent developer proof, independent delivery,
 or #38 completion. #38 and #32 remain OPEN.
+
+Primary live3 passed in 130.25 seconds, with selected configuration bytes
+unchanged. Live1 failed after reviewer collection because the test read the
+queue before its watcher had converted the signal into an event; the fixture now
+waits read-only up to 30 seconds with notifications disabled. Live2 failed because
+the coordinator appended status-printing shell commands, masking the native
+nonzero exits as zero. Direct calls preserving tool exit metadata are now explicit
+in the instructions; negative assertions were not relaxed. Both failure logs and
+bounded diagnostics remain available during this unfinished acceptance work.
+
+The --spec check binds one exact quoted or unquoted application path and checks
+tool exit/error evidence; it is not a complete shell parser. Direct calls without
+wrappers are required by the prompt, but arbitrary trailing shell syntax is not
+excluded by that path check. The changed completed guard submission is associated
+by the observed timeline; exact ACK and event/tool identities provide the event
+evidence, not a separately verified submission-context event binding.

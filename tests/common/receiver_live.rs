@@ -1011,7 +1011,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_acceptance {
         instruction_text = instruction_text.replace("Exactly one real development result for task review will arrive.", "This is a two-stage protocol in the same coordinator session: first development task review, then independent acceptance task accept-native. Each stage has its own notification. Handle task review as follows.").replace("This is not independent acceptance or delivery.", "This first stage does not establish independent acceptance or delivery.");
         if apply_late_acceptance {
-            instruction_text.push_str(&format!("\nAfter development, a second accept-native notification will arrive only after delivery is re-enabled. Its result was collected while snapshot A was current; candidate B was selected afterward. This is delayed delivery of a pre-collected result, not collection after replacement. Run the ACK, event-current and task-apply commands in separate bash tool invocations; do not group them into a script or one shell call. For that notification: ACK its exact delivery first, and treat ACK as receipt only. Read queue.json and use the exact pending accept-native event ID and the exact registered immutable verdict ID/binding. Run {binary} queue event-current --state-dir {queue_path} --event THAT_EVENT and expect exit 1 with JSON current=false; do not retry it and do not treat false as success. Write the application at the exact path {application} with task=accept-native, current child state_version, that exact stale event, that registered verdict ID, no output or acceptance fields, and next_action mapped from the actual registered report conclusion (passed->delivery, failed->repair, unable->restore, ambiguous->clarify), owner=native coordinator, reason=independent report, condition=existing authorization. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once and require the exact nonzero stale rejection; record the actual command output/exit and do not retry. Do not run readiness, do not claim approval, do not rewrite the verdict, and do not edit queue/guard/reports/artifacts. Finish after recording the rejection. The earlier development-only schema applies only to task review. Do not read operator repositories.", application=late_application.display()));
+            instruction_text.push_str(&format!("\nAfter development, a second accept-native notification will arrive only after delivery is re-enabled. Its result was collected while snapshot A was current; candidate B was selected afterward. This is delayed delivery of a pre-collected result, not collection after replacement. Run the ACK, event-current and task-apply commands directly in separate bash tool invocations; do not group them into a script or one shell call. Preserve each original exit status: never append echo, status-printing, pipes, shell wrappers, or OR-true. The bash tool metadata records the native exit code automatically; do not print or capture it yourself. For that notification: ACK its exact delivery first, and treat ACK as receipt only. Read queue.json and use the exact pending accept-native event ID and the exact registered immutable verdict ID/binding. Run {binary} queue event-current --state-dir {queue_path} --event THAT_EVENT and expect exit 1 with JSON current=false; do not retry it and do not treat false as success. Write the application at the exact path {application} with task=accept-native, current child state_version, that exact stale event, that registered verdict ID, no output or acceptance fields, and next_action mapped from the actual registered report conclusion (passed->delivery, failed->repair, unable->restore, ambiguous->clarify), owner=native coordinator, reason=independent report, condition=existing authorization. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once and require the exact nonzero stale rejection; record the actual command output/exit and do not retry. Do not run readiness, do not claim approval, do not rewrite the verdict, and do not edit queue/guard/reports/artifacts. Finish after recording the rejection. The earlier development-only schema applies only to task review. Do not read operator repositories.", application=late_application.display()));
         } else {
             instruction_text.push_str(&format!("\nAfter completing development, a second notification for accept-native will arrive in this same session. For that notification ACK its exact delivery first. Read task accept-native, its pending event and registered immutable verdict in queue.json, and the exact referenced collector evidence. Write an application JSON in cwd: task=accept-native, current state_version, exact event, verdict=the registered verdict.id, next_action={{kind: chosen from the actual report conclusion, owner: native coordinator, reason: independent report, condition: existing authorization}}. Map passed to delivery, failed to repair, unable to restore, ambiguous to clarify. Do not invent or rewrite any verdict; do not supply output or acceptance fields for this stage. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE, then queue readiness with that same state-dir and exact session environment. This records a continuation only; do not deliver to any customer or alter artifacts. The earlier development-only schema applies only to task review. Do not read operator repositories."));
         }
@@ -1023,6 +1023,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
     }
     instruction_text.push_str(" Use only the supplied queue path. Never create, copy, rename, edit or probe queue, guard or state directories. Stop and fail on any non-lock-busy error; never fabricate task-apply, output, event, verdict or readiness, and never create a replacement or duplicate artifact.");
+    if apply_late_acceptance {
+        instruction_text = instruction_text.replace(
+            "Stop and fail on any non-lock-busy error;",
+            "Only for the second accept-native notification, event-current exit 1 with current=false and task-apply rejecting the obsolete binding are expected negative controls: observe the first and continue to the prescribed application attempt, then stop after the second. Stop and fail on any other non-lock-busy error;");
+    }
     fs::write(&instructions, instruction_text).unwrap();
     let items = config
         .as_object_mut()
@@ -2312,7 +2317,26 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     let actual_report = util::read_json(&reviewer_report_path).unwrap();
     evidence.0.push(reviewer_report_path.clone());
 
-    let state = queue::load_queue(q).unwrap();
+    let event_deadline = Instant::now() + Duration::from_secs(30);
+    let state = loop {
+        let state = queue::load_queue(q).unwrap();
+        assert_eq!(state["notify"], false);
+        let count = state["events"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|event| event["wait"] == "accept-native")
+            .count();
+        assert!(count <= 1, "duplicate acceptance event");
+        if count == 1 {
+            break state;
+        }
+        assert!(
+            Instant::now() < event_deadline,
+            "production watcher did not collect the acceptance signal"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let accept_events: Vec<_> = state["events"]
         .as_object()
         .unwrap()
@@ -2498,6 +2522,29 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     }
     assert!(commands[ack_index].end <= commands[event_current_index].start);
     assert!(commands[event_current_index].end <= commands[task_apply_index].start);
+    let application_command = &commands[task_apply_index].command;
+    assert_eq!(
+        application_command.matches("--spec").count(),
+        1,
+        "exactly one application --spec argument required"
+    );
+    let spec_arg = application_command
+        .split_once("--spec")
+        .unwrap()
+        .1
+        .trim_start();
+    let application_text = application_path.to_str().unwrap();
+    let forms = [
+        application_text.to_string(),
+        format!("'{application_text}'"),
+        format!("\"{application_text}\""),
+    ];
+    assert!(
+        forms.iter().any(|form| spec_arg
+            .strip_prefix(form)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))),
+        "stale task-apply must use the verified application file"
+    );
     let event_current_output: J = serde_json::from_str(commands[event_current_index].output.trim())
         .expect("event-current JSON output");
     assert_eq!(event_current_output["event"], event_id.as_str());
