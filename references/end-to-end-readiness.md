@@ -836,12 +836,33 @@ no ACK, task-apply, candidate selection, delivery or user answer occurs.
 
 Overlap is asserted only post hoc from actual timestamps: each exact
 `submission.json` `created_at` is normalized from seconds to milliseconds, and the
-assistant completion is selected by exact session plus exact parent message ID
-(not an arbitrary historical assistant row). Missing, nonfinite, reversed or
+assistant completion is selected by the final journal’s exact reply ID, session,
+parent message ID and cwd (not an arbitrary historical assistant row). Missing, nonfinite, reversed or
 non-overlapping intervals fail the proof. This describes overlapping native turns;
 it does not claim simultaneous CPU or model execution. With no supported
 scheduling barrier, overlap is observed rather than forced; a non-overlapping run
 is retained as an honest failed proof, not retried with sleeps or synthetic
-reports. B either remains unselected and unapplied, leaving A current and approval
-null. The test has not yet been run; no model-success claim is made. #38/#32 remain
-OPEN and all prior Codex/resource-discovery limits are unchanged.
+reports. B remains unselected and unapplied, leaving A current and approval null.
+#38/#32 remain OPEN and all prior Codex/resource-discovery limits are unchanged.
+
+Primary validation (2026-10-22): live attempt 1 failed after 39.35s at the exact
+developer commit-command assertion. The retained server log contains a commit
+permission evaluation, but the complete selected tool command was not retained;
+the command-shape cause remains unclassified. The prompt now explicitly separates
+staging from the exact commit invocation, and bounded private diagnostics retain
+only matching Git command metadata, without tool output or selected configuration.
+Attempt 2 passed in 50.62s including build, with selected configuration bytes
+unchanged. Actual turn overlap, fixed-A inspection, actual new B, both producer
+evidence chains, no delivery/application and cleanup assertions passed.
+
+After attempt 2, only diagnostic truncation accounting and its non-model regression
+changed: count omitted commands before capping at eight per role, retain the most
+recent records, mark field truncation, and cap serialized diagnostics at 60 KiB.
+The live scenario, prompts and acceptance assertions were unchanged by this fix.
+
+Final non-live gates: stable coverage and Rust 1.85 all-target suites each passed
+486 tests, zero failed and 20 ignored; CRAP checked 4800 functions at 77.3% line
+coverage with zero absolute-threshold-10 violations. Formatting, lint policy,
+Clippy and rustdoc passed. The final diagnostic ordering/count correction passed
+its focused regression on both toolchains and a fresh Clippy check; no model
+scenario or acceptance assertion changed after live attempt 2.

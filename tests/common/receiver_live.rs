@@ -1484,7 +1484,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         let accept_cwd = acceptance_live::clone_snapshot(&env, artifact, "accept-a");
         let develop_cwd = acceptance_live::clone_snapshot(&env, artifact, "develop-b");
         let accept_instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD against all current requirement references. Use direct tools only. Run exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve actual exit status, output and timestamps. Do not edit tracked files or commit. Write .herdr-verdict.json in cwd following acceptance_protocol with actual checks and evidence, and derive the conclusion yourself. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
-        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline. Use an edit/write tool or a direct shell command. Stage/add the file and create one new local Git commit with the exact direct command `git commit -m \"concurrent B\"`. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline. Use an edit/write tool or a direct shell command. Stage/add the file and create one new local Git commit with the exact direct command `git commit -m \"concurrent B\"`. Run staging in a separate tool invocation. Run the commit in its own separate bash invocation whose entire command is exactly `git commit -m \"concurrent B\"`; no cd prefix, git add, &&, semicolon, echo or wrapper in that invocation. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
         let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
         let accept_wait_before = queue::load_queue(&q).unwrap()["waits"]["accept-a"].clone();
         let develop_wait_before = queue::load_queue(&q).unwrap()["waits"]["develop-b"].clone();
@@ -1498,6 +1498,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             failure_evidence.0.push(root.join("submission.json"));
         }
         failure_evidence.0.push(report_path.clone());
+        let tool_evidence_path = q.parent().unwrap().join("concurrent-tool-evidence.json");
+        failure_evidence.0.push(tool_evidence_path.clone());
         let mut accept_turn = acceptance_live::native_prepare(
             &mut env,
             &q,
@@ -1579,6 +1581,11 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             develop_session,
             &develop_cwd,
         );
+        let diagnostic = concurrent_tool_evidence([
+            ("reviewer", tool_commands(&accept_rows, accept_session)),
+            ("developer", tool_commands(&develop_rows, develop_session)),
+        ]);
+        util::atomic_write_json(&tool_evidence_path, &diagnostic).unwrap();
         let accept_completed =
             exact_terminal_completion_millis(&accept_rows, &accept_result, &accept_cwd, "reviewer");
         let develop_completed = exact_terminal_completion_millis(
@@ -2519,6 +2526,76 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
 
 fn ensure_session(value: &str, label: &str) {
     assert!(!value.trim().is_empty(), "{label} session is empty");
+}
+
+fn concurrent_tool_evidence(roles: [(&str, Vec<ToolCommand>); 2]) -> J {
+    let mut records = Vec::new();
+    let mut counts = serde_json::Map::new();
+    let mut truncated = false;
+    for (role, commands) in roles {
+        let matching: Vec<_> = commands
+            .into_iter()
+            .filter(|c| {
+                c.command.contains("git commit") || c.command.contains("git show HEAD:file")
+            })
+            .collect();
+        let count = matching.len();
+        counts.insert(
+            role.to_string(),
+            json!({"total":count,"omitted":count.saturating_sub(8)}),
+        );
+        truncated |= count > 8;
+        for c in matching.into_iter().rev().take(8) {
+            truncated |= c.command.chars().count() > 512;
+            records.push(json!({"role":role,
+                "command":c.command.chars().take(512).collect::<String>(),
+                "exit":c.exit,"status":c.status,"start":c.start,"end":c.end}));
+        }
+    }
+    records.sort_by_key(|record| record["start"].as_i64().unwrap_or(i64::MAX));
+    let mut evidence = bounded_restore_tool_evidence(json!({"commands":records,"counts":counts,
+        "truncated":truncated,"limit_per_role":8,"command_char_limit":512}));
+    for role in ["reviewer", "developer"] {
+        let retained = evidence["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["role"] == role)
+            .count();
+        let total = evidence["counts"][role]["total"].as_u64().unwrap();
+        evidence["counts"][role]["omitted"] = json!(total.saturating_sub(retained as u64));
+    }
+    evidence
+}
+
+#[test]
+fn concurrent_diagnostic_records_truncation_and_keeps_newest_commands() {
+    let commands = (0..10)
+        .map(|index| ToolCommand {
+            command: format!("git commit {index} {}", "界".repeat(520)),
+            output: "not retained".into(),
+            error: "not retained".into(),
+            success: true,
+            status: "completed".into(),
+            exit: Some(0),
+            start: index,
+            end: index + 1,
+        })
+        .collect();
+    let evidence = concurrent_tool_evidence([("reviewer", Vec::new()), ("developer", commands)]);
+    assert_eq!(evidence["counts"]["developer"]["total"], 10);
+    assert_eq!(evidence["counts"]["developer"]["omitted"], 2);
+    assert_eq!(evidence["truncated"], true);
+    assert_eq!(evidence["commands"].as_array().unwrap().len(), 8);
+    assert!(evidence["commands"][7]["command"]
+        .as_str()
+        .unwrap()
+        .starts_with("git commit 9 "));
+    for command in evidence["commands"].as_array().unwrap() {
+        assert!(command["command"].as_str().unwrap().chars().count() <= 512);
+        assert!(command.get("output").is_none() && command.get("error").is_none());
+    }
+    assert!(serde_json::to_vec_pretty(&evidence).unwrap().len() <= 60 * 1024);
 }
 
 fn submission_created_millis(value: &J, label: &str) -> f64 {
