@@ -1298,7 +1298,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     let cwd = env.workspace_root.join("receiver");
     fs::create_dir(&cwd).unwrap();
     let root = task_runtime::prepare(&env, "real-receiver").unwrap();
-    let worker_root = apply_development.then(|| task_runtime::prepare(&env, "review").unwrap());
+    let worker_root = (apply_development || apply_missing_report)
+        .then(|| task_runtime::prepare(&env, "review").unwrap());
     let reviewer_name = if apply_repair {
         "accept-first"
     } else {
@@ -2398,8 +2399,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         assert_eq!(git(reviewer_cwd, &["rev-parse", "HEAD"]), reviewer_head);
         assert_eq!(git(reviewer_cwd, &["show", "HEAD:file"]), reviewer_file);
         let reviewer_rows = session_rows(
-            &client,
-            &endpoint,
+            &turn.client,
+            &turn.endpoint,
             result["session"].as_str().unwrap(),
             reviewer_cwd,
         );

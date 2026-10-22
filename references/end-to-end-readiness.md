@@ -931,5 +931,20 @@ unchanged; exactly one event/delivery exists and no new activity, real restore,
 delivery or user decision occurs. Report absence is observed at sample points
 before dispatch, after collection and after final apply; this does not prove the
 file was never transiently created and deleted, and the driver never deletes it.
-Bounded native/child cleanup and failure evidence are retained. The scenario has
-not yet been run; no model-success claim is made. #38/#32 remain OPEN.
+Bounded native/child cleanup and failure evidence are retained. #38/#32 remain OPEN.
+
+Primary live validation (2026-10-22): attempt 1 failed after 47.83s when the native
+coordinator requested external-directory permission to read the actual collector
+submission. This mode had not prepared the reviewer runtime before generating the
+coordinator configuration. It now prepares that exact task-owned runtime and uses
+the existing explicit owned-directory opt-in; kernel isolation is unchanged.
+The reviewer history query also uses its own server endpoint. Attempt 2 passed
+in 59.29s including build, with the selected configuration unchanged. The actual
+completed reviewer reply, observed missing report, native ACK/application,
+post-apply readiness receipt/output/timestamps and cleanup checks passed. The
+failed run remains retained locally and is not counted as success.
+
+The selected bounded diagnostic covers the later reviewer tool/reply and
+coordinator readiness checks. It is written after the stage wait and initial
+application/event/parent assertions; earlier failures retain the registered raw
+paths, not that selected metadata snapshot.
