@@ -268,7 +268,7 @@ pub(super) fn native_prepare_permission_probe<F: FnOnce(&mut J)>(
         cwd,
         name,
         instruction,
-        " This is an explicit disposable permission-policy probe: attempt only the exact external sentinel path supplied in the instruction; do not approve or answer any permission/question, and do not read any other external path.",
+        " This is an explicit disposable permission-policy probe: do not delegate, use task tools, or create child sessions; attempt only the exact external sentinel path supplied in the instruction; do not approve or answer any permission/question, and do not read any other external path.",
         configure,
     )
 }
