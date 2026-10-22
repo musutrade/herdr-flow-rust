@@ -131,6 +131,14 @@ fixture file and create a new Git commit, collected as the activity's output.
 These inputs are copied only into disposable test environments. Failures are
 reported and the test environment is cancelled/destroyed, not marked delivered.
 
+A separate opt-in mixed test is designed to run the Codex developer through task-owned
+`native::create/dispatch/collect` and then the existing real OpenCode coordinator
+and reviewer. It copies only selected Codex config/auth into the worker `c/`
+directory, uses Codex `on-request` approvals without automatic answers, and
+checks the actual `turn.json`/queue event/apply evidence. Its intended scope is a
+mixed Codex-worker/OpenCode-coordinator flow, not a Codex coordinator or twenty-task
+claim. It has not completed on the tested host; the startup blocker is described below.
+
 Codex turns declare `externalSandbox` because the enclosing task-specific
 bubblewrap namespace is the enforced filesystem boundary. Native approval policy
 defaults to `untrusted`. An explicitly authorized runtime may select
@@ -138,6 +146,18 @@ defaults to `untrusted`. An explicitly authorized runtime may select
 are the only supported policies. This does not answer pending requests or change
 a user's settings. A native command that needs approval stays blocked for explicit
 handling.
+
+The Codex app-server is itself started through the outer `/usr/bin/bwrap` task
+boundary. On the tested host, a single outer user namespace succeeds but the
+Codex/bootstrap invocation that needs a nested user namespace fails before any
+model turn (observed live1 attempt, 24.80s). The mixed preflight now reproduces
+that nested namespace probe with a bounded child and fails explicitly instead of
+treating an unsupported host as success. A secure fix without weakening the
+runtime would require either a host that permits nested unprivileged user
+namespaces or a reviewed product bootstrap that lets Codex use the outer task
+sandbox as authoritative while suppressing only its redundant inner bwrap.
+Disabling the sandbox, removing the outer boundary, adding CAP_SYS_ADMIN, or
+changing sysctl/AppArmor/global policies is not an acceptable workaround.
 
 Formal reviewer reports and their four continuation outcomes use the
 [independent acceptance protocol](independent-acceptance.md). Native collectors

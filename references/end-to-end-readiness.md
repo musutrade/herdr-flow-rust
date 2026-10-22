@@ -528,3 +528,49 @@ of a general-purpose external JSON schema. If native collection fails before
 returning its message ID, fixed server/submission diagnostics remain available
 but the per-message report may not be captured. These limits and the remaining
 Codex and failure-matrix acceptance work keep #38 and #32 open.
+
+## Mixed Codex worker and OpenCode coordinator
+
+An opt-in mixed scenario is designed to validate a real task-owned Codex developer
+without claiming a Codex coordinator. The developer is created, dispatched and collected
+through `task_runtime::native` using Codex/bubblewrap and a selected Codex config
+and optional auth copied only into the disposable runtime `c/` directory. Its
+actual turn journal and output commit are collected; the test does not synthesize
+an output or use a driver Git command. The existing real OpenCode coordinator and
+independent reviewer then receive the production queue event, ACK/readiness and
+task-apply with the exact producer evidence, and the existing external Local
+delivery/finish path runs when acceptance succeeds. The test must prove distinct
+Codex worker, OpenCode coordinator and reviewer sessions, actual native ACK/apply,
+exact accepted output, preserved target/user asset and complete owned-resource
+cleanup.
+
+Codex collection binds `turn.json`, not an OpenCode `message_id`/submission file;
+the test uses that producer artifact for event, binding, report and output checks.
+The test asserts the selected adapter, worker session, turn and report identity,
+and the native launchers hold children behind a bounded RAII guard. Normal
+completion requires successful termination and reaping. During unwinding the
+guard attempts termination and a bounded reap, and reports failures without a
+second panic. A final Drop failure can leave a child unreaped; there is no
+background reaper or unconditional cleanup guarantee. The regression covers
+successful Drop cleanup, not OS kill/wait failures. It never waits unbounded.
+Codex approval policy is `on-request`; pending approvals are not answered automatically. Actual approval keys may be used only
+for authorized in-scope prompts. A bounded no-model nested-userns preflight runs
+before the expensive scenario and fails explicitly on unsupported hosts rather
+than skipping or reporting success. This scenario is not a Codex-coordinator
+proof, a twenty-task campaign, or evidence of global-cache absence; a task-owned
+Codex receiver/session bootstrap is not provided by this change. #38/#32 remain
+OPEN.
+
+Codex mixed live attempt1 failed before model work at 24.80s because the Codex
+app-server could not create a nested user namespace under the task-owned outer
+bubblewrap boundary. A single-bwrap probe succeeded while the reproduced nested
+probe failed; this is retained as a host/bootstrap limitation, not a model or
+product-success claim. The mixed test now runs a bounded nested-userns preflight
+and fails explicitly on unsupported hosts; it does not skip or report success.
+
+Primary verification of the preflight rejected this host in 0.03s before model
+startup. The test is still unproven end to end here. Current app-server startup
+has no verified external-sandbox bootstrap option that preserves native approval
+policy; turn-level externalSandbox does not prevent the observed startup probe.
+A supported host or separately reviewed upstream/product bootstrap is required.
+No host security settings, approvals or outer task confinement were changed.
