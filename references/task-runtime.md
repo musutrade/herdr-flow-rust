@@ -291,9 +291,10 @@ overlap. No product/API/isolation change.
 ### Restored review phase
 
 The restored-review test installs the disposable operator dependency once via a
-registered foreground command, sends a real producer signal through the
-pre-registered unassigned install wait, and lets the same coordinator consume the
-saved restore continuation with lineage continue using `verify`/`review`.
+registered foreground command, registers the unassigned install wait only in
+phase-2 mode through supported queue add before dispatch, sends a real producer
+signal through it, and lets the same coordinator consume the saved restore
+continuation with lineage continue using `verify`/`review`.
 The install event is ACK-only and not attached/applied; parent pending/version
 remain unchanged. A pre-created checkout with the one installed dependency is
 used by a fresh real reviewer without reinstall. Candidate/round/revision/input,

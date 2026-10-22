@@ -726,8 +726,10 @@ Independent non-live gates passed: stable coverage and Rust 1.85 all-target suit
 The restored-review phase builds on the phase-1 unavailable state without
 rewriting it. The operator dependency is installed exactly once through a
 registered foreground `env.command` installer (no detached `queue run`), with its
-actual argv/cwd/exit/hash/mode retained as evidence. A pre-registered unassigned
-`restore-dependency-install` signal wait is then produced by the test operator; it
+actual argv/cwd/exit/hash/mode retained in the receiver runtime. Only in phase-2
+mode, the unassigned `restore-dependency-install` signal wait is registered through
+the supported queue add before dispatch; phase 1 does not get this wait. It is then
+produced by the test operator; it
 is a producer event, not a driver ACK/apply/verdict. Its delivery is ACK-only and
 must remain unbound/unapplied, leaving parent pending/version untouched. The same
 coordinator wakes, ACKs receipt, and consumes the phase-1 restore intent with
