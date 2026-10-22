@@ -58,6 +58,116 @@ fn allow_owned_external_directory(config: &mut J, root: &Path) {
     external.insert(format!("{path}/**"), json!("allow"));
 }
 
+fn ask_external_permission(config: &mut J, path: &Path) {
+    let path = path.canonicalize().unwrap();
+    let path = path.to_str().unwrap();
+    let permissions = config
+        .as_object_mut()
+        .unwrap()
+        .entry("permission")
+        .or_insert_with(|| json!({}));
+    let permissions = permissions
+        .as_object_mut()
+        .expect("exact permission probe requires an object permission policy");
+    let external = permissions
+        .entry("external_directory")
+        .or_insert_with(|| json!({}));
+    let external = external
+        .as_object_mut()
+        .expect("exact permission probe requires an object external_directory policy");
+    external.insert(permission_probe_pattern(Path::new(path)), json!("ask"));
+}
+
+#[test]
+fn permission_probe_policy_only_asks_for_the_dedicated_directory() {
+    let temp = temp();
+    let sentinel = temp.path().join("sentinel.txt");
+    fs::write(&sentinel, "disposable sentinel").unwrap();
+    let selected = json!({
+        "permission":{"bash":"ask","external_directory":{"*":"deny","/unrelated/**":"allow"}},
+        "model":"unchanged"
+    });
+    let mut copy = selected.clone();
+    ask_external_permission(&mut copy, &sentinel);
+    let path = sentinel.canonicalize().unwrap();
+    assert_eq!(
+        copy["permission"]["external_directory"][permission_probe_pattern(&path)],
+        "ask"
+    );
+    assert_eq!(copy["permission"]["external_directory"]["*"], "deny");
+    assert_eq!(
+        copy["permission"]["external_directory"]["/unrelated/**"],
+        "allow"
+    );
+    assert_eq!(copy["permission"]["bash"], "ask");
+    assert_eq!(copy["model"], selected["model"]);
+    assert_eq!(
+        selected["permission"]["external_directory"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn permission_request_identity_rejects_wrong_session_message_call_path_or_schema() {
+    let sentinel = Path::new("/tmp/native-permission-probe/sentinel");
+    let valid = json!({
+        "id":"permission-1","sessionID":"ses-reviewer",
+        "permission":"external_directory",
+        "patterns":["/tmp/native-permission-probe/*"],
+        "tool":{"messageID":"asst-1","callID":"call-1"}
+    });
+    assert_eq!(
+        permission_request_fields(&valid, "ses-reviewer", sentinel).unwrap(),
+        ("asst-1".to_string(), "call-1".to_string())
+    );
+    let old_schema = json!({
+        "id":"permission-2","sessionID":"ses-reviewer",
+        "type":"external_directory","pattern":"/tmp/native-permission-probe/*",
+        "messageID":"asst-2","callID":"call-2"
+    });
+    assert_eq!(
+        permission_request_fields(&old_schema, "ses-reviewer", sentinel).unwrap(),
+        ("asst-2".to_string(), "call-2".to_string())
+    );
+    let reject = |permission: &J| {
+        assert!(permission_request_fields(permission, "ses-reviewer", sentinel).is_err());
+    };
+    let mut wrong_session = valid.clone();
+    wrong_session["sessionID"] = json!("ses-other");
+    reject(&wrong_session);
+    let mut wrong_message = valid.clone();
+    wrong_message["tool"]["messageID"] = json!("");
+    reject(&wrong_message);
+    let mut wrong_call = valid.clone();
+    wrong_call["tool"]["callID"] = json!("");
+    reject(&wrong_call);
+    let mut wrong_suffix = valid.clone();
+    wrong_suffix["patterns"] = json!(["/tmp/native-permission-probe-suffix/*"]);
+    reject(&wrong_suffix);
+    let mut extra_pattern = valid.clone();
+    extra_pattern["patterns"] = json!(["/tmp/native-permission-probe/*", "/tmp/unrelated/*"]);
+    reject(&extra_pattern);
+    let mut wrong_type = valid.clone();
+    wrong_type["permission"] = json!("bash");
+    reject(&wrong_type);
+    let mut missing_schema = valid.clone();
+    missing_schema.as_object_mut().unwrap().remove("permission");
+    missing_schema["tool"] = json!({});
+    reject(&missing_schema);
+    let temp = temp();
+    let sentinel = temp.path().join("sentinel");
+    fs::write(&sentinel, "sentinel").unwrap();
+    let scalar = json!({"permission":{"external_directory":"allow"}});
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut scalar = scalar.clone();
+        ask_external_permission(&mut scalar, &sentinel);
+    }))
+    .is_err());
+}
+
 #[test]
 fn scoped_external_permission_preserves_other_rules_and_selected_config() {
     let temp = temp();
@@ -145,6 +255,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -174,6 +285,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -203,6 +315,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -232,6 +345,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_restored_review: true,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -261,6 +375,7 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_restored_review: false,
         apply_ambiguous: true,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -290,6 +405,37 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: true,
+        apply_approval_block: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires a real OpenCode reviewer and a disposable exact external permission prompt; bounded blocked observation only"]
+fn installed_real_opencode_approval_block_stops_without_result() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -345,6 +491,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -728,6 +875,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_restored_review: false,
             apply_ambiguous: false,
             apply_concurrent: false,
+            apply_approval_block: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -900,6 +1048,7 @@ struct ReceiverSpec<'a> {
     apply_restored_review: bool,
     apply_ambiguous: bool,
     apply_concurrent: bool,
+    apply_approval_block: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -932,6 +1081,7 @@ fn run_native_receiver(
         apply_restored_review: false,
         apply_ambiguous: false,
         apply_concurrent: false,
+        apply_approval_block: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -954,6 +1104,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_restored_review,
         apply_ambiguous,
         apply_concurrent,
+        apply_approval_block,
         unavailable_dependency,
         base,
         formal_target,
@@ -1051,7 +1202,24 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "concurrent native turns require isolated OpenCode mode"
     );
-    let selected_config_before = apply_concurrent
+    assert!(
+        !apply_approval_block
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && unavailable_dependency.is_none()),
+        "approval block requires isolated OpenCode mode"
+    );
+    let selected_config_before = (apply_concurrent || apply_approval_block)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1111,6 +1279,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "develop-b".to_string(),
             "project".to_string(),
         ]
+    } else if apply_approval_block {
+        vec!["project".to_string(), "review".to_string()]
     } else {
         vec![
             "accept-native".to_string(),
@@ -1120,7 +1290,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     };
     let notifications = if apply_repair {
         4
-    } else if apply_ambiguous {
+    } else if apply_ambiguous || apply_approval_block {
         1
     } else {
         2
@@ -1129,6 +1299,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         vec!["source", "reviewer-checkout"]
     } else if apply_concurrent {
         vec!["source", "accept-a", "develop-b"]
+    } else if apply_approval_block {
+        vec!["source", "acceptance"]
     } else {
         vec!["source", "development", "reviewer-checkout"]
     };
@@ -1141,18 +1313,19 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous || apply_concurrent {
-        artifact_names
-            .iter()
-            .map(|name| {
-                let path = env.workspace_root.join(name);
-                common::create_dir_all(&path).unwrap();
-                path
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let artifact_roots: Vec<_> =
+        if apply_development || apply_ambiguous || apply_concurrent || apply_approval_block {
+            artifact_names
+                .iter()
+                .map(|name| {
+                    let path = env.workspace_root.join(name);
+                    common::create_dir_all(&path).unwrap();
+                    path
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     // Native launch restricts writes to this runtime root and cwd. Coordinator
     // state must live inside that boundary, not in a sibling of the runtime.
     let q = root.join("queue");
@@ -1438,6 +1611,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
     let concurrent_artifact =
         apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
+    let approval_cwd = apply_approval_block.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
@@ -1782,6 +1956,215 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         wait_bounded(&mut queue_child, "queue watcher");
         assert!(!env.workspace_root.exists());
         assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
+    if let Some(cwd) = approval_cwd.as_ref() {
+        let probe_dir = env.temp_root.join("approval-probe");
+        common::create_dir_all(&probe_dir).unwrap();
+        let sentinel = probe_dir.join("sentinel.txt");
+        fs::write(&sentinel, "disposable approval probe sentinel\n").unwrap();
+        let sentinel = sentinel.canonicalize().unwrap();
+        let sentinel_bytes = fs::read(&sentinel).unwrap();
+        let sentinel_meta = fs::metadata(&sentinel).unwrap();
+        let source = env.workspace_root.join("source");
+        let source_head = git(&source, &["rev-parse", "HEAD"]);
+        let source_file = git(&source, &["show", "HEAD:file"]);
+        let reviewer_head = git(cwd, &["rev-parse", "HEAD"]);
+        let reviewer_file = git(cwd, &["show", "HEAD:file"]);
+        let report_path = cwd.join(".herdr-verdict.json");
+        let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
+        let wait_before = queue::load_queue(&q).unwrap()["waits"]["review"].clone();
+        let runtime_root = task_runtime::prepare(&env, "review").unwrap();
+        let permission_evidence = q
+            .parent()
+            .unwrap()
+            .join("approval-permission-evidence.json");
+        failure_evidence.0.push(runtime_root.join("server.log"));
+        failure_evidence.0.push(runtime_root.join("creation.json"));
+        failure_evidence.0.push(runtime_root.join("dispatch.json"));
+        failure_evidence
+            .0
+            .push(runtime_root.join("submission.json"));
+        failure_evidence.0.push(report_path.clone());
+        failure_evidence.0.push(permission_evidence.clone());
+        let instruction = format!(
+            "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD with `git show HEAD:file` in a separate direct bash invocation. Then attempt to read the exact disposable external sentinel at {sentinel} with exactly `cat {sentinel}` in a separate direct bash invocation. This path is deliberately outside cwd and a permission request is expected; do not approve or answer it, and do not write .herdr-verdict.json. Do not read any other external path. If permission is requested, stop without a verdict.",
+            sentinel = sentinel.display()
+        );
+        let mut turn = acceptance_live::native_prepare_permission_probe(
+            &mut env,
+            &q,
+            cwd,
+            "review",
+            &instruction,
+            |config| ask_external_permission(config, &sentinel),
+        );
+        acceptance_live::native_dispatch(&env, &turn);
+        let submission = util::read_json(&turn.root.join("submission.json")).unwrap();
+        let message = submission["message_id"]
+            .as_str()
+            .expect("approval submission message id");
+        failure_evidence.0.push(
+            turn.root
+                .join("submissions")
+                .join(format!("{message}.json")),
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let journal = loop {
+            match task_runtime::native::collect(&env, &turn.root) {
+                Ok(journal) => {
+                    if journal["native_status"] == "blocked" {
+                        break journal;
+                    }
+                    assert!(
+                        !matches!(
+                            journal["phase"].as_str(),
+                            Some("complete" | "failed" | "decision" | "signalled")
+                        ),
+                        "permission probe completed instead of blocking"
+                    );
+                }
+                Err(error) if error.kind == herdr_flow::error::ErrorKind::StateBusy => {}
+                Err(error) => panic!("permission probe collection failed: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "permission probe did not reach blocked status"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            !matches!(
+                journal["phase"].as_str(),
+                Some("complete" | "failed" | "decision" | "signalled" | "blocked")
+            ),
+            "blocked permission journal must remain nonterminal"
+        );
+        let session = submission["session"].as_str().unwrap();
+        let coordinator_session = registered["session"].as_str().unwrap();
+        ensure_session(session, "reviewer");
+        assert_ne!(session, coordinator_session);
+        let permissions = permission_rows(&turn.client, &turn.endpoint);
+        util::atomic_write_json(
+            &permission_evidence,
+            &bounded_permission_snapshot(&permissions, session),
+        )
+        .unwrap();
+        let questions = question_rows(&turn.client, &turn.endpoint);
+        assert!(
+            questions
+                .as_array()
+                .is_none_or(|rows| rows.iter().all(|row| row["sessionID"] != session)),
+            "permission probe raised a question, not a permission request"
+        );
+        let (permission, tool) = exact_permission_binding(
+            &permissions,
+            &turn.client,
+            &turn.endpoint,
+            session,
+            message,
+            cwd,
+            &sentinel,
+        );
+        assert!(!report_path.exists(), "permission probe wrote a verdict");
+        let state = queue::load_queue(&q).unwrap();
+        let binding = progress::binding(&wait_before).unwrap();
+        assert_eq!(journal["session"], session);
+        assert_eq!(journal["message_id"], message);
+        assert_eq!(journal["context"]["queue_id"], state["id"]);
+        assert_eq!(journal["context"]["queue_dir"], json!(q));
+        assert_eq!(journal["context"]["wait"], "review");
+        assert_eq!(journal["context"]["binding"], binding);
+        let task = &state["tasks"]["review"];
+        let wait = &state["waits"]["review"];
+        assert_eq!(task["candidate"], binding["candidate"]);
+        assert_eq!(task["lineage"]["round"], binding["lineage"]["round"]);
+        assert_eq!(task["lineage"]["revision"], binding["lineage"]["revision"]);
+        assert_eq!(task["epoch"], wait_before["epoch"]);
+        assert_eq!(task["assignment"], wait_before["assignment"]);
+        assert_eq!(wait["assignment"], wait_before["assignment"]);
+        assert_eq!(task["candidate"], state["tasks"]["project"]["candidate"]);
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]), source_head);
+        assert_eq!(git(&source, &["show", "HEAD:file"]), source_file);
+        assert_eq!(git(cwd, &["rev-parse", "HEAD"]), reviewer_head);
+        assert_eq!(git(cwd, &["show", "HEAD:file"]), reviewer_file);
+        assert_eq!(fs::read(&sentinel).unwrap(), sentinel_bytes);
+        let sentinel_after = fs::metadata(&sentinel).unwrap();
+        assert_eq!(sentinel_after.dev(), sentinel_meta.dev());
+        assert_eq!(sentinel_after.ino(), sentinel_meta.ino());
+        assert_eq!(sentinel_after.mode(), sentinel_meta.mode());
+        assert_eq!(
+            state["tasks"]["project"]["requirements"],
+            parent_before["requirements"]
+        );
+        assert_eq!(
+            state["tasks"]["project"]["candidate"],
+            parent_before["candidate"]
+        );
+        assert_eq!(
+            state["tasks"]["project"]["requirement_revision"],
+            parent_before["requirement_revision"]
+        );
+        assert_eq!(
+            state["tasks"]["project"]["acceptance_round"],
+            parent_before["acceptance_round"]
+        );
+        assert!(state["tasks"]["project"]["approved"].is_null());
+        let task_names: std::collections::BTreeSet<_> = state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(task_names, ["project", "review"].into_iter().collect());
+        assert_eq!(state["tasks"]["review"]["pending"], json!([]));
+        assert!(state["tasks"]["review"]["verdict"].is_null());
+        assert!(state["events"]
+            .as_object()
+            .is_none_or(|events| events.is_empty()));
+        assert!(state["deliveries"]
+            .as_object()
+            .is_none_or(|deliveries| deliveries.is_empty()));
+        util::atomic_write_json(
+            &permission_evidence,
+            &json!({
+                "session": session,
+                "message": message,
+                "permission_id": permission["id"],
+                "permission_kind": permission["permission"],
+                "permission_type": permission["type"],
+                "permission_patterns": permission_patterns(&permission)
+                    .into_iter()
+                    .take(8)
+                    .map(|pattern| pattern.chars().take(512).collect::<String>())
+                    .collect::<Vec<_>>(),
+                "permission_tool_message": permission["tool"]["messageID"],
+                "permission_tool_call": permission["tool"]["callID"],
+                "tool": tool["tool"],
+                "tool_message": tool["messageID"],
+                "tool_call_id": tool["callID"],
+                "sentinel": sentinel,
+            }),
+        )
+        .unwrap();
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("approval config snapshot"),
+            "selected OpenCode configuration changed during approval probe"
+        );
+        turn.stop();
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert!(!sentinel.exists());
         assert_eq!(occupied_slots().unwrap(), 0);
         return;
     }
@@ -2485,6 +2868,238 @@ struct ToolCommand {
     exit: Option<i64>,
     start: i64,
     end: i64,
+}
+
+fn permission_rows(client: &ureq::Agent, endpoint: &str) -> J {
+    client
+        .get(format!("{endpoint}/permission"))
+        .call()
+        .unwrap()
+        .body_mut()
+        .with_config()
+        .limit(1024 * 1024)
+        .read_json()
+        .unwrap()
+}
+
+fn question_rows(client: &ureq::Agent, endpoint: &str) -> J {
+    client
+        .get(format!("{endpoint}/question"))
+        .call()
+        .unwrap()
+        .body_mut()
+        .with_config()
+        .limit(1024 * 1024)
+        .read_json()
+        .unwrap()
+}
+
+fn bounded_permission_snapshot(permissions: &J, session: &str) -> J {
+    let rows: Vec<_> = permissions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|permission| permission["sessionID"] == session)
+        .collect();
+    let total = rows.len();
+    let field_truncated = rows.iter().take(8).any(|permission| {
+        ["pattern", "patterns", "title"]
+            .iter()
+            .any(|key| match &permission[*key] {
+                J::String(text) => text.chars().count() > 512,
+                J::Array(items) => {
+                    items.len() > 8
+                        || items
+                            .iter()
+                            .take(8)
+                            .filter_map(J::as_str)
+                            .any(|text| text.chars().count() > 512)
+                }
+                _ => false,
+            })
+    });
+    let bounded: Vec<_> = rows
+        .into_iter()
+        .take(8)
+        .map(|permission| {
+            let strings = |value: &J| -> Vec<String> {
+                match value {
+                    J::String(text) => vec![text.chars().take(512).collect()],
+                    J::Array(items) => items
+                        .iter()
+                        .take(8)
+                        .filter_map(J::as_str)
+                        .map(|text| text.chars().take(512).collect())
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            json!({
+                "id": permission["id"],
+                "sessionID": permission["sessionID"],
+                "permission": permission["permission"],
+                "type": permission["type"],
+                "pattern": strings(&permission["pattern"]),
+                "patterns": strings(&permission["patterns"]),
+                "messageID": permission["messageID"],
+                "callID": permission["callID"],
+                "tool_messageID": permission["tool"]["messageID"],
+                "tool_callID": permission["tool"]["callID"],
+                "title": permission["title"].as_str().unwrap_or_default().chars().take(512).collect::<String>(),
+                "created": permission["time"]["created"],
+            })
+        })
+        .collect();
+    let mut snapshot = json!({"session":session,"total":total,"truncated":total>8 || field_truncated,"permissions":bounded});
+    while serde_json::to_vec_pretty(&snapshot).unwrap().len() > 60 * 1024 {
+        snapshot["permissions"].as_array_mut().unwrap().pop();
+        snapshot["truncated"] = json!(true);
+    }
+    snapshot
+}
+
+#[test]
+fn permission_snapshot_is_byte_bounded_and_reports_truncation() {
+    let rows = json!((0..8)
+        .map(|index| json!({"id":index,"sessionID":"ses-probe",
+        "patterns":vec!["\u{0001}".repeat(512);8]}))
+        .collect::<Vec<_>>());
+    let snapshot = bounded_permission_snapshot(&rows, "ses-probe");
+    assert_eq!(snapshot["total"], 8);
+    assert_eq!(snapshot["truncated"], true);
+    assert!(serde_json::to_vec_pretty(&snapshot).unwrap().len() <= 60 * 1024);
+    let long_field = json!([{"sessionID":"ses-probe","patterns":["界".repeat(513)]}]);
+    assert_eq!(
+        bounded_permission_snapshot(&long_field, "ses-probe")["truncated"],
+        true
+    );
+}
+
+fn permission_patterns(permission: &J) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for key in ["patterns", "pattern"] {
+        match &permission[key] {
+            J::String(text) => patterns.push(text.clone()),
+            J::Array(items) => {
+                patterns.extend(items.iter().filter_map(J::as_str).map(String::from))
+            }
+            _ => {}
+        }
+    }
+    patterns
+}
+
+fn permission_probe_pattern(sentinel: &Path) -> String {
+    format!(
+        "{}/*",
+        sentinel
+            .parent()
+            .expect("sentinel parent")
+            .to_str()
+            .unwrap()
+    )
+}
+
+fn permission_request_fields(
+    permission: &J,
+    session: &str,
+    sentinel: &Path,
+) -> Result<(String, String), String> {
+    if permission["sessionID"] != session {
+        return Err("permission session mismatch".into());
+    }
+    if !permission["id"]
+        .as_str()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err("permission request id missing".into());
+    }
+    let permission_type = permission["permission"]
+        .as_str()
+        .or_else(|| permission["type"].as_str())
+        .unwrap_or_default();
+    if permission_type != "external_directory" {
+        return Err("permission type is not external_directory".into());
+    }
+    if permission_patterns(permission) != vec![permission_probe_pattern(sentinel)] {
+        return Err("permission pattern is not the exact dedicated sentinel directory".into());
+    }
+    let message = permission["tool"]["messageID"]
+        .as_str()
+        .or_else(|| permission["messageID"].as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "permission tool message missing".to_string())?;
+    let call_id = permission["tool"]["callID"]
+        .as_str()
+        .or_else(|| permission["callID"].as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "permission call id missing".to_string())?;
+    Ok((message.to_string(), call_id.to_string()))
+}
+
+fn exact_permission_binding(
+    permissions: &J,
+    client: &ureq::Agent,
+    endpoint: &str,
+    session: &str,
+    message: &str,
+    cwd: &Path,
+    sentinel: &Path,
+) -> (J, J) {
+    let rows = permissions.as_array().expect("permission rows");
+    let matching: Vec<_> = rows
+        .iter()
+        .filter(|permission| permission["sessionID"] == session)
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "exactly one permission for the reviewer session"
+    );
+    let permission = matching[0];
+    let (tool_message, call_id) = permission_request_fields(permission, session, sentinel)
+        .expect("permission request schema");
+    let sentinel_text = sentinel.to_str().unwrap();
+    let messages = session_rows(client, endpoint, session, cwd);
+    let parts: Vec<_> = messages
+        .as_array()
+        .expect("reviewer messages")
+        .iter()
+        .flat_map(|row| row["parts"].as_array().into_iter().flatten())
+        .filter(|part| {
+            part["type"] == "tool"
+                && part["sessionID"] == session
+                && part["callID"] == call_id
+                && part["messageID"] == tool_message
+        })
+        .collect();
+    assert_eq!(parts.len(), 1, "exactly one tool call for the permission");
+    let tool = parts[0];
+    let assistant: Vec<_> = messages
+        .as_array()
+        .expect("reviewer messages")
+        .iter()
+        .filter(|row| {
+            row["info"]["sessionID"] == session
+                && row["info"]["role"] == "assistant"
+                && row["info"]["id"] == tool_message
+                && row["info"]["parentID"] == message
+        })
+        .collect();
+    assert_eq!(
+        assistant.len(),
+        1,
+        "permission tool call is not bound to the exact native submission"
+    );
+    assert_eq!(tool["tool"], "bash");
+    assert_eq!(
+        tool["state"]["input"]["command"]
+            .as_str()
+            .expect("permission tool command")
+            .trim(),
+        format!("cat {sentinel_text}")
+    );
+    (permission.clone(), tool.clone())
 }
 
 fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {

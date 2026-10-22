@@ -866,3 +866,45 @@ coverage with zero absolute-threshold-10 violations. Formatting, lint policy,
 Clippy and rustdoc passed. The final diagnostic ordering/count correction passed
 its focused regression on both toolchains and a fresh Clippy check; no model
 scenario or acceptance assertion changed after live attempt 2.
+
+## Native permission-block observation
+
+The opt-in `installed_real_opencode_approval_block_stops_without_result` scenario
+uses one real OpenCode reviewer on fixed artifact A and a test-owned sentinel
+inside the owned temporary environment but outside its cwd/runtime, in a dedicated
+`approval-probe` directory. OpenCode 1.19.3 requests external-directory permission
+using the containing directory’s `/*` pattern. The disposable configuration copy
+sets exactly that dedicated pattern to `ask`; other permission rules and the
+selected file remain unchanged. The request must contain only that exact pattern;
+the bound bash command must name the exact sentinel file.
+The reviewer is asked to inspect A and attempt the exact sentinel with `cat`; it
+must not approve or answer any permission prompt and must not write a verdict.
+
+The production session/collector must report `native_status=blocked` for the exact
+session while the native phase remains nonterminal (not `phase=blocked`). The test
+binds the actual `/permission` request id, session, message, call ID, path and tool
+input to the exact submitted native message, with no driver ACK, apply, verdict or
+tick. It asserts no report, event, delivery, verdict or applied result; parent
+requirement, candidate, round, revision, authorization and approval remain
+unchanged and the task pending list is empty. Detection is bounded; the child is
+then stopped/reaped and the owned environment, including the sentinel, is destroyed.
+It claims neither a partial-result execution_problem nor any acceptance conclusion.
+This is execution blockage only. #38/#32 remain OPEN.
+
+Primary live validation (2026-10-22): attempt 1 reached actual native permission
+blockage, then failed after 18.44s because the test expected a file pattern while
+the retained request used the containing directory’s `/*` pattern. The fixture
+now confines the probe to its own disposable directory and checks the exact
+singleton directory pattern plus exact file command; suffix and extra-pattern
+negative controls reject broader matches. Attempt 2 passed in 22.25s including
+build. Selected configuration bytes remained unchanged, no request was answered,
+no report/event/verdict/application was produced, and cleanup assertions passed.
+Private permission metadata is serialized within 60 KiB, reports count/field
+truncation, and is registered for failure capture before schema assertions.
+The original failed run remains retained locally and is not counted as success.
+
+Independent non-live verification: stable coverage and Rust 1.85 all-target suites
+each passed 489 tests, zero failed and 21 ignored. Formatting, lint policy, Clippy
+and rustdoc passed. CRAP checked 4800 functions at 77.2% line coverage with zero
+violations of the absolute threshold 10. Permission-pattern negative controls
+and escaped/multibyte diagnostic-bound regressions passed in both suites.
