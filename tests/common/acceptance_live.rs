@@ -221,15 +221,28 @@ pub(super) fn native(
     native_with_hook(env, q, cwd, name, instruction, || {}, |_, _, _| {})
 }
 
-pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
+pub(super) struct NativeTurn {
+    pub(super) root: std::path::PathBuf,
+    pub(super) cwd: std::path::PathBuf,
+    pub(super) endpoint: String,
+    pub(super) client: ureq::Agent,
+    state: J,
+    child: NativeChild,
+}
+
+impl NativeTurn {
+    pub(super) fn stop(&mut self) {
+        self.child.stop();
+    }
+}
+
+pub(super) fn native_prepare(
     env: &mut TaskEnvironment,
     q: &Path,
     cwd: &Path,
     name: &str,
     instruction: &str,
-    after_dispatch: F,
-    after_collect: G,
-) -> (J, J) {
+) -> NativeTurn {
     let root = task_runtime::prepare(env, name).unwrap();
     common::create_dir_all(root.join("config/opencode")).unwrap();
     fs::copy(
@@ -237,7 +250,7 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
         root.join("config/opencode/opencode.json"),
     )
     .unwrap();
-    // This bounded test measures four explicit roles, without internal delegation.
+    // This bounded test measures explicit roles, without internal delegation.
     // Only the disposable config copy is changed; native approvals remain native.
     let config_path = root.join("config/opencode/opencode.json");
     let mut config = util::read_json(&config_path).unwrap();
@@ -246,7 +259,7 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
     let model: J =
         serde_json::from_str(&std::env::var("HERDR_LIVE_OPENCODE_MODEL").unwrap()).unwrap();
     let spec = json!({"adapter":"opencode","binary":std::env::var("HERDR_LIVE_OPENCODE_BINARY").unwrap(),"cwd":cwd,"model":model,"port":port()});
-    let mut child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
+    let child = NativeChild::new(task_runtime::launch(env, &root, &spec).unwrap());
     ready(spec["port"].as_u64().unwrap() as u16);
     let instruction=format!("{instruction} Use direct tools only. Do not delegate, use task tools, or create child sessions. Stay inside the supplied cwd.");
     let state = retry_unstarted(&root, "creation.json", || {
@@ -257,14 +270,45 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
         )
     })
     .unwrap();
-    retry_unstarted(&root, "dispatch.json", || {
-        task_runtime::native::dispatch(env, &root)
+    let endpoint = format!("http://127.0.0.1:{}", spec["port"].as_u64().unwrap());
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .build()
+        .into();
+    NativeTurn {
+        root,
+        cwd: cwd.to_path_buf(),
+        endpoint,
+        client,
+        state,
+        child,
+    }
+}
+
+pub(super) fn native_dispatch(env: &TaskEnvironment, turn: &NativeTurn) {
+    retry_unstarted(&turn.root, "dispatch.json", || {
+        task_runtime::native::dispatch(env, &turn.root)
     })
     .unwrap();
-    after_dispatch();
+}
+
+pub(super) fn native_start(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+) -> NativeTurn {
+    let turn = native_prepare(env, q, cwd, name, instruction);
+    native_dispatch(env, &turn);
+    turn
+}
+
+pub(super) fn native_finish(env: &TaskEnvironment, turn: &mut NativeTurn) -> J {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let result = loop {
-        let collected = task_runtime::native::collect(env, &root);
+        let collected = task_runtime::native::collect(env, &turn.root);
         if collected
             .as_ref()
             .is_err_and(|error| error.kind == herdr_flow::error::ErrorKind::StateBusy)
@@ -276,7 +320,7 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
         let r = collected.unwrap_or_else(|error| {
             panic!(
                 "native collection: {error}; report={}",
-                fs::read_to_string(cwd.join(".herdr-verdict.json")).unwrap_or_default()
+                fs::read_to_string(turn.cwd.join(".herdr-verdict.json")).unwrap_or_default()
             )
         });
         if r["phase"] == "signalled" {
@@ -284,23 +328,34 @@ pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "native role {name} unresolved: {}",
+            "native role {} unresolved: {}",
+            turn.state["session"],
             r["phase"]
         );
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
     assert_eq!(result["outcome"], "complete");
-    let client: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(std::time::Duration::from_secs(2)))
-        .build()
-        .into();
-    let endpoint = format!("http://127.0.0.1:{}", spec["port"].as_u64().unwrap());
-    after_collect(&client, &endpoint, &result);
-    child.stop();
-    println!("real native {name}: exact session collected and server stopped");
-    (state, result)
+    result
 }
+
+pub(super) fn native_with_hook<F: FnOnce(), G: FnOnce(&ureq::Agent, &str, &J)>(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    cwd: &Path,
+    name: &str,
+    instruction: &str,
+    after_dispatch: F,
+    after_collect: G,
+) -> (J, J) {
+    let mut turn = native_start(env, q, cwd, name, instruction);
+    after_dispatch();
+    let result = native_finish(env, &mut turn);
+    after_collect(&turn.client, &turn.endpoint, &result);
+    turn.stop();
+    println!("real native {name}: exact session collected and server stopped");
+    (turn.state, result)
+}
+
 pub(super) fn native_codex(
     env: &mut TaskEnvironment,
     q: &Path,

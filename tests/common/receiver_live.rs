@@ -144,6 +144,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -172,6 +173,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -200,6 +202,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_unable_restore: true,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -228,6 +231,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_unable_restore: true,
         apply_restored_review: true,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -256,6 +260,36 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: true,
+        apply_concurrent: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires two concurrent real OpenCode native turns: fixed-A reviewer and developing developer"]
+fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -310,6 +344,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -692,6 +727,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_unable_restore: false,
             apply_restored_review: false,
             apply_ambiguous: false,
+            apply_concurrent: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -863,6 +899,7 @@ struct ReceiverSpec<'a> {
     apply_unable_restore: bool,
     apply_restored_review: bool,
     apply_ambiguous: bool,
+    apply_concurrent: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -894,6 +931,7 @@ fn run_native_receiver(
         apply_unable_restore: false,
         apply_restored_review: false,
         apply_ambiguous: false,
+        apply_concurrent: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -915,6 +953,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_unable_restore,
         apply_restored_review,
         apply_ambiguous,
+        apply_concurrent,
         unavailable_dependency,
         base,
         formal_target,
@@ -996,6 +1035,24 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
                 && unavailable_dependency.is_none()),
         "ambiguous requirement requires acceptance-only OpenCode mode"
     );
+    assert!(
+        !apply_concurrent
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && unavailable_dependency.is_none()),
+        "concurrent native turns require isolated OpenCode mode"
+    );
+    let selected_config_before = apply_concurrent
+        .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
     }
@@ -1048,6 +1105,12 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         ]
     } else if apply_ambiguous {
         vec!["accept-native".to_string(), "project".to_string()]
+    } else if apply_concurrent {
+        vec![
+            "accept-a".to_string(),
+            "develop-b".to_string(),
+            "project".to_string(),
+        ]
     } else {
         vec![
             "accept-native".to_string(),
@@ -1064,6 +1127,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     };
     let mut artifact_names = if apply_ambiguous {
         vec!["source", "reviewer-checkout"]
+    } else if apply_concurrent {
+        vec!["source", "accept-a", "develop-b"]
     } else {
         vec!["source", "development", "reviewer-checkout"]
     };
@@ -1076,7 +1141,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
-    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous {
+    let artifact_roots: Vec<_> = if apply_development || apply_ambiguous || apply_concurrent {
         artifact_names
             .iter()
             .map(|name| {
@@ -1371,6 +1436,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     let ambiguous_artifact =
         apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
+    let concurrent_artifact =
+        apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
@@ -1404,6 +1471,311 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         let source = Path::new(artifact["location"].as_str().unwrap());
         assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
         assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
+    if let Some(artifact) = concurrent_artifact.as_ref() {
+        let accept_cwd = acceptance_live::clone_snapshot(&env, artifact, "accept-a");
+        let develop_cwd = acceptance_live::clone_snapshot(&env, artifact, "develop-b");
+        let accept_instruction = "You are the independent acceptance reviewer for fixed artifact A. Inspect the exact requested HEAD against all current requirement references. Use direct tools only. Run exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve actual exit status, output and timestamps. Do not edit tracked files or commit. Write .herdr-verdict.json in cwd following acceptance_protocol with actual checks and evidence, and derive the conclusion yourself. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let develop_instruction = "You are the developer role, not a reviewer or acceptance role. Starting from the supplied commit, replace the contents of the file named `file` with exactly `version B` followed by a newline. Use an edit/write tool or a direct shell command. Stage/add the file and create one new local Git commit with the exact direct command `git commit -m \"concurrent B\"`. Run staging in a separate tool invocation. Run the commit in its own separate bash invocation whose entire command is exactly `git commit -m \"concurrent B\"`; no cd prefix, git add, &&, semicolon, echo or wrapper in that invocation. Do not write any verdict or acceptance report. Use direct tools only and stay inside cwd. Do not inspect sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+        let parent_before = queue::load_queue(&q).unwrap()["tasks"]["project"].clone();
+        let accept_wait_before = queue::load_queue(&q).unwrap()["waits"]["accept-a"].clone();
+        let develop_wait_before = queue::load_queue(&q).unwrap()["waits"]["develop-b"].clone();
+        let report_path = accept_cwd.join(".herdr-verdict.json");
+        let accept_runtime = task_runtime::prepare(&env, "accept-a").unwrap();
+        let develop_runtime = task_runtime::prepare(&env, "develop-b").unwrap();
+        for root in [&accept_runtime, &develop_runtime] {
+            failure_evidence.0.push(root.join("server.log"));
+            failure_evidence.0.push(root.join("creation.json"));
+            failure_evidence.0.push(root.join("dispatch.json"));
+            failure_evidence.0.push(root.join("submission.json"));
+        }
+        failure_evidence.0.push(report_path.clone());
+        let tool_evidence_path = q.parent().unwrap().join("concurrent-tool-evidence.json");
+        failure_evidence.0.push(tool_evidence_path.clone());
+        let mut accept_turn = acceptance_live::native_prepare(
+            &mut env,
+            &q,
+            &accept_cwd,
+            "accept-a",
+            accept_instruction,
+        );
+        let mut develop_turn = acceptance_live::native_prepare(
+            &mut env,
+            &q,
+            &develop_cwd,
+            "develop-b",
+            develop_instruction,
+        );
+        let readiness = herdr_flow::runtime::readiness(
+            &q,
+            registered["session"].as_str(),
+            &herdr_flow::herdr::receiver_factory,
+        )
+        .unwrap();
+        assert_eq!(
+            readiness["active_wakeup"], true,
+            "production receiver readiness was not active before dispatch"
+        );
+        acceptance_live::native_dispatch(&env, &accept_turn);
+        let accept_submission = util::read_json(&accept_turn.root.join("submission.json")).unwrap();
+        let accept_message_id = accept_submission["message_id"]
+            .as_str()
+            .expect("reviewer submission message id");
+        failure_evidence.0.push(
+            accept_turn
+                .root
+                .join("submissions")
+                .join(format!("{accept_message_id}.json")),
+        );
+        acceptance_live::native_dispatch(&env, &develop_turn);
+        let develop_submission =
+            util::read_json(&develop_turn.root.join("submission.json")).unwrap();
+        let develop_message_id = develop_submission["message_id"]
+            .as_str()
+            .expect("developer submission message id");
+        failure_evidence.0.push(
+            develop_turn
+                .root
+                .join("submissions")
+                .join(format!("{develop_message_id}.json")),
+        );
+        let disabled = cli_output(&["queue", "disable", "--state-dir", q.to_str().unwrap()]);
+        assert!(
+            disabled.status.success(),
+            "queue disable failed: {}",
+            String::from_utf8_lossy(&disabled.stderr)
+        );
+        assert_eq!(queue::load_queue(&q).unwrap()["notify"], false);
+        let accept_result = acceptance_live::native_finish(&env, &mut accept_turn);
+        let develop_result = acceptance_live::native_finish(&env, &mut develop_turn);
+        let accept_session = accept_result["session"].as_str().unwrap();
+        let accept_message = accept_result["message_id"].as_str().unwrap();
+        let develop_session = develop_result["session"].as_str().unwrap();
+        let develop_message = develop_result["message_id"].as_str().unwrap();
+        assert_ne!(accept_session, develop_session);
+        assert_eq!(accept_submission["session"], accept_session);
+        assert_eq!(accept_submission["message_id"], accept_message);
+        assert_eq!(develop_submission["session"], develop_session);
+        assert_eq!(develop_submission["message_id"], develop_message);
+        let accept_created =
+            submission_created_millis(&accept_submission["created_at"], "reviewer submission");
+        let develop_created =
+            submission_created_millis(&develop_submission["created_at"], "developer submission");
+        let accept_rows = session_rows(
+            &accept_turn.client,
+            &accept_turn.endpoint,
+            accept_session,
+            &accept_cwd,
+        );
+        let develop_rows = session_rows(
+            &develop_turn.client,
+            &develop_turn.endpoint,
+            develop_session,
+            &develop_cwd,
+        );
+        let diagnostic = concurrent_tool_evidence([
+            ("reviewer", tool_commands(&accept_rows, accept_session)),
+            ("developer", tool_commands(&develop_rows, develop_session)),
+        ]);
+        util::atomic_write_json(&tool_evidence_path, &diagnostic).unwrap();
+        let accept_completed =
+            exact_terminal_completion_millis(&accept_rows, &accept_result, &accept_cwd, "reviewer");
+        let develop_completed = exact_terminal_completion_millis(
+            &develop_rows,
+            &develop_result,
+            &develop_cwd,
+            "developer",
+        );
+        assert_native_turn_overlap(
+            "reviewer",
+            accept_created,
+            accept_completed,
+            "developer",
+            develop_created,
+            develop_completed,
+        );
+        let accept_commands = tool_commands(&accept_rows, accept_session);
+        let inspection = accept_commands
+            .iter()
+            .find(|command| command.command.trim() == "git show HEAD:file")
+            .expect("reviewer direct fixed-A inspection");
+        assert!(
+            terminal_tool_state(inspection) && inspection.success,
+            "reviewer inspection was not a successful terminal direct command"
+        );
+        assert_eq!(inspection.exit, Some(0));
+        assert_eq!(inspection.output.trim(), "version A");
+        assert!(inspection.start > 0 && inspection.start != i64::MAX);
+        assert!(inspection.end >= inspection.start && inspection.end != i64::MAX);
+        assert!(inspection.start as f64 >= accept_created);
+        assert!(inspection.end as f64 <= accept_completed);
+        let develop_commands = tool_commands(&develop_rows, develop_session);
+        let commit = develop_commands
+            .iter()
+            .find(|command| command.command.trim() == "git commit -m \"concurrent B\"")
+            .expect("developer direct commit evidence");
+        assert!(
+            terminal_tool_state(commit) && commit.success,
+            "developer commit was not a successful terminal direct command"
+        );
+        assert_eq!(commit.exit, Some(0));
+        assert!(commit.start > 0 && commit.start != i64::MAX);
+        assert!(commit.end >= commit.start && commit.end != i64::MAX);
+        assert!(commit.start as f64 >= develop_created);
+        assert!(commit.end as f64 <= develop_completed);
+        let source = Path::new(artifact["location"].as_str().unwrap());
+        assert_eq!(git(source, &["rev-parse", "HEAD"]), artifact["id"]);
+        assert_eq!(git(source, &["show", "HEAD:file"]), "version A");
+        assert_eq!(git(&accept_cwd, &["rev-parse", "HEAD"]), artifact["id"]);
+        assert_eq!(git(&accept_cwd, &["show", "HEAD:file"]), "version A");
+        let output = &develop_result["output"];
+        assert_eq!(output["input"], artifact["id"]);
+        assert_ne!(output["id"], artifact["id"]);
+        assert_eq!(git(&develop_cwd, &["rev-parse", "HEAD"]), output["id"]);
+        assert_eq!(git(&develop_cwd, &["show", "HEAD:file"]), "version B");
+        let committed = std::process::Command::new("git")
+            .current_dir(&develop_cwd)
+            .args(["show", "HEAD:file"])
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        assert_eq!(committed.stdout, b"version B\n");
+        assert_eq!(fs::read(develop_cwd.join("file")).unwrap(), b"version B\n");
+        assert!(!develop_cwd.join(".herdr-verdict.json").exists());
+        let report_path = accept_cwd.join(".herdr-verdict.json");
+        let report_bytes = fs::read(&report_path).unwrap();
+        let actual_report = util::read_json(&report_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let final_state = loop {
+            let state = queue::load_queue(&q).unwrap();
+            let events = state["events"].as_object().unwrap();
+            let has_accept_verdict = state["tasks"]["accept-a"]["verdict"].is_object();
+            if state["notify"] == false && events.len() == 2 && has_accept_verdict {
+                break state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for two watcher-attached native events and reviewer verdict"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let project = &final_state["tasks"]["project"];
+        let accept_task = &final_state["tasks"]["accept-a"];
+        let develop_task = &final_state["tasks"]["develop-b"];
+        assert_eq!(project["requirements"], parent_before["requirements"]);
+        assert_eq!(
+            project["acceptance_round"],
+            parent_before["acceptance_round"]
+        );
+        assert_eq!(
+            project["requirement_revision"],
+            parent_before["requirement_revision"]
+        );
+        assert_eq!(project["candidate"], parent_before["candidate"]);
+        assert_eq!(project["candidate"], artifact["id"]);
+        assert!(project["approved"].is_null());
+        assert_eq!(accept_task["candidate"], artifact["id"]);
+        assert_eq!(accept_task["lineage"]["input"], artifact["id"]);
+        assert_eq!(develop_task["lineage"]["input"], artifact["id"]);
+        let task_names: std::collections::BTreeSet<_> = final_state["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            task_names,
+            ["accept-a", "develop-b", "project"].into_iter().collect(),
+            "unexpected task set after concurrent native turns"
+        );
+        let coordinator_session = registered["session"].as_str().unwrap();
+        ensure_session(coordinator_session, "coordinator");
+        ensure_session(accept_session, "reviewer");
+        ensure_session(develop_session, "developer");
+        assert_ne!(accept_session, develop_session);
+        assert_ne!(accept_session, coordinator_session);
+        assert_ne!(develop_session, coordinator_session);
+        assert!(!accept_message.trim().is_empty());
+        assert!(!develop_message.trim().is_empty());
+        assert_ne!(accept_message, develop_message);
+        for (name, assignment) in [("accept-a", "accept-a-a1"), ("develop-b", "develop-b-a1")] {
+            assert_eq!(final_state["waits"][name]["id"], name);
+            assert_eq!(final_state["waits"][name]["task"], name);
+            assert_eq!(final_state["waits"][name]["assignment"], assignment);
+        }
+        let accept_binding = progress::binding(&accept_wait_before).unwrap();
+        let develop_binding = progress::binding(&develop_wait_before).unwrap();
+        assert_eq!(accept_submission["context"]["binding"], accept_binding);
+        assert_eq!(develop_submission["context"]["binding"], develop_binding);
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["binding"],
+            accept_binding
+        );
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["reviewer"]["session"],
+            accept_session
+        );
+        assert_eq!(
+            accept_task["verdict"]["envelope"]["binding"]["candidate"],
+            artifact["id"]
+        );
+        assert_eq!(accept_task["verdict"]["envelope"]["report"], actual_report);
+        assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+        assert_concurrent_event_chain(
+            &q,
+            &final_state,
+            "accept-a",
+            &accept_submission,
+            &accept_result,
+            &accept_wait_before,
+            &accept_turn.root,
+        );
+        assert_concurrent_event_chain(
+            &q,
+            &final_state,
+            "develop-b",
+            &develop_submission,
+            &develop_result,
+            &develop_wait_before,
+            &develop_turn.root,
+        );
+        assert_eq!(develop_result["output"], *output);
+        assert!(
+            !project["artifacts"]
+                .as_object()
+                .unwrap()
+                .contains_key(output["id"].as_str().unwrap()),
+            "developer output B was registered on the parent without selection"
+        );
+        assert_eq!(final_state["notify"], false);
+        assert!(final_state["deliveries"]
+            .as_object()
+            .is_none_or(|deliveries| deliveries.is_empty()));
+        assert!(final_state["events"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .all(|(_, event)| event["acknowledged"] != true && event["applied"] != true));
+        assert_eq!(final_state["events"].as_object().unwrap().len(), 2);
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("concurrent config snapshot"),
+            "selected OpenCode configuration changed during concurrent scenario"
+        );
+        accept_turn.stop();
+        develop_turn.stop();
         destroy_environment(&env).unwrap();
         wait_bounded(&mut server, "native server");
         wait_bounded(&mut guard_child, "guard watcher");
@@ -2150,6 +2522,289 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
         .collect();
     commands.sort_by_key(|command| (command.start, command.end));
     commands
+}
+
+fn ensure_session(value: &str, label: &str) {
+    assert!(!value.trim().is_empty(), "{label} session is empty");
+}
+
+fn concurrent_tool_evidence(roles: [(&str, Vec<ToolCommand>); 2]) -> J {
+    let mut records = Vec::new();
+    let mut counts = serde_json::Map::new();
+    let mut truncated = false;
+    for (role, commands) in roles {
+        let matching: Vec<_> = commands
+            .into_iter()
+            .filter(|c| {
+                c.command.contains("git commit") || c.command.contains("git show HEAD:file")
+            })
+            .collect();
+        let count = matching.len();
+        counts.insert(
+            role.to_string(),
+            json!({"total":count,"omitted":count.saturating_sub(8)}),
+        );
+        truncated |= count > 8;
+        for c in matching.into_iter().rev().take(8) {
+            truncated |= c.command.chars().count() > 512;
+            records.push(json!({"role":role,
+                "command":c.command.chars().take(512).collect::<String>(),
+                "exit":c.exit,"status":c.status,"start":c.start,"end":c.end}));
+        }
+    }
+    records.sort_by_key(|record| record["start"].as_i64().unwrap_or(i64::MAX));
+    let mut evidence = bounded_restore_tool_evidence(json!({"commands":records,"counts":counts,
+        "truncated":truncated,"limit_per_role":8,"command_char_limit":512}));
+    for role in ["reviewer", "developer"] {
+        let retained = evidence["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["role"] == role)
+            .count();
+        let total = evidence["counts"][role]["total"].as_u64().unwrap();
+        evidence["counts"][role]["omitted"] = json!(total.saturating_sub(retained as u64));
+    }
+    evidence
+}
+
+#[test]
+fn concurrent_diagnostic_records_truncation_and_keeps_newest_commands() {
+    let commands = (0..10)
+        .map(|index| ToolCommand {
+            command: format!("git commit {index} {}", "界".repeat(520)),
+            output: "not retained".into(),
+            error: "not retained".into(),
+            success: true,
+            status: "completed".into(),
+            exit: Some(0),
+            start: index,
+            end: index + 1,
+        })
+        .collect();
+    let evidence = concurrent_tool_evidence([("reviewer", Vec::new()), ("developer", commands)]);
+    assert_eq!(evidence["counts"]["developer"]["total"], 10);
+    assert_eq!(evidence["counts"]["developer"]["omitted"], 2);
+    assert_eq!(evidence["truncated"], true);
+    assert_eq!(evidence["commands"].as_array().unwrap().len(), 8);
+    assert!(evidence["commands"][7]["command"]
+        .as_str()
+        .unwrap()
+        .starts_with("git commit 9 "));
+    for command in evidence["commands"].as_array().unwrap() {
+        assert!(command["command"].as_str().unwrap().chars().count() <= 512);
+        assert!(command.get("output").is_none() && command.get("error").is_none());
+    }
+    assert!(serde_json::to_vec_pretty(&evidence).unwrap().len() <= 60 * 1024);
+}
+
+fn submission_created_millis(value: &J, label: &str) -> f64 {
+    let seconds = value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| panic!("{label} created_at missing, nonfinite or nonpositive"));
+    let millis = seconds * 1000.0;
+    assert!(
+        millis.is_finite(),
+        "{label} created_at milliseconds overflow"
+    );
+    millis
+}
+
+fn exact_terminal_completion_millis(rows: &J, submission: &J, cwd: &Path, label: &str) -> f64 {
+    let session = submission["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} submission session missing"));
+    let message = submission["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} submission message ID missing"));
+    let reply = submission["reply_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{label} terminal reply ID missing"));
+    let cwd = cwd
+        .to_str()
+        .unwrap_or_else(|| panic!("{label} cwd is not UTF-8"));
+    let matches: Vec<_> = rows
+        .as_array()
+        .expect("native session rows")
+        .iter()
+        .filter(|row| {
+            row["info"]["sessionID"] == session
+                && row["info"]["role"] == "assistant"
+                && row["info"]["id"] == reply
+                && row["info"]["parentID"] == message
+                && row["info"]["path"]["cwd"] == cwd
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "{label} requires exactly one terminal assistant row for the exact reply/message/session/cwd"
+    );
+    matches[0]["info"]["time"]["completed"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| panic!("{label} assistant completion missing, nonfinite or nonpositive"))
+}
+
+fn assert_native_turn_overlap(
+    left_label: &str,
+    left_created: f64,
+    left_completed: f64,
+    right_label: &str,
+    right_created: f64,
+    right_completed: f64,
+) {
+    assert!(
+        left_created < left_completed,
+        "{left_label} submission/completion timestamps are reversed"
+    );
+    assert!(
+        right_created < right_completed,
+        "{right_label} submission/completion timestamps are reversed"
+    );
+    let overlap_start = left_created.max(right_created);
+    let overlap_end = left_completed.min(right_completed);
+    assert!(
+        overlap_start < overlap_end
+            && left_created < right_completed
+            && right_created < left_completed,
+        "native reviewer and developer turns did not actually overlap"
+    );
+}
+
+#[test]
+fn concurrent_timestamp_binding_rejects_bad_identity_and_allows_multi_tool_rows() {
+    let cwd = Path::new("/tmp/native-concurrent");
+    let submission = json!({"session":"ses-a","message_id":"msg-a","reply_id":"reply-a"});
+    let rows = json!([
+        {"info":{"sessionID":"ses-a","role":"assistant","id":"tool-row","parentID":"msg-a",
+            "path":{"cwd":"/tmp/native-concurrent"},"time":{"completed":2000}}},
+        {"info":{"sessionID":"ses-a","role":"assistant","id":"reply-a","parentID":"msg-a",
+            "path":{"cwd":"/tmp/native-concurrent"},"time":{"completed":3000}}}
+    ]);
+    assert_eq!(
+        exact_terminal_completion_millis(&rows, &submission, cwd, "reviewer"),
+        3000.0
+    );
+    let reject = |f: &dyn Fn()| {
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err());
+    };
+    let mut wrong_parent = rows.clone();
+    wrong_parent[1]["info"]["parentID"] = json!("other-message");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_parent, &submission, cwd, "reviewer");
+    });
+    let mut wrong_session = rows.clone();
+    wrong_session[1]["info"]["sessionID"] = json!("other-session");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_session, &submission, cwd, "reviewer");
+    });
+    let mut wrong_id = submission.clone();
+    wrong_id["reply_id"] = json!("other-reply");
+    reject(&|| {
+        exact_terminal_completion_millis(&rows, &wrong_id, cwd, "reviewer");
+    });
+    let mut wrong_cwd = rows.clone();
+    wrong_cwd[1]["info"]["path"]["cwd"] = json!("/tmp/other");
+    reject(&|| {
+        exact_terminal_completion_millis(&wrong_cwd, &submission, cwd, "reviewer");
+    });
+    let mut missing_completion = rows.clone();
+    missing_completion[1]["info"]["time"] = json!({});
+    reject(&|| {
+        exact_terminal_completion_millis(&missing_completion, &submission, cwd, "reviewer");
+    });
+    let mut nonfinite_completion = rows.clone();
+    nonfinite_completion[1]["info"]["time"]["completed"] = json!("NaN");
+    reject(&|| {
+        exact_terminal_completion_millis(&nonfinite_completion, &submission, cwd, "reviewer");
+    });
+    reject(&|| {
+        submission_created_millis(&json!({}), "reviewer submission");
+    });
+    reject(&|| {
+        submission_created_millis(&json!(f64::MAX), "reviewer submission");
+    });
+    reject(&|| {
+        assert_native_turn_overlap("left", 3000.0, 2000.0, "right", 1000.0, 4000.0);
+    });
+    reject(&|| {
+        assert_native_turn_overlap("left", 1000.0, 2000.0, "right", 3000.0, 4000.0);
+    });
+    reject(&|| {
+        assert_native_turn_overlap("left", 1000.0, 2000.0, "right", 2000.0, 3000.0);
+    });
+}
+
+fn assert_concurrent_event_chain(
+    q: &Path,
+    state: &J,
+    wait: &str,
+    submission: &J,
+    result: &J,
+    wait_before: &J,
+    root: &Path,
+) {
+    let session = result["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("concurrent result session");
+    let message = result["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("concurrent result message id");
+    let expected_binding = progress::binding(wait_before).unwrap();
+    assert_eq!(submission["context"]["wait"], wait);
+    assert_eq!(result["context"]["wait"], wait);
+    assert_eq!(submission["context"]["binding"], expected_binding);
+    assert_eq!(result["context"]["binding"], expected_binding);
+    assert_eq!(submission["context"]["queue_id"], state["id"]);
+    assert_eq!(result["context"]["queue_id"], state["id"]);
+    assert_eq!(
+        Path::new(submission["context"]["queue_dir"].as_str().unwrap()),
+        q
+    );
+    assert_eq!(
+        Path::new(result["context"]["queue_dir"].as_str().unwrap()),
+        q
+    );
+    assert_eq!(submission["session"], session);
+    assert_eq!(submission["message_id"], message);
+    assert_eq!(result["session"], session);
+    assert_eq!(result["message_id"], message);
+    let events: Vec<_> = state["events"]
+        .as_object()
+        .expect("queue events")
+        .iter()
+        .filter(|(_, event)| event["wait"] == wait)
+        .collect();
+    assert_eq!(events.len(), 1, "exactly one event for {wait}");
+    let event = events[0].1;
+    assert_eq!(event["task"], wait);
+    assert_eq!(event["binding"], expected_binding);
+    assert_eq!(
+        event["evidence"],
+        json!(q.join("results").join(format!("{wait}.json")))
+    );
+    assert_ne!(event["acknowledged"], true);
+    assert_ne!(event["applied"], true);
+    let signal = util::read_json(Path::new(
+        event["evidence"].as_str().expect("event evidence"),
+    ))
+    .unwrap();
+    assert_eq!(signal["wait"], wait);
+    assert_eq!(signal["outcome"], "complete");
+    let submission_path = root.join("submissions").join(format!("{message}.json"));
+    assert_eq!(signal["evidence"], json!(submission_path));
+    let actual_submission = util::read_json(&submission_path).unwrap();
+    assert_eq!(actual_submission["message_id"], submission["message_id"]);
+    assert_eq!(actual_submission["created_at"], submission["created_at"]);
+    assert_eq!(actual_submission, *result);
+    assert_eq!(actual_submission["reply_id"], result["reply_id"]);
 }
 
 fn exact_path_argument(command: &str, flag: &str, path: &Path) -> bool {
