@@ -646,11 +646,20 @@ queue/task state; only the supported notification toggle and lineage
 artifact/candidate setup are used.
 
 Bounded assertions compare protected task/result fields rather than claiming
-broad no-mutation across watcher heartbeats: original event remains
-acknowledged/unapplied/pending, parent approval is null, candidate is B, no
-successful stale task-apply exists, no `progress_stall` is emitted for inactive
-A, and A's fixed HEAD/content plus the reviewer report bytes are unchanged.
-Actual failed tool metadata/output, separate shell invocations, temporal evidence,
-and bounded child teardown are checked. The fixture is not process/server crash
-recovery, a concurrent developer proof, independent delivery, or #38 completion.
-#38 and #32 remain OPEN.
+broad no-mutation across watcher heartbeats. The model-written
+`late-application.json` is read and must name the exact task, stale event, child
+state version and registered verdict ID, with the conclusion-derived
+`next_action` and no fabricated output/acceptance fields. The coordinator must
+have a completed late turn; exactly one terminal stale `task-apply` with the exact
+production obsolete error is required, with no successful application and no
+other non-busy rejection. Original event remains acknowledged/unapplied/pending,
+parent approval is null, candidate is B, and A's fixed HEAD/content plus the
+reviewer report bytes and verdict ID are unchanged. Event/delivery totals, the
+unique accept event, exact delivery binding, and the signal/submission-message/
+report session/output chain are checked. No immediate pre-deadline
+`progress_stall` is observed; because the default apply deadline is 600 seconds,
+overdue stall suppression is not demonstrated by this bounded scenario.
+Actual failed tool terminal state/exit and output, separate shell invocations,
+temporal evidence, and bounded child teardown are checked. The fixture is not
+process/server crash recovery, a concurrent developer proof, independent delivery,
+or #38 completion. #38 and #32 remain OPEN.

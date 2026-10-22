@@ -900,6 +900,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_repair {
         artifact_names.extend(["repair-checkout", "final-reviewer-checkout"]);
     }
+    if apply_late_acceptance {
+        artifact_names.extend(["late-reviewer-checkout", "late-candidate"]);
+    }
     let artifact_roots: Vec<_> = if apply_development {
         artifact_names
             .iter()
@@ -988,6 +991,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         }
     }
     let instructions = cwd.join("receiver-instructions.md");
+    let late_application = cwd.join("late-application.json");
     let binary = util::shell_quote(env!("CARGO_BIN_EXE_herdr-flow"));
     let queue_path = util::shell_quote(q.to_str().unwrap());
     let mut instruction_text = format!(
@@ -1007,7 +1011,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_acceptance {
         instruction_text = instruction_text.replace("Exactly one real development result for task review will arrive.", "This is a two-stage protocol in the same coordinator session: first development task review, then independent acceptance task accept-native. Each stage has its own notification. Handle task review as follows.").replace("This is not independent acceptance or delivery.", "This first stage does not establish independent acceptance or delivery.");
         if apply_late_acceptance {
-            instruction_text.push_str(&format!("\nAfter development, a second accept-native notification will arrive only after delivery is re-enabled. Its result was collected while snapshot A was current; candidate B was selected afterward. This is delayed delivery of a pre-collected result, not collection after replacement. For that notification: ACK its exact delivery first, and treat ACK as receipt only. Read queue.json and use the exact pending accept-native event ID and the exact registered immutable verdict ID/binding. Run {binary} queue event-current --state-dir {queue_path} --event THAT_EVENT and expect current=false/nonzero; do not retry it and do not treat false as success. Write an application JSON with task=accept-native, current state_version, that exact stale event, that registered verdict ID, and next_action mapped from the actual registered report conclusion (passed->delivery, failed->repair, unable->restore, ambiguous->clarify), owner=native coordinator, reason=independent report, condition=existing authorization. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE exactly once and require a nonzero stale rejection; record the actual command output/exit and do not retry. Do not run readiness, do not claim approval, do not rewrite the verdict, and do not edit queue/guard/reports/artifacts. Finish after recording the rejection. The earlier development-only schema applies only to task review. Do not read operator repositories."));
+            instruction_text.push_str(&format!("\nAfter development, a second accept-native notification will arrive only after delivery is re-enabled. Its result was collected while snapshot A was current; candidate B was selected afterward. This is delayed delivery of a pre-collected result, not collection after replacement. Run the ACK, event-current and task-apply commands in separate bash tool invocations; do not group them into a script or one shell call. For that notification: ACK its exact delivery first, and treat ACK as receipt only. Read queue.json and use the exact pending accept-native event ID and the exact registered immutable verdict ID/binding. Run {binary} queue event-current --state-dir {queue_path} --event THAT_EVENT and expect exit 1 with JSON current=false; do not retry it and do not treat false as success. Write the application at the exact path {application} with task=accept-native, current child state_version, that exact stale event, that registered verdict ID, no output or acceptance fields, and next_action mapped from the actual registered report conclusion (passed->delivery, failed->repair, unable->restore, ambiguous->clarify), owner=native coordinator, reason=independent report, condition=existing authorization. Run {binary} queue task-apply --state-dir {queue_path} --spec {application} exactly once and require the exact nonzero stale rejection; record the actual command output/exit and do not retry. Do not run readiness, do not claim approval, do not rewrite the verdict, and do not edit queue/guard/reports/artifacts. Finish after recording the rejection. The earlier development-only schema applies only to task review. Do not read operator repositories.", application=late_application.display()));
         } else {
             instruction_text.push_str(&format!("\nAfter completing development, a second notification for accept-native will arrive in this same session. For that notification ACK its exact delivery first. Read task accept-native, its pending event and registered immutable verdict in queue.json, and the exact referenced collector evidence. Write an application JSON in cwd: task=accept-native, current state_version, exact event, verdict=the registered verdict.id, next_action={{kind: chosen from the actual report conclusion, owner: native coordinator, reason: independent report, condition: existing authorization}}. Map passed to delivery, failed to repair, unable to restore, ambiguous to clarify. Do not invent or rewrite any verdict; do not supply output or acceptance fields for this stage. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE, then queue readiness with that same state-dir and exact session environment. This records a continuation only; do not deliver to any customer or alter artifacts. The earlier development-only schema applies only to task review. Do not read operator repositories."));
         }
@@ -1384,8 +1388,10 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         late_acceptance_stage(LateAcceptanceSpec {
             env: &mut env,
             q: &q,
+            guard: &guard,
             coordinator: &registered,
             development: development_result.as_ref().unwrap(),
+            reviewer_root: reviewer_root.as_ref().unwrap(),
             client: &client,
             endpoint: &endpoint,
             cwd: &cwd,
@@ -1750,6 +1756,7 @@ struct ToolCommand {
     output: String,
     error: String,
     success: bool,
+    status: String,
     exit: Option<i64>,
     start: i64,
     end: i64,
@@ -1781,6 +1788,7 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
                     .unwrap_or_default()
                     .to_string(),
                 success: status == "completed" && exit == Some(0),
+                status: status.to_string(),
                 exit,
                 start,
                 end,
@@ -1789,6 +1797,25 @@ fn tool_commands(rows: &J, session: &str) -> Vec<ToolCommand> {
         .collect();
     commands.sort_by_key(|command| (command.start, command.end));
     commands
+}
+
+fn terminal_tool_state(command: &ToolCommand) -> bool {
+    matches!(command.status.as_str(), "completed" | "error")
+}
+
+fn lock_busy_evidence(command: &ToolCommand) -> bool {
+    let evidence = format!("{} {}", command.output, command.error).to_ascii_lowercase();
+    terminal_tool_state(command)
+        && command.exit.is_some_and(|exit| exit != 0)
+        && (evidence.contains("wait queue busy; retry after current poll")
+            || evidence.contains("opencode submission is busy"))
+}
+
+fn stale_apply_evidence(command: &ToolCommand) -> bool {
+    terminal_tool_state(command)
+        && command.exit.is_some_and(|exit| exit != 0)
+        && format!("{} {}", command.output, command.error)
+            .contains("obsolete requirement, candidate or acceptance round, or inactive parent")
 }
 
 fn session_rows(client: &ureq::Agent, endpoint: &str, session: &str, cwd: &Path) -> J {
@@ -2219,8 +2246,10 @@ fn verify_ack_stall_recovery(spec: AckStallRecoverySpec<'_>) {
 struct LateAcceptanceSpec<'a> {
     env: &'a mut TaskEnvironment,
     q: &'a Path,
+    guard: &'a Path,
     coordinator: &'a J,
     development: &'a J,
+    reviewer_root: &'a Path,
     client: &'a ureq::Agent,
     endpoint: &'a str,
     cwd: &'a Path,
@@ -2231,8 +2260,10 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     let LateAcceptanceSpec {
         env,
         q,
+        guard,
         coordinator,
         development,
+        reviewer_root,
         client,
         endpoint,
         cwd,
@@ -2252,6 +2283,7 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     acceptance_live::change(q, activity);
     let reviewer_cwd = acceptance_live::clone_snapshot(env, artifact, "late-reviewer-checkout");
     let reviewer_report_path = reviewer_cwd.join(".herdr-verdict.json");
+    let application_path = cwd.join("late-application.json");
     let reviewer_instruction = "Independently inspect the exact supplied candidate against the original requirement. Do not edit tracked files or commit. Write .herdr-verdict.json following acceptance_protocol with actual checks and grounded evidence. Derive the conclusion yourself. Do not inspect sibling directories, coordinator instructions, or operator repositories; all requirement and acceptance protocol inputs are supplied in your packet.";
     let session_id = coordinator_session.to_string();
     let (reviewer, collected) = acceptance_live::native_with_hook(
@@ -2281,13 +2313,33 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     evidence.0.push(reviewer_report_path.clone());
 
     let state = queue::load_queue(q).unwrap();
-    let (event_id, event) = state["events"]
+    let accept_events: Vec<_> = state["events"]
         .as_object()
         .unwrap()
         .iter()
-        .find(|(_, event)| event["wait"] == "accept-native")
-        .map(|(id, event)| (id.clone(), event.clone()))
-        .expect("collected acceptance event");
+        .filter(|(_, event)| event["wait"] == "accept-native")
+        .collect();
+    assert_eq!(accept_events.len(), 1, "unique acceptance event required");
+    let (event_id, event) = {
+        let (id, event) = accept_events[0];
+        (id.clone(), event.clone())
+    };
+    let verdict_before = state["tasks"]["accept-native"]["verdict"].clone();
+    let child_state_version = state["tasks"]["accept-native"]["state_version"].clone();
+    let signal = util::read_json(Path::new(
+        event["evidence"].as_str().expect("acceptance evidence"),
+    ))
+    .unwrap();
+    let expected_submission = reviewer_root.join("submissions").join(format!(
+        "{}.json",
+        collected["message_id"]
+            .as_str()
+            .expect("reviewer message id")
+    ));
+    assert_eq!(signal["evidence"], json!(expected_submission));
+    let submission_report = util::read_json(&expected_submission).unwrap();
+    assert_eq!(submission_report["session"], reviewer["session"]);
+    assert_eq!(submission_report["output"], collected["output"]);
     assert_eq!(event["applied"], false);
     assert_eq!(event["acknowledged"], false);
     assert_eq!(event["binding"], collected["context"]["binding"]);
@@ -2356,6 +2408,11 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     assert_eq!(fs::read(reviewer_cwd.join("file")).unwrap(), a_content);
     assert_eq!(fs::read(&reviewer_report_path).unwrap(), report_bytes);
 
+    let prior_submission = util::read_json(&guard.join("submission.json")).ok();
+    let prior_message = prior_submission
+        .as_ref()
+        .and_then(|submission| submission["message_id"].as_str())
+        .map(str::to_string);
     let output = cli_output(&["queue", "enable", "--state-dir", q.to_str().unwrap()]);
     assert!(
         output.status.success(),
@@ -2383,6 +2440,20 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
         acknowledged_event["binding"],
         collected["context"]["binding"]
     );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Ok(submission) = util::read_json(&guard.join("submission.json")) {
+            let changed = submission["message_id"].as_str() != prior_message.as_deref();
+            if changed && submission["phase"] == "complete" {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "late coordinator turn did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     let deadline = Instant::now() + Duration::from_secs(180);
     let (commands, ack_index, event_current_index, task_apply_index) = loop {
@@ -2395,20 +2466,16 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
                 && command.command.contains(q.to_str().unwrap())
         });
         let event_current = commands.iter().position(|command| {
-            command.command.contains("queue event-current")
+            terminal_tool_state(command)
+                && command.exit == Some(1)
+                && command.command.contains("queue event-current")
                 && command.command.contains(event_id.as_str())
                 && command.command.contains(q.to_str().unwrap())
-                && !command.success
-                && command.exit != Some(0)
         });
         let task_apply = commands.iter().position(|command| {
             command.command.contains("queue task-apply")
                 && command.command.contains(q.to_str().unwrap())
-                && !command.success
-                && command.exit != Some(0)
-                && format!("{} {}", command.output, command.error)
-                    .to_ascii_lowercase()
-                    .contains("obsolete")
+                && stale_apply_evidence(command)
         });
         if let (Some(ack), Some(event_current), Some(task_apply)) = (ack, event_current, task_apply)
         {
@@ -2431,18 +2498,78 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     }
     assert!(commands[ack_index].end <= commands[event_current_index].start);
     assert!(commands[event_current_index].end <= commands[task_apply_index].start);
-    assert!(
-        !commands.iter().any(|command| {
-            command.success
+    let event_current_output: J = serde_json::from_str(commands[event_current_index].output.trim())
+        .expect("event-current JSON output");
+    assert_eq!(event_current_output["event"], event_id.as_str());
+    assert_eq!(event_current_output["current"], false);
+    let late_event_currents: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.start >= commands[ack_index].end
+                && command.command.contains("queue event-current")
+                && command.command.contains(event_id.as_str())
+                && command.command.contains(q.to_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        late_event_currents.len(),
+        1,
+        "one late event-current required"
+    );
+    let late_applies: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.start >= commands[ack_index].end
                 && command.command.contains("queue task-apply")
-                && command.start >= commands[event_current_index].start
-        }),
+                && command.command.contains(q.to_str().unwrap())
+        })
+        .collect();
+    let stale_attempts: Vec<_> = late_applies
+        .iter()
+        .filter(|command| stale_apply_evidence(command))
+        .collect();
+    assert_eq!(
+        stale_attempts.len(),
+        1,
+        "exactly one stale task-apply required"
+    );
+    assert!(
+        !late_applies.iter().any(|command| command.success),
         "stale acceptance application succeeded"
     );
+    for command in late_applies
+        .iter()
+        .filter(|command| !stale_apply_evidence(command))
+    {
+        assert!(
+            lock_busy_evidence(command),
+            "non-busy late task-apply rejection: {}",
+            command.command
+        );
+    }
     let state = queue::load_queue(q).unwrap();
+    let accept_events: Vec<_> = state["events"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|event| event["wait"] == "accept-native")
+        .collect();
+    assert_eq!(accept_events.len(), 1, "exactly one accept event required");
+    assert_eq!(state["events"].as_object().unwrap().len(), 2);
+    assert_eq!(state["deliveries"].as_object().unwrap().len(), 2);
+    let exact_deliveries: Vec<_> = state["deliveries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|delivery| delivery["events"] == json!([event_id.as_str()]))
+        .collect();
+    assert_eq!(exact_deliveries.len(), 1);
+    assert_eq!(exact_deliveries[0]["session"], coordinator["session"]);
+    assert_eq!(exact_deliveries[0]["phase"], "acknowledged");
     let event = &state["events"][event_id.as_str()];
     assert_eq!(event["acknowledged"], true);
     assert_eq!(event["applied"], false);
+    assert_eq!(state["tasks"]["accept-native"]["verdict"], verdict_before);
     assert_eq!(
         state["tasks"]["accept-native"]["pending"],
         json!([event_id.as_str()])
@@ -2450,11 +2577,35 @@ fn late_acceptance_stage(spec: LateAcceptanceSpec<'_>) {
     assert_eq!(state["tasks"]["accept-native"]["phase"], "result_pending");
     assert_eq!(state["tasks"]["project"]["candidate"], b_id);
     assert_eq!(state["tasks"]["project"]["approved"], J::Null);
-    assert!(state["events"]
-        .as_object()
-        .unwrap()
-        .values()
-        .all(|event| event["wait"] != "accept-native" || event["kind"] != "progress_stall"));
+    let application = util::read_json(&application_path).unwrap();
+    assert_eq!(application["task"], "accept-native");
+    assert_eq!(application["event"].as_str(), Some(event_id.as_str()));
+    assert_eq!(application["state_version"], child_state_version);
+    assert_eq!(application["verdict"], verdict_before["id"]);
+    assert!(application.get("output").is_none());
+    assert!(application.get("acceptance").is_none());
+    let expected_next = match actual_report["conclusion"].as_str().unwrap() {
+        "passed" => "delivery",
+        "failed" => "repair",
+        "unable" => "restore",
+        "ambiguous" => "clarify",
+        other => panic!("unexpected reviewer conclusion {other}"),
+    };
+    assert_eq!(application["next_action"]["kind"], expected_next);
+    assert_eq!(application["next_action"]["owner"], "native coordinator");
+    assert_eq!(application["next_action"]["reason"], "independent report");
+    assert_eq!(
+        application["next_action"]["condition"],
+        "existing authorization"
+    );
+    assert!(
+        state["events"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|event| event["wait"] != "accept-native" || event["kind"] != "progress_stall"),
+        "immediate pre-deadline A stall observed; overdue suppression is not demonstrated"
+    );
     assert_eq!(git(&reviewer_cwd, &["rev-parse", "HEAD"]), a_head);
     assert_eq!(fs::read(reviewer_cwd.join("file")).unwrap(), a_content);
     assert_eq!(fs::read(&reviewer_report_path).unwrap(), report_bytes);
