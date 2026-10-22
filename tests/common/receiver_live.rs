@@ -3737,7 +3737,7 @@ fn recover_submitted_worker(
 }
 
 #[test]
-fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
+fn worker_custody_reacquires_the_same_instance_and_preserves_failure_state() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
     let root = temp.path();
