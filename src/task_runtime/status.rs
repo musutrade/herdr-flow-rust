@@ -387,7 +387,7 @@ mod tests {
             &root,
             "submission.json",
             json!({
-                "message_id":"msg-1","session":"ses-1","model":model,"cwd":cwd,
+                "message_id":"msg1","session":"ses-1","model":model,"cwd":cwd,
                 "phase":"submitted",
                 "context":{
                     "queue_id":"queue-1","wait":"wait-1","binding":binding,
