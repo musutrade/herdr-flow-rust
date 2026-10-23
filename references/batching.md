@@ -71,6 +71,15 @@ publication recheck that members remain released at their handoff without a PR
 or lane. After confirmed landing, the member can resume to finish its original
 acceptance; its delivery receipt still prevents an independent PR or lane.
 
+Newly accepted members carry a stable `receipt_id` in both the lane member and the
+source task's `batch_delivery`. It is created by successful `batch-offer` intake;
+freezing, integration and landing preserve it. Existing records without this field
+are not retroactively assigned an ID. The ID identifies acceptance of that source
+task; it is not a native turn, a transport receipt, publication approval, or proof
+that the next task was claimed. Cross-task claim enforcement is tracked in #112
+and is not implemented by adding this field. Do not treat a `HANDOFF_ACCEPTED`
+message as a substitute for this persisted intake record.
+
 ## Freeze members, integrate, freeze snapshot
 
 `batch-freeze` requires an empty active slot and at least one pending task. It
