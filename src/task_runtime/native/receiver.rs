@@ -27,32 +27,51 @@ pub(super) fn ensure_absent(path: &Path) -> Result<()> {
 /// Exactly one thread/start attempt per runtime. A failed/crashed attempt is
 /// retained, including failures after the native response or guard publication.
 pub fn bootstrap(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    let runtime = started_runtime(env, root)?;
+    let guard = guard_path(env, root, &runtime, spec)?;
+    let _runtime_lock = crate::guard::locked(root)?;
+    let _guard_lock = crate::guard::locked(&guard)?;
+    ensure_fresh(root, &guard)?;
+    let state = validated_state(root, &guard, &runtime, spec)?;
+    reserve_and_create(root, &guard, runtime, state)
+}
+
+fn started_runtime(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let runtime = super::super::verify(env, root)?;
     ensure(
         runtime["adapter"] == "codex",
         "receiver bootstrap requires Codex",
     )?;
     ensure(runtime["phase"] == "started", "runtime is not started")?;
-    let guard = guard_path(env, root, &runtime, spec)?;
-    let _runtime_lock = crate::guard::locked(root)?;
-    let _guard_lock = crate::guard::locked(&guard)?;
+    Ok(runtime)
+}
+
+fn ensure_fresh(root: &Path, guard: &Path) -> Result<()> {
     for name in ["receiver.json", "creation.json", "state.json"] {
         ensure_absent(&root.join(name))?;
     }
     for name in ["state.json", "receiver.json", "creation.json", "watch.json"] {
         ensure_absent(&guard.join(name))?;
     }
+    Ok(())
+}
+
+fn validated_state(root: &Path, guard: &Path, runtime: &J, spec: &J) -> Result<J> {
     // Validate known local preconditions before reserving a native attempt.
     client(root)?;
-    let mut state = initial_state(root, &guard, &runtime, spec);
+    let state = initial_state(root, guard, runtime, spec);
     approval_policy(&state)?;
     required(&state["model"], "id")?;
     required(&state["model"], "providerID")?;
+    Ok(state)
+}
+
+fn reserve_and_create(root: &Path, guard: &Path, runtime: J, mut state: J) -> Result<J> {
     let mut journal = json!({"version":1,"phase":"creating","runtime":runtime,
         "guard_dir":guard,"state":state});
     let path = root.join("receiver.json");
     util::atomic_write_json(&path, &journal)?;
-    match finish(root, &guard, &mut state, &mut journal) {
+    match finish(root, guard, &mut state, &mut journal) {
         Ok(()) => Ok(state),
         Err(error) => {
             journal["phase"] = json!("uncertain");
@@ -76,12 +95,16 @@ fn guard_path(env: &TaskEnvironment, root: &Path, runtime: &J, spec: &J) -> Resu
         guard.is_absolute()
             && guard == resolved
             && root == runtime_root
-            && guard != runtime_root
-            && util::is_relative_to(&guard, &runtime_root)
-            && !crate::task_env::paths_overlap(&guard, &cwd),
+            && guard_inside_runtime(&guard, &runtime_root, &cwd),
         "receiver guard must be a canonical directory below runtime, outside cwd",
     )?;
     Ok(guard)
+}
+
+fn guard_inside_runtime(guard: &Path, root: &Path, cwd: &Path) -> bool {
+    guard != root
+        && util::is_relative_to(guard, root)
+        && !crate::task_env::paths_overlap(guard, cwd)
 }
 
 fn initial_state(root: &Path, guard: &Path, runtime: &J, spec: &J) -> J {

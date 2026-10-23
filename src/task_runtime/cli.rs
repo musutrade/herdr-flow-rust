@@ -41,8 +41,7 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
     match action {
         "prepare" => Ok(json!({"root":prepare(env,&required(spec,"assignment")?)?})),
         "launch" => {
-            let child = launch(env, root, spec)?;
-            Ok(json!({"pid":child.id(),"phase":"started"}))
+            launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }
         "create" => native::create(env, root, spec),
         "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
@@ -158,6 +157,7 @@ mod lifecycle_tests {
             "recover",
             "dispatch",
             "collect",
+            "status",
             "invalid",
         ] {
             assert!(action_run(action, &mut env, &root, &json!({})).is_err());

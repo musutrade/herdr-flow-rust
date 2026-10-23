@@ -692,6 +692,14 @@ fn native_fixture_worker() {
                 );
                 let journal = herdr_flow::util::read_json(&root.join("receiver.json")).unwrap();
                 assert_eq!(journal["phase"], "creating", "intent must precede request");
+                for lock_root in [&root, Path::new(journal["guard_dir"].as_str().unwrap())] {
+                    assert!(
+                        herdr_flow::util::FileLock::acquire(&lock_root.join("guard.lock"), false)
+                            .unwrap()
+                            .is_none(),
+                        "bootstrap must retain both locks during the request"
+                    );
+                }
                 assert!(!root.join("creation.json").exists());
                 if control["mode"] == "disconnect" {
                     break;
