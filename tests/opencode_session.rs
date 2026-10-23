@@ -255,7 +255,7 @@ fn refuses_identity_model_version_busy_and_approval_mismatches() {
         f.remote.lock().unwrap().session = before;
     }
     f.remote.lock().unwrap().version = "2.0.32".into();
-    assert!(adapter.agent().unwrap_err().message.contains("2.0"));
+    assert!(adapter.agent().unwrap_err().message.contains("1.19.x"));
     assert_eq!(f.posts(), 0);
     assert!(receiver_factory(&json!({"adapter":"unsupported"})).is_err());
 }
@@ -710,4 +710,60 @@ fn a_terminal_journal_cannot_be_reused_after_changing_native_model() {
     state["model"]["id"] = json!("other-model");
     f.remote.lock().unwrap().session["model"]["id"] = json!("other-model");
     assert!(SessionAdapter::new(&state).unwrap().reconcile().is_err());
+}
+
+#[test]
+fn patch_versions_are_validated_and_reported_without_widening_the_family() {
+    let f = Fixture::new();
+    let adapter = f.adapter();
+    for version in ["1.19.3", "1.19.4", "1.19.5"] {
+        f.remote.lock().unwrap().version = version.into();
+        let status = adapter.agent().unwrap();
+        assert_eq!(status["server_version"], version);
+        assert_eq!(f.posts(), 0);
+    }
+    for version in [
+        "1.18.9",
+        "1.20.0",
+        "2.0.0",
+        "1.19",
+        "v1.19.4",
+        "1.19.4-rc1",
+        "1.019.4",
+        "1.19.04",
+    ] {
+        f.remote.lock().unwrap().version = version.into();
+        let error = adapter.agent().unwrap_err();
+        assert!(
+            error.message.contains("1.19.x"),
+            "unexpected version rejection for {version}: {error}"
+        );
+        assert_eq!(f.posts(), 0);
+    }
+    let mut state = f.state.clone();
+    state["server_version"] = json!("1.19.4");
+    assert!(SessionAdapter::new(&state).is_ok());
+    for version in ["1.18.9", "1.20.0", "2.0.0", "bad"] {
+        state["server_version"] = json!(version);
+        assert!(SessionAdapter::new(&state).is_err(), "{version}");
+    }
+}
+
+#[test]
+fn health_schema_is_fail_closed() {
+    for health in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"healthy":false,"version":"1.19.4"}),
+        json!({"healthy":true}),
+        json!({"healthy":true,"version":19}),
+        json!({"healthy":true,"version":""}),
+    ] {
+        assert!(session::health_version(&health).is_err(), "{health}");
+    }
+    assert_eq!(
+        session::health_version(&json!({"healthy":true,"version":"1.19.4"})).unwrap(),
+        "1.19.4"
+    );
 }

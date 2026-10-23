@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::watch_service;
 
-const USAGE:&str="Usage: herdr-flow opencode <register|status|dispatch|collect|watch> --state-dir DIR [--spec FILE] [--once|--background] [--ready-fd FD]\nOpenCode 1.19.3 only. register/dispatch require --spec FILE. No automatic rotation.";
+const USAGE:&str="Usage: herdr-flow opencode <register|status|dispatch|collect|watch> --state-dir DIR [--spec FILE] [--once|--background] [--ready-fd FD]\nOpenCode 1.19.x native protocol (baseline 1.19.3). register/dispatch require --spec FILE. No automatic rotation.";
 
 #[derive(Default)]
 struct Args {

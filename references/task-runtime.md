@@ -61,7 +61,7 @@ owned environment. Native processes inherit the environment instance marker.
 Only the configured proxy and certificate environment is forwarded for provider
 connectivity; other inherited runtime/session configuration is cleared.
 
-OpenCode remains pinned to **1.19.3**. Its runtime receives a second Landlock
+OpenCode supports the documented **1.19.x** protocol family at or above the 1.19.3 baseline; later patches are accepted only after live protocol/identity checks and the observed version is persisted. Its runtime receives a second Landlock
 restriction limiting writes to its own runtime root and activity checkout.
 Codex 0.163 also uses a fixed `/tmp/codex-daemon-UID` socket/lock fallback. Its
 server therefore runs through `/usr/bin/bwrap` with a private `/tmp`, private
