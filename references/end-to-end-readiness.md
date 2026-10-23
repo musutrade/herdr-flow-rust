@@ -116,6 +116,31 @@ retry limit was not changed. Unknown/unregistered markerless processes and
 best-effort discovery scans remain outside this guarantee. Dispatch resend rules,
 native approvals and host security configuration are unchanged; #38/#32 stay open.
 
+### Process directory scan failures
+
+Static review at baseline `f21aa26` found that failure to open `/proc` returned
+an empty marker/descendant list and directory iteration errors were discarded.
+Cleanup and the local delivery running-operation check now propagate those
+errors. They do not treat an unavailable or partial directory scan as absence.
+Public diagnostic lists and per-PID marker/parent visibility remain best effort;
+this does not infer ownership from an unreadable unrelated process.
+
+The `task_env::discovery::tests` fixtures inject directory-open `EACCES`, `ENOENT`
+and `EIO`, plus an iterator error after a valid entry. Separate synthetic empty
+and mixed-name scans verify successful enumeration behavior. Cleanup tests have
+no registered child that could independently block deletion: the scan error
+itself must retain the file, roots, saved plan and occupied slots. Once scanning
+recovers, retry completes that same plan.
+
+Delivery tests use a synthetic attempted-delivery journal, a missing local
+endpoint and a counting executor that delegates observation to `Local`.
+A scan error leaves an explicit retry's journal unchanged and records `unknown`
+on reconciliation; the executor receives zero submissions. Once scanning works,
+observation can report the endpoint's absence, but the fixture does not retry
+delivery. These are injected faults and local protocol tests, not a real host
+procfs outage, model task or evidence that a previous request was never sent.
+Dispatch no-resend rules and #38/#32's open status are unchanged.
+
 ## Twenty-round protocol regression
 
 ```sh

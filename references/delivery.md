@@ -152,8 +152,15 @@ and are not used as proof of exit in cleanup.
 The supervisor's `direct_children` snapshot can include unrelated
 tasks and is not used as an ownership or cleanup-blocking claim. Children absent
 from registration and no longer marked remain outside this discovery guarantee.
-Marker and descendant discovery remain best effort; errors while scanning
-unidentified processes are not covered by these known-identity checks.
+Cleanup's marker/descendant scans and local delivery's running-operation scan
+propagate errors opening or enumerating `/proc`; a failed or partial directory
+scan cannot count as an empty scan. Cleanup preserves pending resources. Delivery
+reconciliation records `unknown`, and an explicit retry's fresh observation
+fails before changing the journal to `prepared` or invoking execution.
+The public diagnostic marker list and registration snapshot remain best effort.
+Individual PID marker/parent visibility remains best effort too: an unreadable
+unrelated process is not ownership evidence, and these checks do not establish
+exhaustive discovery of all task processes.
 
 A partially removed environment retries the saved destruction plan; it does
 not need the already removed queue. Completion is returned only after destruction

@@ -753,69 +753,19 @@ pub fn process_has_marker(pid: i32, instance_id: &str) -> bool {
         .any(|entry| entry == needle.as_bytes())
 }
 
-/// Every process that carries the marker for `instance_id`.
+/// Best-effort diagnostic list of visible processes carrying the marker.
+/// Scan failures return an empty list; cleanup and delivery use fallible scans.
 pub fn marked_processes(instance_id: &str) -> Vec<ProcessRecord> {
-    let mut records = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return records;
-    };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<i32>() else {
-            continue;
-        };
-        if process_has_marker(pid, instance_id) {
-            records.push(ProcessRecord {
-                pid,
-                start_time: process_start_time(pid),
-            });
-        }
-    }
-    records.sort_by_key(|record| record.pid);
-    records
+    super::discovery::marked_processes(instance_id).unwrap_or_default()
 }
 
-/// All transitive children of `pid` that are currently visible.
+/// Best-effort registration snapshot of currently visible transitive children.
+/// Cleanup uses a fallible scan instead of treating scan failure as no children.
 pub fn descendants_snapshot(pid: i32) -> Vec<ProcessRecord> {
-    let mut parents = std::collections::BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Ok(child) = name.parse::<i32>() else {
-            continue;
-        };
-        if let Some(parent) = parent_of(child) {
-            parents.insert(child, parent);
-        }
-    }
-
-    let mut found = Vec::new();
-    let mut frontier = vec![pid];
-    while let Some(current) = frontier.pop() {
-        for (child, parent) in &parents {
-            if *parent == current
-                && !found
-                    .iter()
-                    .any(|record: &ProcessRecord| record.pid == *child)
-            {
-                found.push(ProcessRecord {
-                    pid: *child,
-                    start_time: process_start_time(*child),
-                });
-                frontier.push(*child);
-            }
-        }
-    }
-    found
+    super::discovery::descendants_snapshot(pid).unwrap_or_default()
 }
 
-fn parent_of(pid: i32) -> Option<i32> {
+pub(super) fn parent_of(pid: i32) -> Option<i32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // After comm: state ppid pgrp ...
     stat.rsplit_once(')')?
