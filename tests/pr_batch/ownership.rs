@@ -2,6 +2,9 @@
 use super::*;
 use herdr_flow::{progress, queue};
 
+#[path = "target_slot.rs"]
+mod target_slot;
+
 fn begin(s: &mut J) -> herdr_flow::Result<J> {
     let spec = json!({"task":"o/r#1", "state_version":s["tasks"]["o/r#1"]["state_version"],
         "authorization":"publish"});
@@ -183,7 +186,7 @@ fn retained_intent_blocks_duplicates_even_after_cancel_release_and_landing() {
 }
 
 #[test]
-fn distinct_branches_and_disjoint_worktrees_remain_parallel() {
+fn distinct_branches_keep_development_parallel_but_serialize_target_publication() {
     let repo = Repo::new();
     let separate = Repo::new();
     let mut s = prepared(&repo);
@@ -196,7 +199,12 @@ fn distinct_branches_and_disjoint_worktrees_remain_parallel() {
     s["tasks"]["other"]["writer"] = writer(&separate.root, "same-session");
     s["tasks"]["o/r#1"] = task(&repo);
     pr::prepare(&mut s, &prepare_spec(&repo, 1), 11.0).unwrap();
-    assert!(begin(&mut s).is_ok());
+    let before = s.clone();
+    assert!(begin(&mut s)
+        .unwrap_err()
+        .to_string()
+        .contains("publication target is occupied"));
+    assert_eq!(s, before);
     let third = Repo::new();
     assert!(reserve(&s, &third.root, "third").is_ok());
     // Own-task repair reservation is not a foreign ownership conflict.
