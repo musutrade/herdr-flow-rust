@@ -70,6 +70,27 @@ unregistered markerless orphans, completeness of `/proc` observations, or
 outside-root cache/session ownership. Dispatch and delivery replay policies are
 unchanged; #38/#32 remain open.
 
+### Recorded descendants after parent exit
+
+At baseline `51b52f7`, both `registered_orphan_blocks_destroy_after_parent_exit`
+and `registered_orphan_blocks_quiesce_after_parent_exit` failed: the parent had
+exited, but a descendant captured during registration was still live, in its own
+session, without the task marker, and holding an open file. Both APIs ignored
+that recorded descendant. These are real local process fixtures, not model runs
+or mutated cleanup journals.
+
+Both paths now check the parent and its saved descendant identities. Failed
+destruction and repeated cleanup keep the full process registration and pending
+resources; quiescence refuses to allow shared-record cleanup to proceed. The
+tests release their own orphan through pipe EOF, then verify that the original
+cleanup plan finishes and removes owned resources while preserving the external
+repository. An additional unit check covers mismatched start times, live legacy
+records without start times, and exclusion of unrelated supervisor children.
+
+This adds no signalling authority. Discovery of children not recorded at
+registration, marker removal by unregistered children, and incomplete `/proc`
+observations remain separate limitations. #38/#32 remain open.
+
 ## Twenty-round protocol regression
 
 ```sh

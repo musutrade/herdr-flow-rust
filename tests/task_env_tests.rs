@@ -746,6 +746,148 @@ fn live_registered_writer_blocks_file_worktree_and_root_cleanup_until_exit() {
     assert!(!recover_interrupted(&env.task_id).unwrap());
 }
 
+struct RegisteredOrphan {
+    parent: MarkerlessWriter,
+    input: Option<std::process::ChildStdin>,
+    descendant: Option<ProcessRecord>,
+}
+
+impl RegisteredOrphan {
+    fn release(&mut self) -> bool {
+        // Closing this fixture-owned pipe lets the orphan exit without
+        // signalling a numeric PID or relying on a pathname cleanup removed.
+        self.input.take();
+        for _ in 0..1000 {
+            if !self
+                .descendant
+                .as_ref()
+                .is_some_and(process_record_is_alive)
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+}
+
+impl Drop for RegisteredOrphan {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn recorded_orphan(env: &mut TaskEnvironment, file: &Path) -> RegisteredOrphan {
+    let pidfile = env.temp_root.join("orphan.pid");
+    let parent_exit = env.temp_root.join("parent-exit");
+    let script = r#"
+        exec 4<&0
+        setsid env -u HERDR_TASK_ENV_INSTANCE sh -c '
+            exec 3<"$1"
+            echo $$ > "$2"
+            read -r finish <&4
+        ' herdr-test "$1" "$2" &
+        while [ ! -f "$3" ]; do sleep 0.01; done
+    "#;
+    let mut parent = MarkerlessWriter(
+        env.command("sh")
+            .args(["-c", script, "herdr-test"])
+            .arg(file)
+            .arg(&pidfile)
+            .arg(&parent_exit)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let input = parent.0.stdin.take();
+    let mut fixture = RegisteredOrphan {
+        parent,
+        input,
+        descendant: None,
+    };
+    let pid = wait_for_pid_file(&pidfile);
+    let record = ProcessRecord {
+        pid,
+        start_time: process_start_time(pid),
+    };
+    assert!(record.start_time.is_some());
+    fixture.descendant = Some(record.clone());
+    env.register_process(fixture.parent.0.id() as i32).unwrap();
+    assert!(env.child_processes[0].descendants.contains(&record));
+    fs::write(parent_exit, "exit").unwrap();
+    assert!(fixture.parent.0.wait().unwrap().success());
+    assert!(!process_is_alive(&env.child_processes[0]));
+    assert!(process_record_is_alive(&record));
+    assert!(!process_has_marker(pid, &env.instance_id));
+    fixture
+}
+
+fn check_recorded_orphan_cleanup(quiesce_first: bool) {
+    let harness = Harness::new();
+    let mut env = harness.create("recorded-orphan");
+    let repo = harness.path().join("repo");
+    let worktree = env.workspace_root.join("linked");
+    cleanup_fixture_worktree(&repo, &worktree);
+    env.register_worktree(&worktree).unwrap();
+    let file = worktree.join("held.txt");
+    fs::write(&file, "owned payload").unwrap();
+    env.register_file(&file).unwrap();
+    let mut orphan = recorded_orphan(&mut env, &file);
+    let fd = PathBuf::from(format!(
+        "/proc/{}/fd/3",
+        orphan.descendant.as_ref().unwrap().pid
+    ));
+    let registration = serde_json::to_value(&env.child_processes[0]).unwrap();
+
+    if quiesce_first {
+        assert!(
+            quiesce_environment(&mut env).is_err(),
+            "quiesce ignored the recorded orphan"
+        );
+        assert_eq!(occupied_slots().unwrap(), 1);
+        assert!(!cleanup_state_path(&env.task_id).unwrap().exists());
+        assert_eq!(fs::read_link(&fd).unwrap(), file);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "owned payload");
+    }
+    assert!(
+        destroy_environment(&env).is_err(),
+        "destroy ignored the recorded orphan"
+    );
+    assert_writer_blocked_cleanup(&env, &file, 1);
+    assert_eq!(fs::read_link(&fd).unwrap(), file);
+    assert!(worktree_is_registered(&repo, &worktree));
+    assert!(cleanup_failed_environment(&env.task_id).is_err());
+    assert_writer_blocked_cleanup(&env, &file, 2);
+    let plan: serde_json::Value =
+        serde_json::from_slice(&fs::read(cleanup_state_path(&env.task_id).unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(plan["pending_processes"][0], registration);
+    assert_eq!(fs::read_link(&fd).unwrap(), file);
+    assert!(
+        orphan.release(),
+        "fixture orphan did not exit after pipe EOF"
+    );
+    cleanup_failed_environment(&env.task_id).unwrap();
+    assert!(!env.workspace_root.exists());
+    assert!(!env.temp_root.exists());
+    assert!(!worktree_is_registered(&repo, &worktree));
+    assert!(repo.join(".git").is_dir());
+    assert!(!env.state_file().exists());
+    assert!(!cleanup_state_path(&env.task_id).unwrap().exists());
+    assert!(!is_registered(&env.task_id).unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+}
+
+#[test]
+fn registered_orphan_blocks_destroy_after_parent_exit() {
+    check_recorded_orphan_cleanup(false);
+}
+
+#[test]
+fn registered_orphan_blocks_quiesce_after_parent_exit() {
+    check_recorded_orphan_cleanup(true);
+}
+
 #[test]
 fn destroying_one_environment_leaves_anothers_orphan_alone() {
     let harness = Harness::new();
