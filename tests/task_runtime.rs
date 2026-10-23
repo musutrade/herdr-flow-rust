@@ -773,6 +773,17 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
                 let mut stale = herdr_flow::util::read_json(&root.join("state.json"))?;
                 stale["server_version"] = json!("1.19.3");
                 herdr_flow::util::atomic_write_json(&root.join("state.json"), &stale)?;
+                let saved_state = fs::read(root.join("state.json"))?;
+                let saved_journal = fs::read(root.join("creation.json"))?;
+                let original_queue = queue::load_queue(&q)?;
+                let mut mismatched = original_queue.clone();
+                mismatched["id"] = json!("other-queue");
+                queue::save(&q, &mut mismatched)?;
+                assert!(task_runtime::native::recover(&env, &root).is_err());
+                assert_eq!(fs::read(root.join("state.json"))?, saved_state);
+                assert_eq!(fs::read(root.join("creation.json"))?, saved_journal);
+                let mut original_queue = original_queue;
+                queue::save(&q, &mut original_queue)?;
             }
             let recovered = task_runtime::native::recover(&env, &root)?;
             if adapter == "opencode" {

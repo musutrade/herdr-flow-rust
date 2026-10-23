@@ -1,7 +1,8 @@
 //! OpenCode 1.19.x native HTTP session binding and durable submissions.
 //!
 //! The compatibility baseline is 1.19.3; later 1.19.x patches are accepted only
-//! after live health/session/cwd/model/pending/status checks. Other protocol
+//! after health and session identity checks; dispatch additionally checks
+//! pending requests and session status. Other protocol
 //! families remain unsupported.
 use std::path::{Path, PathBuf};
 

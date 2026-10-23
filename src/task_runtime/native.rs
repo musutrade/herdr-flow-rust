@@ -301,18 +301,27 @@ pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
     let mut state = recovered_state(root, &journal)?;
-    if state["adapter"] == "opencode" {
-        let observed = SessionAdapter::new(&state)?.server_version()?;
-        state["server_version"] = json!(observed);
-        util::atomic_write_json(&root.join("state.json"), &state)?;
-    }
-    let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
+    recover_binding(env, root, &journal, &mut state)?;
+    Ok(state)
+}
+
+fn recover_binding(env: &TaskEnvironment, root: &Path, journal: &J, state: &mut J) -> Result<()> {
+    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
     crate::task_env::validate_path(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let mut q = queue::load_queue(&queue_root)?;
-    verify_queue(&q, &journal, &state)?;
-    bind_created(root, &mut q, &journal, &state)?;
-    Ok(state)
+    verify_queue(&q, journal, state)?;
+    bind_created(root, &mut q, journal, state)?;
+    refresh_observed_version(root, state)
+}
+
+fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
+    if state["adapter"] == "opencode" {
+        let observed = SessionAdapter::new(state)?.server_version()?;
+        state["server_version"] = json!(observed);
+        util::atomic_write_json(&root.join("state.json"), state)?;
+    }
+    Ok(())
 }
 
 fn recovered_state(root: &Path, journal: &J) -> Result<J> {
