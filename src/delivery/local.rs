@@ -175,7 +175,7 @@ fn writer_roots(intent: &J) -> Result<Vec<std::path::PathBuf>> {
 fn operation_running(intent: &J) -> Result<bool> {
     let instance = field(intent, "instance")?;
     let marker = format!("{OPERATION}={}", field(intent, "id")?);
-    for process in crate::task_env::marked_processes(&instance) {
+    for process in crate::task_env::discovery::marked_processes(&instance)? {
         if operation_matches(process.pid, marker.as_bytes())? {
             return Ok(true);
         }

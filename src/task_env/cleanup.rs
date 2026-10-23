@@ -39,9 +39,9 @@ use crate::error::{FlowError, Result};
 use crate::util;
 
 use super::env::{
-    clear_directory, descendants_snapshot, kind_at, open_beneath, open_child_dir,
-    open_dir_nofollow, unlink_at, unlink_at_dir, EntryKind, EnvironmentState, ProcessRecord,
-    RegisteredProcess, RootIdentity, TaskEnvironment, WorktreeRegistration,
+    clear_directory, kind_at, open_beneath, open_child_dir, open_dir_nofollow, unlink_at,
+    unlink_at_dir, EntryKind, EnvironmentState, ProcessRecord, RegisteredProcess, RootIdentity,
+    TaskEnvironment, WorktreeRegistration,
 };
 use super::registry;
 
@@ -545,11 +545,7 @@ fn finish_cleanup(state: &mut CleanupState, errors: Vec<String>) -> Result<()> {
 /// whole set first, so the loop converges instead of racing.
 fn terminate_marked(instance_id: &str) -> Result<()> {
     for _ in 0..8 {
-        let mut targets = super::env::marked_processes(instance_id);
-        for record in targets.clone() {
-            targets.extend(descendants_snapshot(record.pid));
-        }
-        retain_live_records(&mut targets)?;
+        let mut targets = live_marked_targets(instance_id)?;
         if targets.is_empty() {
             return Ok(());
         }
@@ -558,8 +554,17 @@ fn terminate_marked(instance_id: &str) -> Result<()> {
     ensure_no_marked(instance_id)
 }
 
+fn live_marked_targets(instance_id: &str) -> Result<Vec<ProcessRecord>> {
+    let mut targets = super::discovery::marked_processes(instance_id)?;
+    for record in targets.clone() {
+        targets.extend(super::discovery::descendants_snapshot(record.pid)?);
+    }
+    retain_live_records(&mut targets)?;
+    Ok(targets)
+}
+
 fn ensure_no_marked(instance_id: &str) -> Result<()> {
-    let mut remaining = super::env::marked_processes(instance_id);
+    let mut remaining = super::discovery::marked_processes(instance_id)?;
     retain_live_records(&mut remaining)?;
     if remaining.is_empty() {
         Ok(())

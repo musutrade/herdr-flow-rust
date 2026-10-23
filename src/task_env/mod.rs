@@ -9,6 +9,7 @@
 
 mod boundary;
 mod cleanup;
+pub(crate) mod discovery;
 mod env;
 pub(crate) use env::PreparedConfinement;
 mod registry;
