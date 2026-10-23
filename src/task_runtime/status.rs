@@ -364,7 +364,7 @@ fn runtime_identity(runtime: &J, creation: Option<&J>, state: Option<&J>) -> J {
     let runtime_port = runtime["port"].as_u64().filter(|port| valid_port(*port));
     let creation_port = field(creation, &["runtime", "port"])
         .and_then(J::as_u64)
-        .filter(valid_port);
+        .filter(|port| valid_port(*port));
     let port = match (runtime_port, creation_port) {
         (Some(runtime), Some(creation)) if runtime == creation => "match",
         (Some(_), Some(_)) => "mismatch",
@@ -435,32 +435,63 @@ fn operator_action(
     }
 }
 
-/// Observe one runtime's journals. The caller owns the environment; this
-/// routine never sends, collects, retries, creates sessions or deletes data.
-pub(crate) fn observe(root: &Path, runtime: &J) -> J {
-    let adapter = runtime["adapter"].as_str().unwrap_or_default();
-    if adapter != "opencode" {
-        let adapter = if adapter.is_empty() {
-            J::Null
-        } else {
-            selected(Some(adapter), 32)
-        };
-        return json!({
-            "schema":1,
-            "scope":"runtime_journal_snapshot",
-            "adapter":adapter,
-            "supported":false,
-            "markers":"not_sampled",
-            "guard":"not_sampled",
-            "consistency":"not_sampled",
-            "identity":"not_sampled",
-            "submission_evidence":"not_sampled",
-            "collect_available":false,
-            "safe_to_retry":false,
-            "operator_action":"unsupported_adapter"
-        });
-    }
+fn known_submission_phase(submission_phase: &str) -> bool {
+    matches!(
+        submission_phase,
+        "sending"
+            | "submitted"
+            | "running"
+            | "needs_attention"
+            | "complete"
+            | "failed"
+            | "decision"
+            | "signalled"
+    )
+}
 
+fn unsupported_status(adapter: &str) -> J {
+    let adapter = if adapter.is_empty() {
+        J::Null
+    } else {
+        selected(Some(adapter), 32)
+    };
+    json!({
+        "schema":1,
+        "scope":"runtime_journal_snapshot",
+        "adapter":adapter,
+        "supported":false,
+        "markers":"not_sampled",
+        "guard":"not_sampled",
+        "consistency":"not_sampled",
+        "identity":"not_sampled",
+        "submission_evidence":"not_sampled",
+        "collect_available":false,
+        "safe_to_retry":false,
+        "operator_action":"unsupported_adapter"
+    })
+}
+
+fn collect_identity_valid(
+    identity_match: bool,
+    creation_phase: &str,
+    dispatch_phase_known: bool,
+    submission_phase_known: bool,
+    message_id_known: bool,
+) -> bool {
+    identity_match
+        && creation_phase == "bound"
+        && dispatch_phase_known
+        && submission_phase_known
+        && message_id_known
+}
+
+struct GuardObservation {
+    guard: &'static str,
+    consistency: &'static str,
+    lock: Option<util::FileLock>,
+}
+
+fn probe_guard(root: &Path) -> GuardObservation {
     let probe = crate::guard::probe(root);
     let (guard, consistency, guard_lock) = match probe {
         Ok(LockProbe::Acquired(lock)) => ("acquired", "sampled_locked_guard", Some(lock)),
@@ -468,6 +499,27 @@ pub(crate) fn observe(root: &Path, runtime: &J) -> J {
         Ok(LockProbe::Missing) => ("missing", "guard_missing", None),
         Err(_) => ("unknown", "guard_unknown", None),
     };
+
+    GuardObservation {
+        guard,
+        consistency,
+        lock: guard_lock,
+    }
+}
+
+/// Observe one runtime's journals. The caller owns the environment; this
+/// routine never sends, collects, retries, creates sessions or deletes data.
+pub(crate) fn observe(root: &Path, runtime: &J) -> J {
+    let adapter = runtime["adapter"].as_str().unwrap_or_default();
+    if adapter != "opencode" {
+        return unsupported_status(adapter);
+    }
+
+    let GuardObservation {
+        guard,
+        consistency,
+        lock: guard_lock,
+    } = probe_guard(root);
 
     let creation = record(root, "creation.json");
     let state = record(root, "state.json");
@@ -525,27 +577,19 @@ pub(crate) fn observe(root: &Path, runtime: &J) -> J {
     .all(|key| identity[*key] == "match");
     let creation_phase = text(creation_value, &["phase"]).unwrap_or("invalid");
     let submission_phase = text(submission_value, &["phase"]).unwrap_or("invalid");
-    let submission_phase_known = matches!(
-        submission_phase,
-        "sending"
-            | "submitted"
-            | "running"
-            | "needs_attention"
-            | "complete"
-            | "failed"
-            | "decision"
-            | "signalled"
-    );
+    let submission_phase_known = known_submission_phase(submission_phase);
     let dispatch_phase_known = text(dispatch_value, &["phase"]) == Some("sending");
     let message_id = text(submission_value, &["message_id"]);
     let message_id_known = message_id.is_some_and(valid_message_id);
     let native_terminal = is_native_terminal(submission_phase);
     let collection_signalled = submission_phase == "signalled";
-    let exact = identity_match
-        && creation_phase == "bound"
-        && dispatch_phase_known
-        && submission_phase_known
-        && message_id_known;
+    let exact = collect_identity_valid(
+        identity_match,
+        creation_phase,
+        dispatch_phase_known,
+        submission_phase_known,
+        message_id_known,
+    );
     let collect_available =
         guard == "acquired" && submission.marker() == "present" && exact && !collection_signalled;
     let submission_evidence = match submission.marker() {
@@ -961,9 +1005,8 @@ mod tests {
         let _env_root = crate::task_env::test_env_root(&temp.path().join("registry"));
         let root = temp.path().join("work");
         let tmp = temp.path().join("tmp");
-        let mut env =
-            crate::task_env::create_environment("dispatch-status-owner", &root, vec![], &tmp)
-                .unwrap();
+        let env = crate::task_env::create_environment("dispatch-status-owner", &root, vec![], &tmp)
+            .unwrap();
         env.release_ownership();
         let error = status(&env, &root).unwrap_err();
         assert_eq!(error.kind, crate::error::ErrorKind::Guard);

@@ -363,6 +363,16 @@ impl FileLock {
 /// Missing is explicit and is never reported as free. Symlinks, non-regular
 /// files and open/validation failures are returned as errors.
 pub fn probe_existing_lock(path: &Path) -> Result<LockProbe> {
+    let Some(file) = open_existing_lock(path)? else {
+        return Ok(LockProbe::Missing);
+    };
+    match FileLock::from_file(file, false)? {
+        Some(lock) => Ok(LockProbe::Acquired(lock)),
+        None => Ok(LockProbe::Busy),
+    }
+}
+
+fn open_existing_lock(path: &Path) -> Result<Option<File>> {
     let parent = path
         .parent()
         .ok_or_else(|| FlowError::io("lock has no parent"))?;
@@ -377,9 +387,7 @@ pub fn probe_existing_lock(path: &Path) -> Result<LockProbe> {
         .open(secure::anchor(&directory).join(name))
     {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LockProbe::Missing)
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(FlowError::io(format!(
                 "cannot probe existing lock: {error}"
@@ -387,10 +395,7 @@ pub fn probe_existing_lock(path: &Path) -> Result<LockProbe> {
         }
     };
     validate_state_file(&file)?;
-    match FileLock::from_file(file, false)? {
-        Some(lock) => Ok(LockProbe::Acquired(lock)),
-        None => Ok(LockProbe::Busy),
-    }
+    Ok(Some(file))
 }
 
 impl Drop for FileLock {
@@ -544,11 +549,15 @@ pub fn read_state_json_bounded_if_exists(
         Err(error) => return Err(error.into()),
     };
     validate_state_file(&file)?;
+    read_bounded_json(&mut file, limit).map(Some)
+}
+
+fn read_bounded_json(file: &mut File, limit: usize) -> Result<Value> {
     let bounded = limit
         .checked_add(1)
         .ok_or_else(|| FlowError::guard("bounded state read limit overflow"))?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
+    Read::by_ref(file)
         .take(bounded as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
@@ -557,7 +566,6 @@ pub fn read_state_json_bounded_if_exists(
         ));
     }
     serde_json::from_slice(&bytes)
-        .map(Some)
         .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))
 }
 
