@@ -12,6 +12,8 @@ use std::{
 };
 pub mod broker;
 pub mod cli;
+mod launcher;
+pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
 pub mod status;
 
@@ -205,11 +207,16 @@ fn server_command(
     spec: &J,
 ) -> Result<Command> {
     if spec["adapter"] != "codex" {
+        ensure(
+            spec.get("namespace_launcher").is_none(),
+            "namespace launcher is only supported for Codex",
+        )?;
         return command(env, root, binary);
     }
     // Codex 0.163 uses an absolute /tmp/codex-daemon-UID fallback even with
     // CODEX_HOME/TMPDIR/XDG_RUNTIME_DIR redirected. A private mount is required.
-    let mut cmd = namespace_environment(env, root)?;
+    let launcher = launcher::resolve(spec)?;
+    let mut cmd = namespace_environment(env, root, &launcher)?;
     cmd.args([
         "--unshare-user",
         "--ro-bind",
@@ -234,13 +241,13 @@ fn server_command(
     Ok(cmd)
 }
 
-fn namespace_environment(env: &TaskEnvironment, root: &Path) -> Result<Command> {
+fn namespace_environment(env: &TaskEnvironment, root: &Path, launcher: &Path) -> Result<Command> {
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "runtime requires active environment",
     )?;
     crate::task_env::validate_path(env, root)?;
-    configure_environment(env, root, env.namespace_command())
+    configure_environment(env, root, env.namespace_command(launcher))
 }
 
 fn configure_server(cmd: &mut Command, root: &Path, spec: &J, adapter: &str) -> Result<()> {

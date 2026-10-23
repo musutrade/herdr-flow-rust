@@ -70,6 +70,17 @@ activity checkout are writable. Bubblewrap and usable unprivileged namespaces
 are required. Missing confinement fails; no shared-directory fallback is used.
 `/dev/null` is an allowed nonpersistent sink in the Landlock command path.
 
+A Codex launch spec can explicitly select an administrator-installed outer
+launcher through `namespace_launcher: {"path": "/absolute/path/to/bwrap",
+"sha256": "<64 hex digits>"}`. Its canonical path and parents must be root-owned
+and not group/world writable; the executable digest is checked before launch.
+The operator must authorize that launcher's host security profile for this use.
+This is a trusted launcher input, not arbitrary worker configuration. The default
+remains `/usr/bin/bwrap`; invalid selections fail without fallback. The selection
+is persisted in `runtime.json`. Herdr installs no binary or security profile.
+All existing outer mount arguments, native approval policies and managed network
+requirements remain in effect. OpenCode rejects this Codex-only option.
+
 A task-owned Codex broker retains the original native connection, preserving a
 fresh thread before its first turn. It records exact-thread turn events and
 pending native approvals without answering approvals. Its request surface is
@@ -147,17 +158,22 @@ are the only supported policies. This does not answer pending requests or change
 a user's settings. A native command that needs approval stays blocked for explicit
 handling.
 
-The Codex app-server is itself started through the outer `/usr/bin/bwrap` task
-boundary. On the tested host, a single outer user namespace succeeds but the
-Codex/bootstrap invocation that needs a nested user namespace fails before any
-model turn (observed live1 attempt, 24.80s). The mixed preflight now reproduces
-that nested namespace probe with a bounded child and fails explicitly instead of
-treating an unsupported host as success. A secure fix without weakening the
-runtime would require either a host that permits nested unprivileged user
-namespaces or a reviewed product bootstrap that lets Codex use the outer task
-sandbox as authoritative while suppressing only its redundant inner bwrap.
-Disabling the sandbox, removing the outer boundary, adding CAP_SYS_ADMIN, or
-changing sysctl/AppArmor/global policies is not an acceptable workaround.
+The original mixed attempt failed before model work. Subsequent stage probes
+showed that initialize and empty thread creation succeed: the first reproduced
+native failure was command execution. `externalSandbox` was parsed correctly,
+but managed network requirements still selected the inner system bwrap. This
+host's `unpriv_bwrap` AppArmor profile denies capabilities to descendants of
+`/usr/bin/bwrap`, including those needed by the inner namespace. Skipping that
+inner sandbox would remove a required network boundary and is not supported.
+
+For this host the operator authorized reuse of an existing dedicated outer
+launcher; no AppArmor, sysctl, global Codex or proxy setting was changed. See
+[startup adaptation](../docs/codex-startup-adaptation.md) for the pinned identity
+and evidence. The mixed test accepts `HERDR_LIVE_CODEX_NAMESPACE_LAUNCHER` as the
+same JSON object. Its bounded preflight uses the selected launcher and private
+`/dev` and `/proc`, matching the production bootstrap. Socket presence checks
+resolve the private `/tmp` fallback rather than testing its host-visible alias.
+Socket presence alone does not establish protocol readiness or submission.
 
 Formal reviewer reports and their four continuation outcomes use the
 [independent acceptance protocol](independent-acceptance.md). Native collectors

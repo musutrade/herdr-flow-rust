@@ -587,19 +587,18 @@ proof, a twenty-task campaign, or evidence of global-cache absence; a task-owned
 Codex receiver/session bootstrap is not provided by this change. #38/#32 remain
 OPEN.
 
-Codex mixed live attempt1 failed before model work at 24.80s because the Codex
-app-server could not create a nested user namespace under the task-owned outer
-bubblewrap boundary. A single-bwrap probe succeeded while the reproduced nested
-probe failed; this is retained as a host/bootstrap limitation, not a model or
-product-success claim. The mixed test now runs a bounded nested-userns preflight
-and fails explicitly on unsupported hosts; it does not skip or report success.
-
-Primary verification of the preflight rejected this host in 0.03s before model
-startup. The test is still unproven end to end here. Current app-server startup
-has no verified external-sandbox bootstrap option that preserves native approval
-policy; turn-level externalSandbox does not prevent the observed startup probe.
-A supported host or separately reviewed upstream/product bootstrap is required.
-No host security settings, approvals or outer task confinement were changed.
+The historical first Codex mixed attempt failed before model work (24.80s).
+Later stage probes distinguished socket presence, initialize, empty thread
+creation and command execution. The reproduced namespace failure occurs in the
+command path: managed network requirements retain the inner bwrap even with
+externalSandbox. The host AppArmor profile blocks this nested use of the default
+outer launcher. The operator-authorized dedicated outer launcher is selected
+explicitly with a pinned digest; native approvals and both boundaries remain.
+The old preflight also lacked private /proc, and the mixed test incorrectly
+followed the private /tmp socket alias in the host namespace. Both observations
+now match the real startup path. See the [current adaptation and verification
+record](../docs/codex-startup-adaptation.md). Historical failures remain failures;
+new passing evidence must be attributed to its actual version and launch path.
 
 ## Native same-session ACK/stall recovery
 
