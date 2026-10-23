@@ -84,12 +84,43 @@ thread/turn 策略、原生审批 broker、managed network、dispatch 行为不�
 
 ## 本机接入
 
+### 首次安装（历史记录）
+
 在已合并主分支 `2512816` 上执行 `cargo build --release --locked` 后，
 已将产物安装为 `/home/gem/.local/bin/herdr-flow`；安装前该命令不存在。
 安装产物 SHA-256 为
 `5906a4f434fe7f8c4eb99cb425798e825824f335dff74fe0ca013fe0d8a359f0`。
 安装复制摘要一致，`herdr-flow task-runtime --help` 成功；这是命令入口检查，
 不算新增模型闭环或审批验证。现有 `herdr`、旧技能入口与常驻服务保持原状。
+
+### 当前安装：2026-10-23 回收修复更新
+
+PR #105–#108 已合并，覆盖进程停止失败时保留资源、父进程退出后的已登记
+后代、已知进程观察错误，以及 `/proc` 目录扫描错误的传播。已核验 PR #108
+发布提交 `fa417f11df4ff545d8463f331f391c972365e991` 和合并提交
+`1a1f1015ccc7fb574ae0a40d3594b79d44670238` 对应的 Rust checks、CRAP gate、
+Dependency audit 共六次 CI，均成功。
+
+从该合并提交的干净工作区，以 Rust `1.99.1` 执行
+`cargo build --release --locked`，构建在 2 分 18 秒完成。产物已原子替换
+`/home/gem/.local/bin/herdr-flow`，保持原有 `0755` 权限。当前安装 SHA-256：
+
+```text
+5c184bd5a069a7a21fed37deeb3e6804b9eef85d911ddd8624afbdb8d086d43e
+```
+
+替换前已核对旧文件身份及上述首次安装摘要，并保留一份本机回退副本；
+替换后确认安装摘要与构建产物一致。候选产物和安装后的命令均通过
+`--version`、`task-runtime --help`、`delivery --help`，退出码均为 0。
+`--version` 仍显示包版本 `1.0.0`，不能单独证明源码提交；安装来源由合并
+提交与二进制摘要共同标识。
+
+这些检查只证明构建、安装一致性及命令入口可用；没有新增真实模型闭环或
+原生审批验证。启动器摘要仍与下方显式任务配置一致，Codex/OpenCode、
+原生审批、代理、全局安全配置和常驻服务均未改动。进程发现仍有文档所述
+限制；不确定 dispatch 继续禁止重发，#38/#32 保持开放。
+
+### 任务配置
 
 每个新任务先按 [task-runtime](../references/task-runtime.md) 注册环境和活动，
 执行 prepare 并在私有 runtime 中准备显式选择的配置。将下列结构并入该任务
