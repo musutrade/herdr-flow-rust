@@ -101,14 +101,24 @@ fn native_driver_retries_busy_only_before_a_creation_or_dispatch_journal() {
 }
 
 pub(super) fn require_nested_userns() {
-    let child = std::process::Command::new("bwrap")
+    let selection = codex_namespace_launcher();
+    let mut spec = json!({});
+    if let Some(selection) = selection {
+        spec["namespace_launcher"] = selection;
+    }
+    let launcher = task_runtime::codex_namespace_launcher(&spec).unwrap();
+    let child = std::process::Command::new(launcher)
         .args([
             "--unshare-user",
             "--ro-bind",
             "/",
             "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
             "--",
-            "bwrap",
+            "/usr/bin/bwrap",
             "--unshare-user",
             "--ro-bind",
             "/",
@@ -137,6 +147,12 @@ pub(super) fn require_nested_userns() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+fn codex_namespace_launcher() -> Option<J> {
+    std::env::var("HERDR_LIVE_CODEX_NAMESPACE_LAUNCHER")
+        .ok()
+        .map(|value| serde_json::from_str(&value).expect("namespace launcher JSON"))
 }
 
 struct NativeChild {
@@ -416,7 +432,7 @@ pub(super) fn native_codex(
     }
     let binary = std::env::var("HERDR_LIVE_CODEX_BINARY").unwrap();
     let model: J = serde_json::from_str(&std::env::var("HERDR_LIVE_CODEX_MODEL").unwrap()).unwrap();
-    let spec = json!({
+    let mut spec = json!({
         "adapter":"codex",
         "approval_policy":"on-request",
         "driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
@@ -424,9 +440,12 @@ pub(super) fn native_codex(
         "cwd":cwd,
         "model":model
     });
+    if let Some(launcher) = codex_namespace_launcher() {
+        spec["namespace_launcher"] = launcher;
+    }
     let mut child = NativeChild::new(task_runtime::launch(env, root, &spec).unwrap());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !root.join("server.sock").exists() {
+    while !task_runtime::native::socket_present(root) {
         assert!(
             child.child_mut().try_wait().unwrap().is_none(),
             "Codex app-server exited before socket readiness"

@@ -218,8 +218,8 @@ impl TaskEnvironment {
 
     /// Trusted namespace bootstrap only: bwrap must write uid_map before its
     /// read-only mount policy can take effect. Never execute an agent directly.
-    pub(crate) fn namespace_command(&self) -> Command {
-        self.process_command("/usr/bin/bwrap", false)
+    pub(crate) fn namespace_command(&self, launcher: &Path) -> Command {
+        self.process_command(launcher, false)
     }
 
     fn process_command(&self, program: impl AsRef<OsStr>, confine: bool) -> Command {

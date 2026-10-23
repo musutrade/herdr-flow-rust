@@ -190,6 +190,15 @@ fn client(root: &Path) -> Result<NativeClient> {
     })
 }
 
+/// Observe the task-owned socket entry, resolving Codex's private /tmp alias.
+/// This proves only socket presence, not protocol readiness or delivery.
+pub fn socket_present(root: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    native_socket(root)
+        .and_then(|path| std::fs::metadata(path).map_err(Into::into))
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
 fn native_socket(root: &Path) -> Result<PathBuf> {
     let socket = root.join("server.sock");
     if !std::fs::symlink_metadata(&socket)?.file_type().is_symlink() {
@@ -842,16 +851,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let target = root.join("tmp/codex-daemon-1000");
+        assert!(!socket_present(root));
         std::fs::create_dir_all(&target).unwrap();
         let _socket = UnixListener::bind(target.join("socket")).unwrap();
         symlink("/tmp/codex-daemon-1000/socket", root.join("server.sock")).unwrap();
         assert_eq!(native_socket(root).unwrap(), target.join("socket"));
+        assert!(socket_present(root));
         assert!(direct_client(root).is_ok());
         std::fs::remove_file(root.join("server.sock")).unwrap();
         symlink("/tmp/../outside", root.join("server.sock")).unwrap();
         assert!(native_socket(root).is_err());
+        assert!(!socket_present(root));
         std::fs::remove_file(root.join("server.sock")).unwrap();
         symlink("/outside", root.join("server.sock")).unwrap();
         assert!(native_socket(root).is_err());
+        assert!(!socket_present(root));
+        std::fs::remove_file(root.join("server.sock")).unwrap();
+        std::fs::write(root.join("server.sock"), "not a socket").unwrap();
+        assert!(!socket_present(root));
     }
 }

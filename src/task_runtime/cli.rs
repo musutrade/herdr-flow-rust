@@ -127,6 +127,29 @@ mod lifecycle_tests {
         // Building the command is independent of host bwrap availability;
         // spawning it fails closed if the executable/namespaces are unavailable.
         assert!(namespace.is_ok());
+        let namespace = namespace.unwrap();
+        let launcher = std::fs::canonicalize("/bin/true").unwrap();
+        let digest = crate::util::pyjson::sha256_hex(&std::fs::read(&launcher).unwrap());
+        let mut spec = json!({"adapter":"codex", "binary":"/bin/true",
+            "cwd":env.workspace_root, "namespace_launcher":{
+            "path":launcher,"sha256":digest
+        }});
+        let selected = super::super::server_command(
+            &env,
+            &root,
+            &env.workspace_root,
+            Path::new("/bin/true"),
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(selected.get_program(), launcher);
+        assert_eq!(
+            selected.get_args().collect::<Vec<_>>(),
+            namespace.get_args().collect::<Vec<_>>()
+        );
+        spec["namespace_launcher"]["sha256"] = json!("0".repeat(64));
+        assert!(super::super::launch(&mut env, &root, &spec).is_err());
+        assert!(!root.join("runtime.json").exists());
         for action in [
             "launch", "create", "recover", "dispatch", "collect", "invalid",
         ] {
