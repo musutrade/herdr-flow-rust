@@ -1099,7 +1099,7 @@ fn offer_member_store(
     dependencies: Vec<J>,
     evidence: String,
 ) -> Result<J> {
-    let member = offer_member_value(
+    let mut member = offer_member_value(
         &mt,
         &offered_source.source,
         offered_source.checks,
@@ -1107,10 +1107,13 @@ fn offer_member_store(
         &evidence,
         now,
     );
+    // Intake identity is independent of later batch IDs, freezes and landings.
+    member["receipt_id"] = json!(uuid_hex());
     offer_member_push(&mut lane_state.lane, &member);
     let owner = model::string(&lane_state.task, "task").unwrap_or_default();
     mt["batch_delivery"] = json!({
         "owner": owner,
+        "receipt_id": member["receipt_id"],
         "head": offered_source.source.get("head").cloned().unwrap_or(Value::Null),
         "own_commits": offered_source.source.get("own_commits").cloned().unwrap_or(Value::Null),
         "phase": "accepted",
@@ -4591,6 +4594,89 @@ fn _path_buf(path: &str) -> PathBuf {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+
+    struct NoGitHub;
+
+    impl GitHubApi for NoGitHub {
+        fn get(&self, _path: &str) -> Result<J> {
+            panic!("member state transitions must not access GitHub")
+        }
+    }
+
+    #[test]
+    fn intake_receipts_are_distinct_at_the_same_timestamp() {
+        let mut state = json!({"tasks":{}});
+        let mut member = |name| {
+            offer_member_store(
+                &mut state,
+                10.0,
+                LaneState {
+                    task: json!({"task":"lane","state_version":1}),
+                    lane: json!({"pending":[]}),
+                },
+                json!({"task":name,"epoch":1}),
+                OfferedSource {
+                    source: json!({"head":"source-head"}),
+                    checks: vec![],
+                },
+                vec![],
+                "evidence".to_owned(),
+            )
+            .unwrap()["lane"]["pending"][0]
+                .clone()
+        };
+        let first = member("first");
+        let second = member("second");
+        assert_eq!(
+            state["tasks"]["first"]["batch_delivery"]["receipt_id"],
+            first["receipt_id"]
+        );
+        assert_eq!(
+            state["tasks"]["second"]["batch_delivery"]["receipt_id"],
+            second["receipt_id"]
+        );
+        assert_ne!(first["receipt_id"], second["receipt_id"]);
+        assert_eq!(first["accepted_at"], second["accepted_at"]);
+    }
+
+    #[test]
+    fn intake_receipt_survives_freeze_and_landing_without_migrating_legacy_records() {
+        for receipt in [None, Some("accepted-source-receipt")] {
+            let mut member = json!({"task":"source","head":"source-head","acceptance":[]});
+            let mut delivery = json!({"owner":"lane","phase":"accepted","head":"source-head"});
+            if let Some(receipt) = receipt {
+                member["receipt_id"] = json!(receipt);
+                delivery["receipt_id"] = json!(receipt);
+            }
+            let mut s = json!({"tasks":{"source":{"task":"source","state_version":1,
+                "history":[],"batch_delivery":delivery}}});
+            let batch =
+                json!({"id":"batch-one","base":"base","snapshot":{"head":"final","tree":"tree"}});
+            freeze_member(&mut s, &member, &batch, 11.0).unwrap();
+            s = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+            assert_eq!(
+                s["tasks"]["source"]["batch_delivery"].get("receipt_id"),
+                member.get("receipt_id")
+            );
+            reconcile_member(
+                &mut s,
+                &member,
+                &batch,
+                &json!({"commit":"landed"}),
+                ReconcileCtx {
+                    now: 12.0,
+                    api: &NoGitHub,
+                },
+            )
+            .unwrap();
+            s = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+            assert_eq!(s["tasks"]["source"]["batch_delivery"]["phase"], "landed");
+            assert_eq!(
+                s["tasks"]["source"]["batch_delivery"].get("receipt_id"),
+                member.get("receipt_id")
+            );
+        }
+    }
 
     #[test]
     fn repair_and_rebase_history_arrays_are_initialized() {

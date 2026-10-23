@@ -339,8 +339,41 @@ fn batch_offer_freeze_integrate_and_snapshot() {
             "evidence": "/tmp/evidence.json"
         }
     });
+    let mut full = s.clone();
+    full["tasks"]["lane"]["lane"]["pending"] = json!([{}, {}]);
+    let unchanged = full.clone();
+    assert!(batch::action(
+        &mut full,
+        "batch-offer",
+        &offer_spec,
+        11.0,
+        &mut |_s| Ok(())
+    )
+    .is_err());
+    assert_eq!(full, unchanged, "capacity refusal must not mint a receipt");
+
+    let unchanged = s.clone();
+    let mut invalid = offer_spec.clone();
+    invalid["member"]["evidence"] = json!("");
+    assert!(batch::action(&mut s, "batch-offer", &invalid, 11.0, &mut |_s| Ok(())).is_err());
+    assert_eq!(s, unchanged, "validation failure must not mint a receipt");
+
     let offered =
         batch::action(&mut s, "batch-offer", &offer_spec, 11.0, &mut |_s| Ok(())).unwrap();
+    let receipt = s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"]
+        .as_str()
+        .expect("successful intake has a receipt")
+        .to_owned();
+    assert!(!receipt.is_empty());
+    assert_eq!(offered["lane"]["pending"][0]["receipt_id"], receipt);
+    // A JSON round trip keeps the exact receipt; a repeated offer cannot replace it.
+    s = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+    let unchanged = s.clone();
+    let mut duplicate = offer_spec.clone();
+    duplicate["state_version"] = s["tasks"]["lane"]["state_version"].clone();
+    duplicate["member"]["state_version"] = s["tasks"]["o/r#2"]["state_version"].clone();
+    assert!(batch::action(&mut s, "batch-offer", &duplicate, 11.5, &mut |_s| Ok(())).is_err());
+    assert_eq!(s, unchanged);
     assert_eq!(
         model::array_field(model::get(&offered, "lane").unwrap(), "pending").map(Vec::len),
         Some(1)
@@ -349,6 +382,11 @@ fn batch_offer_freeze_integrate_and_snapshot() {
     let freeze_spec = json!({"task": "lane", "state_version": version});
     let api = Fake::new().with("branches/main", json!({"commit": {"sha": repo.base}}));
     let frozen = batch::lane::freeze(&mut s, &freeze_spec, 12.0, Some(&api)).unwrap();
+    assert_eq!(s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"], receipt);
+    assert_eq!(
+        frozen["lane"]["active"]["members"][0]["receipt_id"],
+        receipt
+    );
     let lane_state = model::get(&frozen, "lane").unwrap();
     let active = model::get(lane_state, "active").unwrap();
     assert_eq!(
@@ -417,6 +455,11 @@ fn batch_offer_freeze_integrate_and_snapshot() {
         "{snapshotted}"
     );
     assert!(model::dig(&snapshotted, &["pr", "head"]).is_some());
+    assert_eq!(s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"], receipt);
+    assert_eq!(
+        snapshotted["lane"]["active"]["members"][0]["receipt_id"],
+        receipt
+    );
 }
 
 #[test]
