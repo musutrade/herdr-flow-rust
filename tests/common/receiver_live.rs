@@ -265,6 +265,7 @@ fn installed_real_opencode_submitted_worker_is_collected_by_fresh_cli() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: true,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -299,6 +300,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -333,6 +335,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -367,6 +370,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -401,6 +405,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -435,6 +440,42 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real ambiguity, explicit user B confirmation, coordinator revise/candidate/continue, native failed A review, native B development and fresh native acceptance"]
+fn installed_real_opencode_confirmed_revision_resumes_with_b_development() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
+        apply_confirmed_revision: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -469,6 +510,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -503,6 +545,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -537,6 +580,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -578,6 +622,7 @@ fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supe
         apply_unknown_delivery: true,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -631,6 +676,7 @@ fn installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_
         apply_unknown_delivery: false,
         apply_cleanup_recovery: true,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -667,6 +713,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -1055,6 +1102,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_unknown_delivery: false,
             apply_cleanup_recovery: false,
             apply_worker_recovery: false,
+            apply_confirmed_revision: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1232,6 +1280,7 @@ struct ReceiverSpec<'a> {
     apply_unknown_delivery: bool,
     apply_cleanup_recovery: bool,
     apply_worker_recovery: bool,
+    apply_confirmed_revision: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1269,6 +1318,7 @@ fn run_native_receiver(
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1296,6 +1346,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_unknown_delivery,
         apply_cleanup_recovery,
         apply_worker_recovery,
+        apply_confirmed_revision,
         unavailable_dependency,
         base,
         formal_target,
@@ -1468,6 +1519,28 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         "cleanup recovery requires the native repair/restart delivery fixture"
     );
     assert!(
+        !apply_confirmed_revision
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && !apply_unknown_delivery
+                && !apply_cleanup_recovery
+                && !apply_worker_recovery
+                && unavailable_dependency.is_none()),
+        "confirmed revision requires isolated OpenCode coordination"
+    );
+    assert!(
         !apply_worker_recovery
             || (development_adapter == DevelopmentAdapter::OpenCode
                 && apply_development
@@ -1493,7 +1566,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         || apply_missing_report
         || apply_unknown_delivery
         || apply_cleanup_recovery
-        || apply_worker_recovery)
+        || apply_worker_recovery
+        || apply_confirmed_revision)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1518,13 +1592,19 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     } else {
         "accept-native"
     };
-    let reviewer_root =
-        apply_acceptance.then(|| task_runtime::prepare(&env, reviewer_name).unwrap());
+    let reviewer_root = (apply_acceptance || apply_confirmed_revision)
+        .then(|| task_runtime::prepare(&env, reviewer_name).unwrap());
     let restored_reviewer_root =
         apply_restored_review.then(|| task_runtime::prepare(&env, "accept-restored").unwrap());
     let repair_root = apply_repair.then(|| task_runtime::prepare(&env, "repair-native").unwrap());
     let final_reviewer_root =
         apply_repair.then(|| task_runtime::prepare(&env, "accept-final").unwrap());
+    let revised_reviewer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "accept-revised").unwrap());
+    let revised_developer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "revised-develop").unwrap());
+    let final_confirmed_reviewer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "accept-confirmed").unwrap());
     let mut runtime_roots = vec![root.clone()];
     for runtime in [
         &worker_root,
@@ -1532,6 +1612,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         &restored_reviewer_root,
         &repair_root,
         &final_reviewer_root,
+        &revised_reviewer_root,
+        &revised_developer_root,
+        &final_confirmed_reviewer_root,
     ]
     .into_iter()
     .flatten()
@@ -1590,6 +1673,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     }
     let artifact_roots: Vec<_> = if apply_development
         || apply_ambiguous
+        || apply_confirmed_revision
         || apply_concurrent
         || apply_approval_block
         || apply_missing_report
@@ -1669,6 +1753,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             final_reviewer_root.join("submission.json"),
         ]);
     }
+    for root in [
+        &revised_reviewer_root,
+        &revised_developer_root,
+        &final_confirmed_reviewer_root,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        evidence_paths.extend([root.join("server.log"), root.join("submission.json")]);
+    }
     if apply_delivery {
         evidence_paths.extend([
             base.join("inventory-before.json"),
@@ -1720,6 +1814,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         }
         if let Some(final_reviewer_root) = &final_reviewer_root {
             allow_owned_external_directory(&mut config, final_reviewer_root);
+        }
+        for root in [
+            &revised_reviewer_root,
+            &revised_developer_root,
+            &final_confirmed_reviewer_root,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            allow_owned_external_directory(&mut config, root);
         }
         for artifact_root in &artifact_roots {
             // Read-only to this coordinator at the kernel layer; these are
@@ -1801,6 +1905,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; if absent wait bounded15seconds for the driver to stop/reap and publish it, then require matching collector session and stopped/reaped status. Do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session.",
             developer_release=developer_release.display(), repair_release=repair_release.display()
         );
+    }
+    if apply_confirmed_revision {
+        instruction_text = confirmed_revision_instruction(&binary, &queue_path, &cwd);
     }
     instruction_text.push_str(" Use only the supplied queue path. Never create, copy, rename, edit or probe queue, guard or state directories. Stop and fail on any non-lock-busy error; never fabricate task-apply, output, event, verdict or readiness, and never create a replacement or duplicate artifact.");
     if apply_late_acceptance {
@@ -1917,13 +2024,52 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         delivery_expected = Some(source_base);
     }
-    let ambiguous_artifact =
-        apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
+    let ambiguous_artifact = (apply_ambiguous || apply_confirmed_revision).then(|| {
+        if apply_confirmed_revision {
+            setup_in_queue_with_confirmed_revision_fixture(&env, &q)
+        } else {
+            setup_in_queue_with_ambiguous_requirement(&env, &q)
+        }
+    });
     let concurrent_artifact =
         apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
     let approval_cwd = apply_approval_block.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let missing_cwd = apply_missing_report.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+    if apply_confirmed_revision {
+        confirmed_revision_stage(ConfirmedRevisionSpec {
+            env: &mut env,
+            q: &q,
+            guard: &guard,
+            coordinator: &registered,
+            artifact: ambiguous_artifact.as_ref().unwrap(),
+            reviewer_root: reviewer_root.as_ref().unwrap(),
+            revised_reviewer_root: revised_reviewer_root.as_ref().unwrap(),
+            revised_developer_root: revised_developer_root.as_ref().unwrap(),
+            final_reviewer_root: final_confirmed_reviewer_root.as_ref().unwrap(),
+            client: &client,
+            endpoint: &endpoint,
+            cwd: &cwd,
+            evidence: &mut failure_evidence,
+        });
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("confirmed-revision config snapshot"),
+            "selected OpenCode configuration changed during confirmed-revision scenario"
+        );
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
         let instruction = String::from(
@@ -3924,6 +4070,407 @@ fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
     drop(outer);
     assert!(!is_registered("worker-custody-panic").unwrap());
     assert!(!root.join("workspace").exists());
+}
+
+struct ConfirmedRevisionSpec<'a> {
+    env: &'a mut TaskEnvironment,
+    q: &'a Path,
+    guard: &'a Path,
+    coordinator: &'a J,
+    artifact: &'a J,
+    reviewer_root: &'a Path,
+    revised_reviewer_root: &'a Path,
+    revised_developer_root: &'a Path,
+    final_reviewer_root: &'a Path,
+    client: &'a ureq::Agent,
+    endpoint: &'a str,
+    cwd: &'a Path,
+    evidence: &'a mut FailureEvidence,
+}
+
+fn register_confirmed_revision_wait(q: &Path) {
+    let _lock = queue::locked(q, true).unwrap();
+    queue::add(
+        q,
+        &json!({
+            "id":"confirmed-revision",
+            "task":"project",
+            "epoch":1,
+            "owner":"operator",
+            "reason":"record the actual user's B-precedence decision",
+            "condition":"bounded immutable user decision evidence",
+            "kind":"signal",
+            "timeout_seconds":600
+        }),
+    )
+    .unwrap();
+}
+
+fn write_confirmed_revision_decision(path: &Path) -> J {
+    let evidence = json!({
+        "schema":1,
+        "fixture_only":true,
+        "user_choice":"version B",
+        "precedence":"the subsequent version B change overrides the original version A requirement",
+        "source":CONFIRMED_REVISION_USER_CHOICE,
+        "recorded_at":"2026-10-23",
+        "historical_authority":false
+    });
+    util::atomic_write_json(path, &evidence).unwrap();
+    evidence
+}
+
+fn signal_confirmed_revision(env: &mut TaskEnvironment, q: &Path, evidence: &Path) {
+    let mut cmd = env.command(env!("CARGO_BIN_EXE_herdr-flow"));
+    cmd.args([
+        "queue",
+        "signal",
+        "--state-dir",
+        q.to_str().expect("queue UTF-8"),
+        "--wait",
+        "confirmed-revision",
+        "--outcome",
+        "complete",
+        "--summary",
+        "actual user selected version B for the disposable fixture",
+        "--evidence",
+        evidence.to_str().expect("decision evidence UTF-8"),
+    ])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    env.register_process(child.id() as i32).unwrap();
+    wait_bounded(&mut child, "confirmed-revision operator signal");
+    let status = child.wait().unwrap();
+    assert!(status.success(), "operator signal exited {status:?}");
+}
+
+fn wait_for_registered_task(q: &Path, name: &str) -> J {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let state = queue::load_queue(q).unwrap();
+        if let Some(task) = state["tasks"].get(name).filter(|task| !task.is_null()) {
+            return task.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "coordinator did not register {name}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn registered_review_stage(
+    env: &mut TaskEnvironment,
+    q: &Path,
+    guard: &Path,
+    coordinator: &J,
+    reviewer_root: &Path,
+    activity: &str,
+    cwd: &Path,
+    instruction: &str,
+    expect_pass: bool,
+) -> J {
+    let mut turn = acceptance_live::native_prepare(env, q, cwd, activity, instruction);
+    acceptance_live::native_dispatch(env, &turn);
+    let result = acceptance_live::native_finish(env, &mut turn);
+    let report_path = cwd.join(".herdr-verdict.json");
+    let report = util::read_json(&report_path).unwrap();
+    assert_eq!(
+        report["conclusion"],
+        if expect_pass { "passed" } else { "failed" }
+    );
+    let state = wait_for_stage(q, guard, coordinator, activity);
+    let events: Vec<_> = state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, event)| event["wait"] == activity)
+        .collect();
+    assert_eq!(events.len(), 1, "one event for {activity}");
+    assert_eq!(events[0].1["acknowledged"], true);
+    assert_eq!(events[0].1["applied"], true);
+    let deliveries: Vec<_> = state["deliveries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|delivery| delivery["events"] == json!([events[0].0]))
+        .collect();
+    assert_eq!(deliveries.len(), 1, "one delivery for {activity}");
+    assert_eq!(deliveries[0]["phase"], "acknowledged");
+    let task = &state["tasks"][activity];
+    assert_eq!(task["pending"], json!([]));
+    assert_eq!(
+        task["verdict"]["envelope"]["reviewer"]["session"],
+        json!(result["session"])
+    );
+    assert_eq!(task["verdict"]["envelope"]["report"], report);
+    assert_eq!(util::read_json(&report_path).unwrap(), report);
+    turn.stop();
+    state
+}
+
+fn confirmed_revision_instruction(binary: &str, queue_path: &str, cwd: &Path) -> String {
+    let mut text = r#"Authorized disposable confirmed-revision fixture. Do not delegate or create sessions. Use only the supplied queue and cwd. Never deliver, edit queue/guard/state, fabricate an ACK, verdict, output, event, or continuation, and never press approvals.
+
+PHASE 1: one accept-native ambiguous notification arrives. Use its exact OPENCODE_SESSION_ID. ACK exactly, then write <PHASE1_APP> with task=accept-native, current child state_version, exact event, exact registered verdict id, and next_action={kind:clarify,owner:native coordinator,reason:independent report,condition:existing authorization}; apply it once with queue task-apply. Run readiness with active_wakeup=true, and finish. Do not revise yet.
+
+CONFIRMED-REVISION SIGNAL: later a confirmed-revision notification arrives. ACK its exact delivery as receipt only; do not task-apply it. Read the immutable decision at <DECISION> and require fixture_only=true, user_choice="version B", historical_authority=false. Then use the current project state_version to run exactly these task-lineage commands:
+1) revise with goal "Deliver version B for the disposable confirmed-revision fixture" and basis original=[<ORIGINAL>], changes=[<PRECEDENCE>, <CHANGE>], specifications=[<SPEC>], endpoint="disposable confirmed revision endpoint", confirmation=<USER_CHOICE>. Omit authorization so revision 2 inherits and keeps revision 1 authorization unchanged.
+2) candidate with the exact artifact A id and reason "reselect A for honest independent review under confirmed revision B".
+3) continue with intent=accept-native, authorization=verify, action=review, resolution=<DECISION>, and activity accept-revised role=acceptance input=<A>, session_epoch=2, result_wait={id:accept-revised,task:accept-revised,epoch:2,assignment:accept-revised-a2,owner:reviewer,kind:signal,reason:honest A-versus-B review,condition:terminal report,timeout_seconds:1800}. Run readiness and finish.
+
+ACCEPT-REVISED: one failed independent verdict for A under B arrives. ACK, read the exact registered verdict/binding, apply it with next_action kind=repair, then run one task-lineage continue with intent=accept-revised, authorization=develop, action=development, resolution="confirmed revision B requires development after honest A failure", and activity revised-develop role=development input=<A>, session_epoch=2, result_wait={id:revised-develop,task:revised-develop,epoch:2,assignment:revised-develop-a2,owner:developer,kind:signal,reason:confirmed B development,condition:terminal result,timeout_seconds:1800}. Run readiness and finish. If the verdict is not failed, stop and fail; never approve A.
+
+REVISED-DEVELOP: one development result for revised-develop arrives. ACK, read its exact collector output, apply it with task=revised-develop, current child state_version, exact event, output unchanged, acceptance={goal:"development assignment completed"}, next_action kind=complete. Then run task-lineage candidate with the exact output id and reason "confirmed version B development output". Then run task-lineage activity accept-confirmed role=acceptance input=<B>, session_epoch=3, result_wait={id:accept-confirmed,task:accept-confirmed,epoch:3,assignment:accept-confirmed-a3,owner:reviewer,kind:signal,reason:fresh B acceptance,condition:terminal report,timeout_seconds:1800}. Run readiness and finish.
+
+ACCEPT-CONFIRMED: one passed independent verdict for B arrives. ACK, apply the exact immutable verdict with next_action kind=delivery, run readiness, and finish. No customer delivery and no replacement artifact. If any actual conclusion differs, stop and fail honestly.
+
+Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Write each task-lineage/application spec under <CWD> and invoke the named supported command once; retry only lock-busy errors. Preserve phase-1 requirement/verdict/report bytes and revision-2 authorization."#;
+    let replacements = [
+        (
+            "<DECISION>",
+            cwd.join("confirmed-revision-decision.json")
+                .display()
+                .to_string(),
+        ),
+        (
+            "<PHASE1_APP>",
+            cwd.join("ambiguity-application.json").display().to_string(),
+        ),
+        ("<ORIGINAL>", AMBIGUOUS_ORIGINAL.to_string()),
+        ("<PRECEDENCE>", CONFIRMED_REVISION_PRECEDENCE.to_string()),
+        ("<CHANGE>", AMBIGUOUS_CHANGE.to_string()),
+        ("<SPEC>", AMBIGUOUS_SPECIFICATION.to_string()),
+        ("<USER_CHOICE>", CONFIRMED_REVISION_USER_CHOICE.to_string()),
+        ("<QUEUE>", queue_path.to_string()),
+        ("<BINARY>", binary.to_string()),
+        ("<CWD>", cwd.display().to_string()),
+    ];
+    for (from, to) in replacements {
+        text = text.replace(from, &to);
+    }
+    text
+}
+
+fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
+    let ConfirmedRevisionSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        artifact,
+        reviewer_root,
+        revised_reviewer_root,
+        revised_developer_root,
+        final_reviewer_root,
+        client,
+        endpoint,
+        cwd,
+        evidence,
+    } = spec;
+    let artifact_id = artifact["id"]
+        .as_str()
+        .expect("confirmed revision artifact id");
+    let phase1_requirement =
+        queue::load_queue(q).unwrap()["tasks"]["project"]["requirements"]["1"].clone();
+    let phase1_authorization = phase1_requirement["authorization"].clone();
+    register_confirmed_revision_wait(q);
+    let ambiguity_application = cwd.join("ambiguity-application.json");
+    let phase1_instruction = "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include blocked checks with criterion=goal and source exactly equal to each conflicting basis reference. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+    let phase1_state = native_review_stage(
+        env,
+        q,
+        guard,
+        coordinator,
+        ReviewSpec {
+            artifact,
+            reviewer_root,
+            activity: "accept-native",
+            checkout: "reviewer-checkout",
+            instruction: phase1_instruction,
+            expected_waits: &["accept-native"],
+            expect_pass: false,
+            unavailable_dependency: None,
+            development_session: None,
+            prepared_checkout: None,
+            capture_tools: false,
+            expect_ambiguous: true,
+            expected_application: Some(ambiguity_application.as_path()),
+            coordinator_client: Some(client),
+            coordinator_endpoint: Some(endpoint),
+            coordinator_cwd: Some(cwd),
+        },
+    );
+    let phase1_report_path = env
+        .workspace_root
+        .join("reviewer-checkout/.herdr-verdict.json");
+    let phase1_report = fs::read(&phase1_report_path).unwrap();
+    let phase1_verdict = phase1_state["tasks"]["accept-native"]["verdict"].clone();
+    assert_eq!(
+        phase1_state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(phase1_state["tasks"]["project"]["requirement_revision"], 1);
+
+    let decision_path = q.parent().unwrap().join("confirmed-revision-decision.json");
+    evidence.0.push(decision_path.clone());
+    for path in [
+        env.workspace_root
+            .join("reviewer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("revised-reviewer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("revised-developer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("confirmed-reviewer-checkout/.herdr-verdict.json"),
+    ] {
+        evidence.0.push(path);
+    }
+    write_confirmed_revision_decision(&decision_path);
+    let decision_bytes = fs::read(&decision_path).unwrap();
+    signal_confirmed_revision(env, q, &decision_path);
+
+    wait_for_registered_task(q, "accept-revised");
+    let state = queue::load_queue(q).unwrap();
+    let parent = &state["tasks"]["project"];
+    assert_eq!(parent["requirement_revision"], 2);
+    assert_eq!(parent["requirements"]["1"], phase1_requirement);
+    assert_eq!(
+        parent["requirements"]["2"]["authorization"],
+        phase1_authorization
+    );
+    assert_eq!(
+        parent["requirements"]["2"]["basis"]["confirmation"],
+        CONFIRMED_REVISION_USER_CHOICE
+    );
+    assert!(parent["requirements"]["2"]["basis"]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some(CONFIRMED_REVISION_PRECEDENCE)));
+    assert_eq!(parent["candidate"], artifact_id);
+    assert_eq!(state["tasks"]["accept-native"]["verdict"], phase1_verdict);
+    assert_eq!(fs::read(&phase1_report_path).unwrap(), phase1_report);
+    assert_eq!(
+        state["events"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|event| event["wait"] == "confirmed-revision")
+            .count(),
+        1
+    );
+    let signal_event = state["events"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|event| event["wait"] == "confirmed-revision")
+        .unwrap();
+    assert_eq!(signal_event["acknowledged"], true);
+    assert_ne!(signal_event["applied"], true);
+    assert!(signal_event["binding"].is_null());
+    assert_eq!(fs::read(&decision_path).unwrap(), decision_bytes);
+
+    let revised_cwd = acceptance_live::clone_snapshot(env, artifact, "revised-reviewer-checkout");
+    let revised = registered_review_stage(
+        env,
+        q,
+        guard,
+        coordinator,
+        revised_reviewer_root,
+        "accept-revised",
+        &revised_cwd,
+        "You are the independent acceptance reviewer. The current confirmed requirement explicitly gives version B precedence over the original version A. Inspect the exact requested HEAD file with `git show HEAD:file` in a direct bash invocation. Report actual checks against the confirmed basis; if the artifact contains version A, write an honest failed verdict with a grounded gap. Never approve A under B and never claim delivery.",
+        false,
+    );
+    assert_eq!(
+        revised["tasks"]["accept-revised"]["verdict"]["envelope"]["report"]["conclusion"],
+        "failed"
+    );
+    assert!(revised["tasks"]["project"]["approved"].is_null());
+    assert_eq!(
+        revised["tasks"]["project"]["continuation"]["action"]["kind"],
+        "repair"
+    );
+
+    wait_for_registered_task(q, "revised-develop");
+    let development_cwd =
+        acceptance_live::clone_snapshot(env, artifact, "revised-developer-checkout");
+    let (developer, developed) = acceptance_live::native(
+        env,
+        q,
+        &development_cwd,
+        "revised-develop",
+        "You are the developer role, not a reviewer or acceptance role. The confirmed requirement is version B. Replace the contents of file with exactly `version B` followed by a newline, stage it, and create one new local Git commit. Do not write a verdict or acceptance report. Stay inside cwd.",
+    );
+    let output = developed["output"].clone();
+    assert_ne!(output["id"], artifact_id);
+    assert_eq!(git(&development_cwd, &["show", "HEAD:file"]), "version B");
+    assert_ne!(developer["session"], coordinator["session"]);
+
+    wait_for_registered_task(q, "accept-confirmed");
+    let final_cwd = acceptance_live::clone_snapshot(env, &output, "confirmed-reviewer-checkout");
+    let final_state = registered_review_stage(
+        env,
+        q,
+        guard,
+        coordinator,
+        final_reviewer_root,
+        "accept-confirmed",
+        &final_cwd,
+        "You are the independent acceptance reviewer. Inspect the exact requested HEAD file against the current confirmed revision, which gives version B precedence. Run `git show HEAD:file` directly and derive the verdict from the actual content. Write .herdr-verdict.json following acceptance_protocol; do not deliver or edit tracked files.",
+        true,
+    );
+    assert_eq!(final_state["tasks"]["project"]["candidate"], output["id"]);
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["candidate"],
+        output["id"]
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["report"]["conclusion"],
+        "passed"
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["2"],
+        parent["requirements"]["2"]
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-native"]["verdict"],
+        phase1_verdict
+    );
+    assert_eq!(fs::read(&phase1_report_path).unwrap(), phase1_report);
+    assert_eq!(fs::read(&decision_path).unwrap(), decision_bytes);
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["2"]["authorization"],
+        phase1_authorization
+    );
+    assert_eq!(git(&final_cwd, &["show", "HEAD:file"]), "version B");
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["activity"],
+        "accept-confirmed"
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["continuation"]["action"]["kind"],
+        "delivery"
+    );
+    assert_eq!(final_state["events"].as_object().unwrap().len(), 5);
+    assert_eq!(final_state["deliveries"].as_object().unwrap().len(), 5);
+    let signal_event = final_state["events"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|event| event["wait"] == "confirmed-revision")
+        .unwrap();
+    assert_eq!(signal_event["acknowledged"], true);
+    assert_ne!(signal_event["applied"], true);
+    assert!(signal_event["binding"].is_null());
+    assert_eq!(final_state["tasks"]["project"]["pending"], json!([]));
+    assert!(final_state["tasks"].get("delivery").is_none());
 }
 
 fn exact_original_event(state: &J) -> Option<(String, J)> {

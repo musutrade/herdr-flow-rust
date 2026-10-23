@@ -1104,3 +1104,40 @@ or server-restart proof, and it does not cover a dispatch interruption after
 can prove that the POST was not sent, so that boundary remains fail-closed.
 Worker takeover, coordinator process restart, a second POST and invention of a
 replacement session are not claimed. #38/#32 remain OPEN.
+
+## Confirmed requirement revision with native B development
+
+The opt-in
+`installed_real_opencode_confirmed_revision_resumes_with_b_development`
+scenario is separate from the phase-1 ambiguity stop and does not change that
+fixture. Its newly configured disposable fixture records both verification and
+development authorization, sourced from the user's standing authorization to
+implement this scenario and their explicit acceptance of the version-B
+recommendation. That development authority is labeled newly configured fixture
+authority, not historical phase-1 authority and not authority over user assets.
+
+The actual sequence is: real ambiguous review and clarify; an owned foreground
+operator signal carrying bounded immutable evidence of the user's B choice;
+native coordinator ACK-only receipt of that signal, revision 2 with explicit B
+precedence and the genuine confirmation, candidate reset/reselection of A, and
+continuation into a fresh acceptance using the existing verify/review action; a
+real reviewer's honest failed verdict for A under B; coordinator application of
+that failure and continuation into development under the preconfigured
+develop/development action; a real developer producing and committing B; then a
+fresh real reviewer and coordinator application of the actual passed verdict.
+No driver presses ACK/application/verdict buttons and no customer delivery occurs.
+
+Assertions freeze revision-1 requirements, authorization, basis, verdict and
+report bytes. Revision 2 must retain exactly the same authorization, the B
+precedence and exact user confirmation, while the prior artifact A remains
+version A. The signal event remains ACK-only with no binding/application. Each
+native role must have its own real session and exact collector/event identity;
+the coordinator must run the revision/candidate/continuation/application commands.
+A genuine failed A report and a genuine passed B report are required; if the
+model concludes differently the scenario fails. B acceptance is not inferred from
+the developer's commit, and no delivery or permanent evidence archive is created.
+
+This scenario has not yet been run as a live model acceptance. It is not a
+general authorization or product-policy change, not a customer-asset migration,
+and not evidence for pre-POST dispatch ambiguity, takeover, server restart, or
+Codex parity. #38/#32 remain OPEN.
