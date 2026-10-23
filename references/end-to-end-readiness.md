@@ -3,6 +3,21 @@
 This checklist separates protocol evidence from real agent completion. #38
 remains open. It does not replace its issue acceptance matrix or close #32.
 
+## Herdr workflow scope correction (2026-10-23)
+
+The native runs below launch background `codex app-server` / `opencode serve`
+processes through `task_runtime::launch`. They do not create Herdr pane agents.
+Their real model, ACK/application, Local delivery and cleanup results remain
+native backend evidence; they do not establish a Herdr-managed development
+workflow. The current developer/publisher Herdr handoff is separate evidence.
+See [Herdr workflow boundaries](herdr-workflow.md) for the role mapping and the
+minimum acceptance steps. No new live run is claimed by this correction.
+
+Herdr owns agent/session lifecycle in the intended workflow. Further independent
+task-owned controller/stdio supervision and authority/ACK redesign are out of
+scope. The merged Codex identity bootstrap stays inactive; completing its
+adapter/watcher is not the next milestone for this workflow.
+
 ## Current evidence and remaining work
 
 | Boundary | Existing/current evidence | Still required for #38 |
@@ -10,7 +25,7 @@ remains open. It does not replace its issue acceptance matrix or close #32.
 | Old task state | `tests/lineage.rs::legacy_migration_requires_quiescence_and_preserves_no_approval` refuses migration with a writer, pending operation, executing phase or open PR; preserves old task state and does not create a new approval. | The registered legacy-resource fixture below covers an actual undelivered file and preserved user asset. Unknown legacy paths remain outside inferred authority; no home-directory sweep. |
 | Delivery and restart | `tests/delivery.rs` covers real local file/Git endpoints, frozen candidates, uncertain delivery, restart and cleanup faults with protocol reviewer fixtures. Real native delivery, repair, recovery and restart runs are documented below. | Recorded native tests cover injected lost observation and workspace-displacement cleanup failure, including eventual final registration removal after partial cleanup. Arbitrary transport/filesystem failures and customer production delivery are not claimed. |
 | Repeated control state | The twenty-round protocol regression reuses one control directory and shared queue, alternating normal delivery, restore after preparation, and restore after confirmation; confirmed delivery cannot be executed again. A twenty-round real native campaign is recorded below. | Real twenty-task completion is observed below; whole-campaign disk stability and reliable global outside-root cache/session discovery remain unproven. |
-| Native execution | OpenCode native coordinators execute ACK/application themselves. PR #103 also records a passing real Codex worker → OpenCode coordinator/reviewer → Local delivery and owned-resource cleanup loop. | Codex worker startup is supported on the explicitly authorized, identity-pinned outer-launcher path. A task-owned Codex coordinator remains outside the verified scope. Identity bootstrap now exists but is inactive; the dedicated adapter, watcher, control-state boundary and activation remain pending (see [task runtime](task-runtime.md#codex-coordinator-identity-bootstrap-not-yet-an-active-receiver)). |
+| Native execution | OpenCode native coordinators execute ACK/application themselves. PR #103 also records a passing real Codex worker → OpenCode coordinator/reviewer → Local delivery and owned-resource cleanup loop. None of these roles is a Herdr pane agent. | Codex worker startup is supported on the explicitly authorized, identity-pinned outer-launcher path. Herdr-managed workflow acceptance remains separate. Task-owned Codex identity bootstrap exists but is inactive; its adapter/watcher/control-state work is deferred under the Herdr workflow scope (see [task runtime](task-runtime.md#codex-coordinator-identity-bootstrap-not-yet-an-active-receiver)). |
 | Resource lifetime | Protocol regressions and the recorded native OpenCode and mixed Codex-worker runs check owned roots, task registration/slots, shared entries, output/user preservation and marked processes. | Outside-root cache/session and complete process/worktree discovery remain observational. A passing mixed run does not establish exhaustive discovery or whole-campaign disk stability. |
 | Runtime compatibility | The mixed run pins Codex 0.163.0 and OpenCode coordinator/reviewer 1.19.4; historical runs retain their recorded versions. See [startup adaptation](../docs/codex-startup-adaptation.md) for binary identities and host conditions. | OpenCode supports the conservative 1.19.x family at or above 1.19.3 after operation-level schema checks. 1.20/2.x are unsupported; the Codex result is scoped to the verified worker role and authorized launcher, not all hosts or roles. |
 | Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Actual approval-block observation, missing-report execution problems and injected delivery-unknown recovery are recorded below. Submitted-worker fresh CLI collection is merged in PR #98, with recorded evidence below; pre-POST ambiguity, takeover and server restart remain unsupported. User-confirmed requirement revision and resumed work have the scoped local native evidence recorded below; this is not customer delivery or a general policy change. |
