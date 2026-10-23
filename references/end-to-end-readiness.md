@@ -13,7 +13,7 @@ remains open. It does not replace its issue acceptance matrix or close #32.
 | Native execution | Opt-in installed tests and `tests/common/acceptance_live.rs` run real native roles. OpenCode native coordinator scenarios below execute ACK/application themselves; the driver only registers work and collects. | OpenCode native coordinator behavior is evidenced; Codex coordinator/session bootstrap remains blocked by the host nested-userns/product gap. |
 | Resource lifetime | Protocol regression checks task registration/slots, workspace/temp roots, plan/env/lock records, shared entries, previous deliveries and a pre-existing user asset before fixture teardown; native reports record marked processes and base resources. | Outside-root cache/session and complete process/worktree discovery remain observational; correct native delivery plus teardown is evidenced only for the recorded OpenCode scenarios. |
 | Runtime compatibility | Local readiness review found Codex 0.163.0 and installed OpenCode 1.19.4; the native scenarios retain their recorded 1.19.3 baseline, and selected configuration is exercised unchanged. | OpenCode supports the conservative 1.19.x family at or above the 1.19.3 baseline after operation-level schema checks (only 1.19.4 has the new real smoke-test evidence); 1.20/2.x and Codex bootstrap remain unsupported. |
-| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Actual approval-block observation, missing-report execution problems and injected delivery-unknown recovery are recorded below. Submitted-worker fresh CLI collection is merged in PR #98, with recorded evidence below; pre-POST ambiguity, takeover and server restart remain unsupported. User-confirmed requirement revision/resumed work remains outstanding. |
+| Recovery/error matrix | Unit/protocol suites exercise timeout, late/partial results, unknown delivery and cleanup faults; native OpenCode runs cover ACK/stall, late rejection, unavailable restore and a phase-1 ambiguity implementation. | Actual approval-block observation, missing-report execution problems and injected delivery-unknown recovery are recorded below. Submitted-worker fresh CLI collection is merged in PR #98, with recorded evidence below; pre-POST ambiguity, takeover and server restart remain unsupported. User-confirmed requirement revision and resumed work have the scoped local native evidence recorded below; this is not customer delivery or a general policy change. |
 
 ## Outstanding acceptance decisions
 
@@ -22,12 +22,17 @@ separate rather than treating another passing normal run as missing evidence:
 
 | Remaining boundary | Current status | Required next step |
 | --- | --- | --- |
-| User-confirmed requirement revision after ambiguity | Actual ambiguous verdict and clarify continuation are evidenced; no user answer has been applied. | Obtain an explicit decision for the conflicting fixture basis, then validate revision and resumed work. Never invent that decision. |
 | Pre-POST dispatch ambiguity | A dispatch journal without a submission journal has no supported recovery that proves an unsent request. | Review a product recovery contract; fail closed without resend meanwhile. |
 | Worker takeover / coordinator or server restart | Submitted-worker collection while the original server lives is a distinct boundary. | A supported takeover/transport restart contract and separate evidence are needed. |
 | Codex native closed loop | Host nested-userns/bootstrap limitations remain. | Use a supported host or reviewed bootstrap support without weakening approvals or outer confinement. |
 | Complete outside-root discovery | Known roots and sampled marked processes are observed; short-lived/unlinked paths and global caches are not exhaustively discovered. | Define and verify adapter-owned resource boundaries; do not infer completeness from root deletion. |
 | Failure exactly during final registry/plan unlink | Native cleanup recovery proves eventual removal after a real partial-cleanup failure; it does not inject a fault at the final unlink instruction. | A reviewed test/product seam is needed for that narrower fault, if required; no journal mutation or timing race is presented as proof. |
+
+The user explicitly accepted version B precedence for the disposable conflict.
+The local confirmed-revision run below applies that decision through the real
+coordinator and resumes independent review/development to B approval; its
+publication checks remain separate from the local live result. No further user
+answer is inferred or required for that fixture.
 
 The original acceptance matrix remains authoritative. These classifications do
 not waive a criterion or turn an external blocker into a passing result. Local
@@ -1170,6 +1175,14 @@ output. Complete application/continuation schemas clarify the interface without
 weakening product validation or the lock-busy-only audit. A bounded final-file
 spec-shape sample reports only fixed field types from canonical paths inside the
 coordinator cwd; it does not claim to preserve invocation-time spec bytes.
+
+Independent final local gates passed: stable coverage and Rust 1.85 all-target
+suites each reported 498 passed, zero failed, 26 ignored. CRAP evaluated 4805
+functions at 77.3% line coverage with zero violations of the absolute threshold
+10. Formatting, lint policy, all-target/all-feature Clippy, and rustdoc with
+warnings denied passed. Stable and Rust 1.85 release builds passed in 2m44s and
+2m53s respectively. The ignored live scenario was run separately as recorded
+above; no model run was repeated solely for the final documentation update.
 
 This is not a general authorization or product-policy change, not a customer-asset migration,
 and not evidence for pre-POST dispatch ambiguity, takeover, server restart, or
