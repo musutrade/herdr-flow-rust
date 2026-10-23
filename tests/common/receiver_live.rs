@@ -4982,14 +4982,11 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         lineage_specs[4]["reason"],
         "confirmed version B development output"
     );
-    assert_eq!(lineage_specs[5]["activity"]["activity"], "accept-confirmed");
-    assert_eq!(lineage_specs[5]["activity"]["role"], "acceptance");
-    assert_eq!(lineage_specs[5]["activity"]["input"], output["id"]);
-    assert_eq!(lineage_specs[5]["activity"]["session_epoch"], 3);
-    assert_eq!(
-        lineage_specs[5]["activity"]["result_wait"]["id"],
-        "accept-confirmed"
-    );
+    assert_eq!(lineage_specs[5]["activity"], "accept-confirmed");
+    assert_eq!(lineage_specs[5]["role"], "acceptance");
+    assert_eq!(lineage_specs[5]["input"], output["id"]);
+    assert_eq!(lineage_specs[5]["session_epoch"], 3);
+    assert_eq!(lineage_specs[5]["result_wait"]["id"], "accept-confirmed");
     let applies: Vec<_> = relevant
         .iter()
         .filter(|command| command.command.contains("queue task-apply"))
@@ -5066,7 +5063,9 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     let developer_apply = &apply_specs["revised-develop"];
     assert_eq!(
         developer_apply["state_version"].as_u64().unwrap() + 1,
-        developed_state["state_version"].as_u64().unwrap()
+        final_state["tasks"]["revised-develop"]["state_version"]
+            .as_u64()
+            .unwrap()
     );
     assert_eq!(developer_apply["event"], developer_event_id);
     assert_eq!(developer_apply["output"], output);
