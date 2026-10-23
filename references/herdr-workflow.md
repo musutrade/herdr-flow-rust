@@ -1,7 +1,8 @@
 # Herdr 工作流边界与最小验收
 
 2026-10-23 源码审计基线：`55c6ba073400dff1a1840fd9f82515f6a00412f3`。
-本节记录证据分类和后续执行条件，不表示新增模型验收已经通过。
+本节记录证据分类和后续执行条件。下方新增的实际接续观察基线为
+`7373b1121244f2e308518d4bcc52336a0fafcb30`，与历史后台原生测试分开记录。
 
 ## 职责与现有能力
 
@@ -14,7 +15,7 @@ guard、queue delivery journal、ACK、task-apply、成果验收、交付及 CI 
 | --- | --- | --- |
 | Herdr agent/worktree CLI | 提供启动、身份查询、消息、读取、生命周期观察及 worktree 管理 API | 本次只观察现有 agent 通信与 worktree list/query，未验收 worktree 完整生命周期；prompt 成功仅表示终端接纳，wait 只观察 agent 生命周期 |
 | Herdr-managed Codex receiver | 现有 Herdr adapter 绑定 pane、原生 TUI bridge 与 thread；通过原生 turn/start 取得 turn id | 必须有匹配的 bridge/guard；watcher 必须处于匹配的 Herdr env/socket；在 Herdr 可见本身不等于 queue ready |
-| 原生 OpenCode receiver | HTTP session adapter、独立 watcher、队列 ACK/application | 不等于 Herdr-managed OpenCode receiver；当前 factory 不通过 Herdr CLI 绑定它 |
+| OpenCode HTTP receiver | HTTP session adapter、独立 watcher、队列 ACK/application | 后台 serve 本身不能证明 Herdr 集成；已验证 Herdr 可见 TUI 的同一 session/HTTP server 绑定。factory 仍使用 HTTP，不是 Herdr CLI receiver |
 | queue/task 命令 | 登记结果、持久派发意图、接手、signal、ACK、task-apply | 复用已有身份、锁和状态门禁；不把终端接纳伪装为 turn id、ACK 或完成 |
 | task-owned Codex bootstrap | 创建一次线程并记录身份，明确拒绝 ready | 保持 inactive；不作为当前工作流的接收端，也不继续补独立 controller |
 
@@ -62,9 +63,56 @@ bootstrap。已验证的启动、安全和回收修复保留；后续 socket/std
    各自的证据。最小结果回传不代表 PR/CI/合并已验证；发布继续由现有发布者
    按精确提交的交接完成，结果必须主动通知，开发者核验后 ACK。
 
-先完成接收端条件核验再决定最小改动。若选择 Herdr-managed OpenCode receiver，
-现有原生 HTTP 接入不能充当证明；必须单独确认所需身份与接纳语义是否可满足，
-不以新建后台协调器填补缺口。此次文档修订不启动模型、watcher 或新会话。
+先完成接收端条件核验再决定最小改动。选择 Herdr 可见 OpenCode TUI 时，必须
+证明 HTTP endpoint 属于该 TUI，并核验 exact session、directory、model/provider/
+variant；仅有后台原生测试或相同 UID 不够。此次文档修改不启动新的会话或验收任务。
+
+### 已验证的可见 OpenCode TUI 路径
+
+2026-10-23 在上述新基线上，已有 OpenCode 1.19.4 会话经用户允许、完成交接并
+空闲后，在同一 Herdr pane 续接。受支持的 TUI 参数形状为：
+
+```bash
+herdr agent start REPLACE_NAME --kind opencode --pane REPLACE_PANE -- \
+  --hostname 127.0.0.1 --port REPLACE_PORT \
+  --session REPLACE_EXISTING_SESSION /absolute/existing/workspace
+```
+
+这不是 `opencode serve`，也不使用 fork、prompt 或 model 覆盖。命令只适用于
+已完成交接、回到交互 shell 且允许重启的 pane；不能为普通消息而重启正在工作的
+agent。参考 [OpenCode 启动和注册](opencode-v2.md)，端口和版本必须重新核对。
+
+实际观察已覆盖：Herdr 与 TUI HTTP 的同一 session、directory 和模型；由该 TUI
+进程持有的 loopback listener；`opencode register/status`；独立 OpenCode/queue
+watcher 的进程、锁和心跳；真实 queue 的 `active_wakeup=true`；开发者结果经
+queue 自动通知、真实 OpenCode ACK 与 task-apply；其后的 saved operation 由
+OpenCode task-begin、当前 Codex task-accept 接手。没有用测试驱动代替这些角色。
+
+第一条入口核验 wait 未绑定 producer，仅证明本机文件信任范围内的结果通道；
+后续实际任务已绑定 `producer={adapter:codex, session:exact-session}`。环境身份
+检查不是同 UID 攻击者之间的认证。私有状态、原始结果和具体 session ID 保留在
+checkout 外；跨会话使用前重查当前身份，不能复制旧 readiness 作为就绪证明。
+状态路径的所有祖先必须满足现有权限校验；若旧路径允许组写入，选择合规的私有
+路径，不通过修改共享目录权限或放宽校验来注册。
+
+上述证据不覆盖 queue 关联的真实 PR/CI/合并闭环、批次容量背压、claim 门禁或
+安全换班；`context_telemetry=false`、`safe_rotation=false` 仍明确保留。#112
+的原始未完成验收不因入口任务完成而关闭，V2/Gate 的启用条件不变。
+
+### 已登记队列的命令归属
+
+| 阶段 | 执行者 | 现有命令与判断 |
+| --- | --- | --- |
+| 接收端与任务登记 | exact OpenCode coordinator | `opencode register/watch`、`queue init/watch/enable/readiness`、`queue add/task-add`；OpenCode 身份使用核验后的 `OPENCODE_SESSION_ID` |
+| 消费与准备后继 | coordinator | `queue ack` 后检查证据、最新版本，再 `task-apply` 保存具体下一动作；ACK 不完成任务 |
+| 开始 saved dispatch | coordinator | 对同一 prepared operation `task-begin`，再通过 Herdr 明确交接；可选 `task-sent.response` 仅记录真实终端接纳 |
+| 接手与回传 | operation 指定的 producer | `task-accept` 检查 operation/assignment/adapter/session；Codex 使用自身 `CODEX_THREAD_ID`，完成实际工作后 `queue signal` |
+
+首次 task-add 没有 successor operation，不凭空 begin。后继已是 sending/submitted
+时先核对已有接手和回执，禁止重发；producer 已 accepted 时不为补写 task-sent
+再次发送。原授权仍覆盖的明确后继，由 coordinator 实际 begin/交接，producer
+实际 accept 后工作；不能新增“等用户再说继续”的条件。用户暂停、真实阻塞或授权
+不覆盖时，记录准确原因和恢复条件并主动通知。详见 [任务交接](handoff.md)。
 
 ### 当前会话限制
 
