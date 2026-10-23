@@ -1671,6 +1671,13 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
+    if apply_confirmed_revision {
+        artifact_names.extend([
+            "revised-reviewer-checkout",
+            "revised-developer-checkout",
+            "confirmed-reviewer-checkout",
+        ]);
+    }
     let artifact_roots: Vec<_> = if apply_development
         || apply_ambiguous
         || apply_confirmed_revision
@@ -4215,6 +4222,12 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
         expect_pass,
         evidence,
     } = spec;
+    let metadata_path = reviewer_root.join("review-metadata.json");
+    evidence.0.push(metadata_path.clone());
+    let report_path = cwd.join(".herdr-verdict.json");
+    if !evidence.0.contains(&report_path) {
+        evidence.0.push(report_path.clone());
+    }
     let mut turn = acceptance_live::native_prepare(env, q, cwd, activity, instruction);
     assert_eq!(turn.root, reviewer_root, "reviewer root identity changed");
     acceptance_live::native_dispatch(env, &turn);
@@ -4232,7 +4245,6 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     let result = acceptance_live::native_finish(env, &mut turn);
     assert_eq!(result["message_id"], json!(message));
     assert_ne!(result["session"], coordinator["session"]);
-    let report_path = cwd.join(".herdr-verdict.json");
     let report_bytes = fs::read(&report_path).unwrap();
     let report = util::read_json(&report_path).unwrap();
     assert_eq!(
@@ -4288,13 +4300,27 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     let session = result["session"].as_str().expect("reviewer session");
     let rows = session_rows(&turn.client, &turn.endpoint, session, cwd);
     let commands = tool_commands(&rows, session);
+    write_reviewer_metadata(
+        &metadata_path,
+        activity,
+        &submission,
+        &result,
+        &commands,
+        &rows,
+    );
     let inspect = commands
         .iter()
         .find(|command| command.command.trim() == "git show HEAD:file")
         .expect("reviewer artifact inspection");
     assert!(terminal_tool_state(inspect) && inspect.success);
     assert_eq!(inspect.exit, Some(0));
-    assert_eq!(inspect.output.trim(), inspection);
+    let inspected = inspect.output.trim();
+    assert!(
+        inspected == inspection,
+        "reviewer inspection content mismatch: expected {:?}, actual {:?}",
+        inspection.chars().take(512).collect::<String>(),
+        inspected.chars().take(512).collect::<String>()
+    );
     assert!(
         inspect.start > 0
             && inspect.start != i64::MAX
@@ -4306,6 +4332,69 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     state
 }
 
+fn write_reviewer_metadata(
+    path: &Path,
+    activity: &str,
+    submission: &J,
+    result: &J,
+    commands: &[ToolCommand],
+    rows: &J,
+) {
+    let session = result["session"].as_str().unwrap_or_default();
+    let message = result["message_id"].as_str().unwrap_or_default();
+    let reply = result["reply_id"].as_str().unwrap_or_default();
+    let completed: Vec<_> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row["info"]["sessionID"] == session
+                && row["info"]["role"] == "assistant"
+                && row["info"]["id"] == reply
+                && row["info"]["parentID"] == message
+        })
+        .filter_map(|row| row["info"]["time"]["completed"].as_f64())
+        .collect();
+    let field_truncated = commands
+        .iter()
+        .any(|command| command.command.chars().count() > 512);
+    let records: Vec<_> = commands
+        .iter()
+        .map(|command| {
+            json!({
+                "command": command.command.chars().take(512).collect::<String>(),
+                "status": command.status,
+                "exit": command.exit,
+                "success": command.success,
+                "start": command.start,
+                "end": command.end,
+            })
+        })
+        .collect();
+    let command_count = records.len();
+    let metadata = bounded_restore_tool_evidence(json!({
+        "schema":1,
+        "activity":activity,
+        "session":session,
+        "message_id":message,
+        "reply_id":reply,
+        "submission_created_at":submission["created_at"],
+        "result_phase":result["phase"],
+        "result_outcome":result["outcome"],
+        "reply_completion_times":completed,
+        "commands":records,
+        "command_count":command_count,
+        "inspection_matches":commands.iter().filter(|command| command.command.trim() == "git show HEAD:file").count(),
+        "field_truncated":field_truncated,
+        "truncated":field_truncated
+    }));
+    assert!(
+        serde_json::to_vec_pretty(&metadata).unwrap().len() <= 60 * 1024,
+        "reviewer metadata snapshot exceeds 60KiB"
+    );
+    util::atomic_write_json(path, &metadata).expect("reviewer metadata snapshot");
+}
+
 fn confirmed_revision_instruction(
     binary: &str,
     queue_path: &str,
@@ -4313,7 +4402,7 @@ fn confirmed_revision_instruction(
     decision_path: &Path,
     release_path: &Path,
 ) -> String {
-    let mut text = r#"Authorized disposable confirmed-revision fixture. Do not delegate or create sessions. Use only the supplied queue and cwd. Never deliver, edit queue/guard/state, fabricate an ACK, verdict, output, event, or continuation, and never press approvals.
+    let mut text = r#"Authorized disposable confirmed-revision fixture. Do not delegate or create sessions. Use only the supplied queue, registered collector evidence roots and cwd. Do not inspect herdr-flow source, the binary installation repository, operator repositories, sibling role checkouts, or any other paths. The schemas below are complete. Never search code to discover a schema. For each CLI invocation use <BINARY> queue <action> --state-dir <QUEUE> --spec <absolute JSON path in cwd> (ACK uses its notification delivery argument instead). Write a separate JSON spec file for each operation and retain it unchanged. Every task-lineage spec has top-level kind, task="project", state_version from the current project. For kind=continue, activity is a nested object with activity name, role, input, session_epoch, result_wait. For kind=activity, those activity fields are top-level. Use direct separate bash commands and stop on any non-lock-busy failure; never search source or request additional access. Never deliver, edit queue/guard/state, fabricate an ACK, verdict, output, event, or continuation, and never press approvals.
 
 PHASE 1: one accept-native ambiguous notification arrives. Use its exact OPENCODE_SESSION_ID. ACK exactly, then write <PHASE1_APP> with task=accept-native, current child state_version, exact event, exact registered verdict id, and next_action={kind:clarify,owner:native coordinator,reason:independent report,condition:existing authorization}; apply it once with queue task-apply. Run readiness with active_wakeup=true, and finish. Do not revise yet.
 
@@ -4498,7 +4587,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         activity: "accept-revised",
         cwd: &revised_cwd,
         input: artifact,
-        instruction: "You are the independent acceptance reviewer. The current confirmed requirement explicitly gives version B precedence over the original version A. Inspect the exact requested HEAD file with `git show HEAD:file` in a direct bash invocation. Report actual checks against the confirmed basis; if the artifact contains version A, write an honest failed verdict with a grounded gap. Never approve A under B and never claim delivery.",
+        instruction: "You are the independent acceptance reviewer. The current confirmed requirement explicitly gives version B precedence over the original version A. Inspect the exact requested HEAD file by running exactly `git show HEAD:file` as the complete command in its own direct bash tool call. Do not use cd, &&, ;, pipes, redirection, echo, printf, cat, status printing, shell wrappers, or any other command in that call; preserve its actual exit status, output and timestamps. Report actual checks against the confirmed basis; if the artifact contains version A, write an honest failed verdict with a grounded gap. Do not inspect source, operator repositories, sibling checkouts, coordinator instructions, or paths outside cwd. Never approve A under B and never claim delivery.",
         inspection: "version A",
         expect_pass: false,
         evidence,
@@ -4628,7 +4717,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         .collect::<Vec<_>>()
         .join("; ");
     let final_instruction = format!(
-        "You are the independent acceptance reviewer. Inspect the exact requested HEAD file against the current confirmed revision, which gives version B precedence. Run `git show HEAD:file` directly and derive the verdict from the actual content. Resolve every actual accept-revised gap using its exact activity/id and real evidence: {gap_list}. Write .herdr-verdict.json following acceptance_protocol with a factual resolutions entry for each gap; do not deliver or edit tracked files."
+        "You are the independent acceptance reviewer. Inspect the exact requested HEAD file against the current confirmed revision, which gives version B precedence. Run exactly `git show HEAD:file` as the complete command in its own direct bash tool call. Do not use cd, &&, ;, pipes, redirection, echo, printf, cat, status printing, shell wrappers, or any other command in that call; preserve its actual exit status, output and timestamps. Derive the verdict from the actual content. Do not inspect source, operator repositories, sibling checkouts, coordinator instructions, or paths outside cwd. Resolve every actual accept-revised gap using its exact activity/id and real evidence: {gap_list}. Write .herdr-verdict.json following acceptance_protocol with a factual resolutions entry for each gap; do not deliver or edit tracked files."
     );
     let final_state = registered_review_stage(RegisteredReviewSpec {
         env,
