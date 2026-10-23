@@ -631,6 +631,8 @@ fn installed_fresh_sessions_are_bound_and_entirely_destroyed() {
 }
 
 pub mod common;
+#[path = "common/receiver_bootstrap.rs"]
+mod receiver_bootstrap;
 #[path = "common/rpc_server.rs"]
 mod rpc_fixture;
 #[path = "common/runtime_http.rs"]
@@ -678,6 +680,40 @@ fn native_fixture_worker() {
                 break;
             }
             let request: J = serde_json::from_slice(&payload).unwrap();
+            if let Ok(control) = herdr_flow::util::read_json(&root.join("receiver-fixture.json")) {
+                let mut calls = herdr_flow::util::read_json(&root.join("receiver-calls.json"))
+                    .unwrap_or(json!([]));
+                calls.as_array_mut().unwrap().push(request.clone());
+                herdr_flow::util::atomic_write_json(&root.join("receiver-calls.json"), &calls)
+                    .unwrap();
+                assert_eq!(
+                    request["method"], "thread/start",
+                    "bootstrap must not send turns"
+                );
+                let journal = herdr_flow::util::read_json(&root.join("receiver.json")).unwrap();
+                assert_eq!(journal["phase"], "creating", "intent must precede request");
+                assert!(!root.join("creation.json").exists());
+                if control["mode"] == "disconnect" {
+                    break;
+                }
+                if control["mode"] == "rpc-error" {
+                    peer.json(&json!({"id":request["id"],"error":{"code":-32602,"message":"synthetic rejection"}}));
+                    continue;
+                }
+                if control["mode"] == "state-write-error" {
+                    fs::create_dir(root.join("receiver/state.json")).unwrap();
+                }
+                if let Some(result) = control.get("response") {
+                    peer.json(&json!({"id":request["id"],"result":result}));
+                    continue;
+                }
+            } else if request["method"] == "thread/start" {
+                assert_eq!(
+                    request["params"]["baseInstructions"],
+                    "Perform only the supplied task packet. Report evidence and blockers.",
+                    "worker instructions must remain unchanged"
+                );
+            }
             if request["method"] == "thread/turns/list" {
                 peer.json(&json!({"id":request["id"],"error":{"code":-32601,"message":"fixture uses native events"}}));
                 continue;

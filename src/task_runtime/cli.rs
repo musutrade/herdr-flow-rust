@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
 
 fn run(args: &[String]) -> Result<J> {
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
@@ -45,6 +45,7 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
             Ok(json!({"pid":child.id(),"phase":"started"}))
         }
         "create" => native::create(env, root, spec),
+        "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
@@ -151,7 +152,13 @@ mod lifecycle_tests {
         assert!(super::super::launch(&mut env, &root, &spec).is_err());
         assert!(!root.join("runtime.json").exists());
         for action in [
-            "launch", "create", "recover", "dispatch", "collect", "invalid",
+            "launch",
+            "create",
+            "receiver-bootstrap",
+            "recover",
+            "dispatch",
+            "collect",
+            "invalid",
         ] {
             assert!(action_run(action, &mut env, &root, &json!({})).is_err());
         }

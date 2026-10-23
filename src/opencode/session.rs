@@ -477,6 +477,7 @@ pub fn receiver_session(root: &Path) -> Result<Option<String>> {
         return Ok(std::env::var("CODEX_THREAD_ID").ok());
     };
     let state = util::read_state_json(Path::new(&guard_root), "state.json")?;
+    crate::task_runtime::native::receiver::require_adapter(&state)?;
     if !is_registered(&state) {
         return Ok(std::env::var("CODEX_THREAD_ID").ok());
     }

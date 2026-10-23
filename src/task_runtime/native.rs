@@ -1,5 +1,6 @@
 //! Fresh native sessions tied to one activity and an explicit input package.
 use super::*;
+pub mod receiver;
 mod rollout;
 use crate::opencode::http::HttpApi;
 use crate::{
@@ -55,6 +56,7 @@ pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     crate::task_env::validate_path(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let _session_lock = crate::guard::locked(root)?;
+    receiver::ensure_absent(&root.join("receiver.json"))?;
     ensure(
         !root.join("creation.json").exists(),
         "session creation already attempted; reconcile without replay",
@@ -235,9 +237,14 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
     let policy = approval_policy(state)?;
     let model = required(&state["model"], "id")?;
     let provider = required(&state["model"], "providerID")?;
+    let instructions = if receiver::is_task_owned(state) {
+        "Coordinate only the explicitly assigned task. Report evidence and blockers."
+    } else {
+        "Perform only the supplied task packet. Report evidence and blockers."
+    };
     let result = client(root)?.call("thread/start", &json!({"cwd":state["cwd"],"model":model,
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
-        "baseInstructions":"Perform only the supplied task packet. Report evidence and blockers.",
+        "baseInstructions":instructions,
         "developerInstructions":"","config":{"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}},
         "dynamicTools":[],"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
     state["session"] = result["thread"]["id"].clone();
