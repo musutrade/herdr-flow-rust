@@ -91,6 +91,31 @@ This adds no signalling authority. Discovery of children not recorded at
 registration, marker removal by unregistered children, and incomplete `/proc`
 observations remain separate limitations. #38/#32 remain open.
 
+### Unknown observations of known processes
+
+Static review at baseline `f732b5f` found that cleanup and the pidfd signal
+check used boolean liveness helpers that turn stat read/parse failures into
+`false`. Cleanup now uses a separate fallible check, with state and start time
+parsed from one read. A missing stat path additionally requires kernel-confirmed
+PID absence; it is not interpreted as exit merely because procfs is inaccessible.
+
+The `task_env::cleanup::observation::tests` unit fixtures inject `EACCES`, `EIO`,
+`ENOENT` and malformed stat content for one test-owned PID on the calling thread.
+These are **synthetic observation faults**, not reproduction of a host procfs
+failure and not model runs. They exercise quiescence, destruction and saved-plan
+retry for both a parent and a recorded descendant, retaining files, Git worktree
+obligations, roots, process records and occupied slots. Once the fault is removed
+and the child exits, the same plan completes. Other checks cover target filtering,
+marked-process termination, survivor verification and refusing to signal a live
+child whose identity cannot be observed. Invalid IDs, malformed identities,
+known mismatches, zombie/dead states and legacy missing start times are covered.
+
+The initial combined-fault fixture exceeded the existing cleanup retry limit;
+it was corrected to isolate each fault in its own environment. The production
+retry limit was not changed. Unknown/unregistered markerless processes and
+best-effort discovery scans remain outside this guarantee. Dispatch resend rules,
+native approvals and host security configuration are unchanged; #38/#32 stay open.
+
 ## Twenty-round protocol regression
 
 ```sh

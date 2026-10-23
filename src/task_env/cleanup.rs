@@ -23,6 +23,7 @@
 //! through [`cleanup_failed_environment`], and items whose resources are
 //! already gone count as complete so a crash mid-retry can finish.
 
+mod observation;
 mod signals;
 
 use std::ffi::{CString, OsStr};
@@ -39,9 +40,8 @@ use crate::util;
 
 use super::env::{
     clear_directory, descendants_snapshot, kind_at, open_beneath, open_child_dir,
-    open_dir_nofollow, process_is_alive, process_record_is_alive, unlink_at, unlink_at_dir,
-    EntryKind, EnvironmentState, ProcessRecord, RegisteredProcess, RootIdentity, TaskEnvironment,
-    WorktreeRegistration,
+    open_dir_nofollow, unlink_at, unlink_at_dir, EntryKind, EnvironmentState, ProcessRecord,
+    RegisteredProcess, RootIdentity, TaskEnvironment, WorktreeRegistration,
 };
 use super::registry;
 
@@ -451,20 +451,30 @@ fn collect_process_errors(state: &mut CleanupState, errors: &mut Vec<String>) {
 }
 
 fn retain_live_process(entry: &RegisteredProcess, errors: &mut Vec<String>) -> bool {
-    if !registered_family_is_alive(entry) {
-        return false;
-    }
-    errors.push(format!(
-        "registered process {} or a recorded descendant is still alive",
-        entry.pid
-    ));
+    match registered_family_is_alive(entry) {
+        Ok(false) => return false,
+        Ok(true) => errors.push(format!(
+            "registered process {} or a recorded descendant is still alive",
+            entry.pid
+        )),
+        Err(error) => errors.push(error.to_string()),
+    };
     true
 }
 
 /// Recorded descendants remain a cleanup obligation after their parent exits.
 /// This only blocks deletion; it adds no authority to signal an unmarked PID.
-fn registered_family_is_alive(entry: &RegisteredProcess) -> bool {
-    process_is_alive(entry) || entry.descendants.iter().any(process_record_is_alive)
+fn registered_family_is_alive(entry: &RegisteredProcess) -> std::io::Result<bool> {
+    let parent = ProcessRecord {
+        pid: entry.pid,
+        start_time: entry.start_time,
+    };
+    for record in std::iter::once(&parent).chain(&entry.descendants) {
+        if observation::is_alive(record)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn collect_worktree_errors(state: &mut CleanupState, errors: &mut Vec<String>) {
@@ -539,14 +549,18 @@ fn terminate_marked(instance_id: &str) -> Result<()> {
         for record in targets.clone() {
             targets.extend(descendants_snapshot(record.pid));
         }
-        targets.retain(process_record_is_alive);
+        retain_live_records(&mut targets)?;
         if targets.is_empty() {
             return Ok(());
         }
         terminate_records(&mut targets)?;
     }
+    ensure_no_marked(instance_id)
+}
+
+fn ensure_no_marked(instance_id: &str) -> Result<()> {
     let mut remaining = super::env::marked_processes(instance_id);
-    remaining.retain(process_record_is_alive);
+    retain_live_records(&mut remaining)?;
     if remaining.is_empty() {
         Ok(())
     } else {
@@ -564,7 +578,7 @@ fn terminate_marked(instance_id: &str) -> Result<()> {
 fn terminate_records(targets: &mut Vec<ProcessRecord>) -> Result<()> {
     targets.sort_by_key(|record| record.pid);
     targets.dedup_by_key(|record| record.pid);
-    targets.retain(process_record_is_alive);
+    retain_live_records(targets)?;
     if targets.is_empty() {
         return Ok(());
     }
@@ -588,7 +602,7 @@ fn kill_targets(targets: &[ProcessRecord]) -> std::io::Result<()> {
 fn wait_for_targets(targets: &[ProcessRecord]) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
     loop {
-        let survivors = live_survivors(targets);
+        let survivors = live_survivors(targets)?;
         if survivors.is_empty() {
             return Ok(());
         }
@@ -601,12 +615,20 @@ fn wait_for_targets(targets: &[ProcessRecord]) -> Result<()> {
     }
 }
 
-fn live_survivors(targets: &[ProcessRecord]) -> Vec<i32> {
-    targets
-        .iter()
-        .filter(|record| process_record_is_alive(record))
-        .map(|record| record.pid)
-        .collect()
+fn live_survivors(targets: &[ProcessRecord]) -> std::io::Result<Vec<i32>> {
+    let mut survivors = Vec::new();
+    for record in targets {
+        if observation::is_alive(record)? {
+            survivors.push(record.pid);
+        }
+    }
+    Ok(survivors)
+}
+
+fn retain_live_records(targets: &mut Vec<ProcessRecord>) -> std::io::Result<()> {
+    let live = live_survivors(targets)?;
+    targets.retain(|record| live.contains(&record.pid));
+    Ok(())
 }
 
 /// Remove a registered file by unlinking its entry, never its symlink target.
@@ -1074,7 +1096,7 @@ pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
     env.mark_destroying()?;
     terminate_marked(&env.instance_id)?;
     for process in &env.child_processes {
-        if registered_family_is_alive(process) {
+        if registered_family_is_alive(process)? {
             return Err(FlowError::progress(
                 "registered task process or a recorded descendant is still alive",
             ));
@@ -1110,11 +1132,11 @@ mod signal_identity_tests {
             }],
             direct_children: vec![live.clone()],
         };
-        let stale_or_unrelated = registered_family_is_alive(&family);
+        let stale_or_unrelated = registered_family_is_alive(&family).unwrap();
         family.descendants[0] = live.clone();
-        let recorded_live = registered_family_is_alive(&family);
+        let recorded_live = registered_family_is_alive(&family).unwrap();
         family.descendants[0].start_time = None;
-        let missing_identity_blocks = registered_family_is_alive(&family);
+        let missing_identity_blocks = registered_family_is_alive(&family).unwrap();
         family.descendants[0] = live;
         let was_running = child.try_wait().unwrap().is_none();
         let _ = child.kill();
@@ -1123,7 +1145,7 @@ mod signal_identity_tests {
         assert!(recorded_live);
         assert!(missing_identity_blocks);
         assert!(was_running);
-        assert!(!registered_family_is_alive(&family));
+        assert!(!registered_family_is_alive(&family).unwrap());
     }
 
     #[test]
@@ -1140,7 +1162,7 @@ mod signal_identity_tests {
             pid,
             start_time: Some(start.wrapping_add(1)),
         };
-        assert!(!process_record_is_alive(&stale));
+        assert!(!observation::is_alive(&stale).unwrap());
         kill_targets(&[stale]).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         let mut exited = false;

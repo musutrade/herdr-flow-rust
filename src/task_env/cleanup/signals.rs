@@ -2,7 +2,7 @@
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 
-use crate::task_env::env::{process_record_is_alive, ProcessRecord};
+use crate::task_env::env::ProcessRecord;
 
 pub(super) fn signal(record: &ProcessRecord, signal: i32) -> std::io::Result<()> {
     if record.pid <= 1 || record.start_time.is_none() {
@@ -15,13 +15,13 @@ pub(super) fn signal(record: &ProcessRecord, signal: i32) -> std::io::Result<()>
     // authority from an old record. Replacement after this check cannot retarget
     // the handle. /proc timestamps have kernel clock-tick precision, not a
     // cryptographic identity; discovery still needs valid ownership evidence.
-    if !process_record_is_alive(record) {
+    if !super::observation::is_alive(record)? {
         return Ok(());
     }
     send(&handle, signal)
 }
 
-fn open(pid: i32) -> std::io::Result<Option<File>> {
+pub(super) fn open(pid: i32) -> std::io::Result<Option<File>> {
     // SAFETY: pidfd_open takes a positive process ID and scalar flags; success
     // returns a fresh CLOEXEC descriptor, owned exactly once below.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
