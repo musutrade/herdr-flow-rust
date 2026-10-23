@@ -451,14 +451,20 @@ fn collect_process_errors(state: &mut CleanupState, errors: &mut Vec<String>) {
 }
 
 fn retain_live_process(entry: &RegisteredProcess, errors: &mut Vec<String>) -> bool {
-    if !process_is_alive(entry) {
+    if !registered_family_is_alive(entry) {
         return false;
     }
     errors.push(format!(
-        "registered process {} is alive but not marked by this environment",
+        "registered process {} or a recorded descendant is still alive",
         entry.pid
     ));
     true
+}
+
+/// Recorded descendants remain a cleanup obligation after their parent exits.
+/// This only blocks deletion; it adds no authority to signal an unmarked PID.
+fn registered_family_is_alive(entry: &RegisteredProcess) -> bool {
+    process_is_alive(entry) || entry.descendants.iter().any(process_record_is_alive)
 }
 
 fn collect_worktree_errors(state: &mut CleanupState, errors: &mut Vec<String>) {
@@ -1068,9 +1074,9 @@ pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
     env.mark_destroying()?;
     terminate_marked(&env.instance_id)?;
     for process in &env.child_processes {
-        if process_is_alive(process) {
+        if registered_family_is_alive(process) {
             return Err(FlowError::progress(
-                "registered task process is still alive",
+                "registered task process or a recorded descendant is still alive",
             ));
         }
     }
@@ -1081,6 +1087,44 @@ pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
 #[cfg(test)]
 mod signal_identity_tests {
     use super::*;
+
+    #[test]
+    fn recorded_family_checks_descendants_without_claiming_supervisor_children() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let start = super::super::env::process_start_time(pid).unwrap();
+        let live = ProcessRecord {
+            pid,
+            start_time: Some(start),
+        };
+        let mut family = RegisteredProcess {
+            pid: i32::MAX,
+            pgid: i32::MAX,
+            start_time: Some(1),
+            descendants: vec![ProcessRecord {
+                pid,
+                start_time: Some(start.wrapping_add(1)),
+            }],
+            direct_children: vec![live.clone()],
+        };
+        let stale_or_unrelated = registered_family_is_alive(&family);
+        family.descendants[0] = live.clone();
+        let recorded_live = registered_family_is_alive(&family);
+        family.descendants[0].start_time = None;
+        let missing_identity_blocks = registered_family_is_alive(&family);
+        family.descendants[0] = live;
+        let was_running = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(!stale_or_unrelated);
+        assert!(recorded_live);
+        assert!(missing_identity_blocks);
+        assert!(was_running);
+        assert!(!registered_family_is_alive(&family));
+    }
 
     #[test]
     fn signal_stage_rejects_stale_process_identity() {

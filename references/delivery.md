@@ -127,13 +127,23 @@ After shared removal is durably recorded, the existing descriptor-pinned
 whole-environment destructor releases registered files, worktree registrations
 and both roots, in that order. Files within a worktree are unlinked before Git
 removes their parent directories. The destructor and cleanup-plan retry first
-require a successful process stage. If signalling fails or a registered live process remains without its
-marker, they preserve pending worktrees, files and roots along with the plan and
+require a successful process stage. Both the registered parent and its recorded
+descendants remain cleanup obligations, even after the parent exits. The same
+check gates quiescence before shared queue records are removed. If signalling
+fails or one of those recorded processes is still live without its marker,
+they preserve pending worktrees, files and roots along with the plan and
 occupied slot. They do not unlink those resources beneath the surviving process.
 Local supervisor file handles may already be closed; that is separate from path
 removal. After the process obstruction is resolved, retry resumes the same plan.
 This ordering does not make marker-based discovery exhaustive or grant authority
 to signal an unmarked process.
+
+Recorded descendant liveness uses the existing PID/start-time comparison; a
+known mismatch is not that recorded process. Legacy records without a start
+time conservatively block while that PID is observed live, without authorizing
+a signal. The supervisor's `direct_children` snapshot can include unrelated
+tasks and is not used as an ownership or cleanup-blocking claim. Children absent
+from registration and no longer marked remain outside this discovery guarantee.
 
 A partially removed environment retries the saved destruction plan; it does
 not need the already removed queue. Completion is returned only after destruction

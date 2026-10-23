@@ -84,10 +84,10 @@ pub struct WorktreeRegistration {
 
 /// A registered child process.
 ///
-/// `pgid` must equal `pid`: the environment only takes ownership of processes
-/// that lead their own process group, which is what makes descendant cleanup
-/// airtight (a late child inherits the group). `start_time` guards against pid
-/// reuse after the original process exits.
+/// `pgid` must equal `pid`: the environment only registers process-group
+/// leaders. Markers discover later children; the registration snapshot retains
+/// known descendants after the parent exits. This is not exhaustive discovery
+/// of markerless children. `start_time` guards against observed PID reuse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredProcess {
     pub pid: i32,
@@ -98,9 +98,9 @@ pub struct RegisteredProcess {
     /// still be attributed to this environment.
     #[serde(default)]
     pub descendants: Vec<ProcessRecord>,
-    /// Direct children of the supervisor at registration. Any *new* direct
-    /// child later is an orphan reparented to the supervisor (which registers
-    /// itself as a child subreaper) and belongs to this environment.
+    /// Diagnostic snapshot of the supervisor's direct children at registration.
+    /// These can belong to other tasks. This list and later differences are
+    /// not ownership evidence and do not authorize signalling or retain slots.
     #[serde(default)]
     pub direct_children: Vec<ProcessRecord>,
 }
