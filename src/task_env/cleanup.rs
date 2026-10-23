@@ -425,8 +425,16 @@ fn remove_document_if_current(task_id: &str, instance_id: &str) -> Result<()> {
 fn run_cleanup(state: &mut CleanupState) -> Result<()> {
     let mut errors = Vec::new();
     collect_process_errors(state, &mut errors);
-    collect_worktree_errors(state, &mut errors);
+    // A surviving writer can keep deleted files open or recreate paths while
+    // cleanup removes them. Keep every filesystem obligation intact until the
+    // process stage succeeds, including on plan-only retries.
+    if !errors.is_empty() {
+        return finish_cleanup(state, errors);
+    }
+    // A worktree removal also removes its directories. Unlink registered
+    // files first while their descriptor-anchored parent walk still exists.
     collect_file_errors(state, &mut errors);
+    collect_worktree_errors(state, &mut errors);
     if let Err(error) = release_pending_roots(state) {
         errors.push(format!("roots: {error}"));
     }
