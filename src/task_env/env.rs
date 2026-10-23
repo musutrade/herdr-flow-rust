@@ -514,7 +514,9 @@ fn process_state(pid: i32) -> Option<char> {
     rest.split_whitespace().next()?.chars().next()
 }
 
-/// Whether a recorded process identity still names a live process.
+/// Best-effort diagnostic: whether a recorded identity is observed live.
+/// Observation failure also returns false. Destructive cleanup uses its own
+/// fallible observation and must not use this boolean as proof of exit.
 pub fn process_record_is_alive(record: &ProcessRecord) -> bool {
     if record.pid <= 1 {
         return false;
@@ -824,7 +826,8 @@ fn parent_of(pid: i32) -> Option<i32> {
         .ok()
 }
 
-/// Whether a registered process is still the same live (non-zombie) process.
+/// Best-effort diagnostic for a registered live (non-zombie) process.
+/// Observation failure also returns false; this is not proof of exit.
 pub fn process_is_alive(entry: &RegisteredProcess) -> bool {
     if entry.pid <= 1 {
         return false;
