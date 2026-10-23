@@ -7,6 +7,7 @@
 pub mod acceptance;
 pub mod artifact;
 pub mod lineage;
+pub(crate) mod ownership;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -188,6 +189,7 @@ pub fn reserve_writer(
         return Err(progress_error("writer workspace must be absolute"));
     }
     let workspace = resolve_path(path).display().to_string();
+    ownership::writer_reservation(s, task_name, Path::new(&workspace))?;
     if let Some(tasks) = model::get(s, "tasks").and_then(Value::as_object) {
         for task in tasks.values() {
             workspace_conflict(task, Path::new(&workspace), task_name)?;

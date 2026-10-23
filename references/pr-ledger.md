@@ -41,6 +41,40 @@ commit list, matching origin and absolute checkout root. Missing source, merges
 inside the range and ambiguous scope fail. Fork PR publication is not supported
 by this first adapter.
 
+### Cross-task ownership in one queue
+
+Both `pr-prepare` and `pr-begin` check all other tasks before storing the intent
+or marking it sending. A foreign writer on the same checkout, an ancestor, or a
+descendant blocks publication even when its session matches or its task is
+paused, cancelled or completed. Paths are checked as canonical existing
+directories, including symlink targets; malformed identities or unavailable
+ownership paths require inspection instead of being treated as free. The
+current task still needs its existing idle/writer-release check at `pr-begin`.
+
+The tuple `(host, repo, base_ref, head_ref)` is reserved by an existing foreign
+PR record even before it has a PR number. Host/repo comparisons ignore ASCII
+case; branch names remain case-sensitive. Changing the commit SHA or checkout
+does not create a new intent identity. Cancel/release and landing retain that
+ownership; this slice does not provide same-branch reassignment or remove old
+records. A released, abandoned **prepared** intent can be superseded using a
+distinct branch. Sending/unconfirmed publication must first be reconciled and
+must never be replayed.
+
+The reverse check runs when reserving a writer: another task's publication in
+`sending` blocks an overlapping checkout, including after cancellation or
+writer release. While checking a sending publication, both paths must be
+verifiable existing directories. `prepared` does not itself prevent local
+development; `pr-begin` rechecks any writer acquired in the meantime. Observed
+publication no longer holds this sending restriction. Distinct branches with
+disjoint worktrees remain parallel; this adds no global CI/developer limit.
+
+These checks reuse `tasks[*].writer`, `tasks[*].pr` and the existing queue lock.
+The CLI acquires the lock; direct library callers must hold it across
+load/check/save. The checks are cooperative within that queue, not filesystem
+leases against external Git processes, other queues or hostile path replacement.
+An outer save error remains an error requiring inspection, never permission to
+publish or resend. No new recovery transaction is introduced.
+
 Dependencies explicitly name registered task/head pairs, for example
 `[{"task":"owner/repo#122","head":"FULL_ORIGINAL_TASK_HEAD"}]`. Each dependency
 head must be at/before this task's original base. Its confirmed PR landing map is
