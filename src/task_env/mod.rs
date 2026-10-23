@@ -104,7 +104,9 @@ pub fn restore_environment(task_id: &str) -> Result<TaskEnvironment> {
 /// resumed with [`cleanup_failed_environment`]. Loads durable registration so a
 /// stale handle cannot omit later resources. May stop/kill owned processes,
 /// close local descriptors, remove disposable trees and unregister worktrees;
-/// failures do not roll back those effects. Call from an external supervisor,
+/// failures do not roll back those effects. Process-stage errors defer worktree,
+/// file and root removal, preserving their cleanup obligations for retry.
+/// Call from an external supervisor,
 /// not a task-owned process. Do not free claims or delete journals after errors.
 pub fn destroy_environment(environment: &TaskEnvironment) -> Result<()> {
     cleanup::destroy(environment)

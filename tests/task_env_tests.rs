@@ -595,6 +595,157 @@ fn unrelated_supervisor_child_survives_destroy() {
     let _ = unrelated.wait();
 }
 
+struct MarkerlessWriter(std::process::Child);
+
+impl Drop for MarkerlessWriter {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn writer_losing_marker(env: &mut TaskEnvironment, file: &Path) -> MarkerlessWriter {
+    use std::io::Write;
+    let marked = env.temp_root.join("marked.pid");
+    let unmarked = env.temp_root.join("unmarked.pid");
+    let script = r#"
+        exec 3<"$1"
+        echo $$ > "$2"
+        read -r go
+        exec env -u HERDR_TASK_ENV_INSTANCE sh -c 'echo $$ > "$1"; exec sleep 60' herdr-test "$3"
+    "#;
+    let mut child = MarkerlessWriter(
+        env.command("sh")
+            .args(["-c", script, "herdr-test"])
+            .arg(file)
+            .arg(&marked)
+            .arg(&unmarked)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id() as i32;
+    assert_eq!(wait_for_pid_file(&marked), pid);
+    env.register_process(pid).unwrap();
+    child.0.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    assert_eq!(wait_for_pid_file(&unmarked), pid);
+    assert!(!process_has_marker(pid, &env.instance_id));
+    assert!(process_is_alive(&env.child_processes[0]));
+    child
+}
+
+fn cleanup_fixture_worktree(repo: &Path, worktree: &Path) {
+    fs::create_dir(repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(worktree)
+        .status()
+        .unwrap()
+        .success());
+}
+
+fn worktree_is_registered(repo: &Path, worktree: &Path) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .any(|line| line == format!("worktree {}", worktree.display()))
+}
+
+fn assert_writer_blocked_cleanup(env: &TaskEnvironment, file: &Path, attempts: u32) {
+    let plan: serde_json::Value =
+        serde_json::from_slice(&fs::read(cleanup_state_path(&env.task_id).unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(plan["attempts"], attempts);
+    assert_eq!(plan["pending_processes"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["pending_worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["pending_files"], serde_json::json!([file]));
+    assert_eq!(plan["pending_root_removals"].as_array().unwrap().len(), 2);
+    assert!(plan["quarantine"].is_null());
+    assert!(plan["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("registered process"));
+    assert_eq!(fs::read_to_string(file).unwrap(), "owned payload");
+    assert!(env.workspace_root.is_dir());
+    assert!(env.temp_root.is_dir());
+    assert!(env.state_file().exists());
+    assert!(is_registered(&env.task_id).unwrap());
+    // Existing accounting counts the environment document and cleanup plan.
+    assert_eq!(occupied_slots().unwrap(), 2);
+}
+
+#[test]
+fn live_registered_writer_blocks_file_worktree_and_root_cleanup_until_exit() {
+    let harness = Harness::new();
+    let mut env = harness.create("writer-barrier");
+    let repo = harness.path().join("repo");
+    let worktree = env.workspace_root.join("linked");
+    cleanup_fixture_worktree(&repo, &worktree);
+    env.register_worktree(&worktree).unwrap();
+    let file = worktree.join("held.txt");
+    fs::write(&file, "owned payload").unwrap();
+    env.register_file(&file).unwrap();
+    let mut writer = writer_losing_marker(&mut env, &file);
+    let fd = PathBuf::from(format!("/proc/{}/fd/3", writer.0.id()));
+    assert_eq!(fs::read_link(&fd).unwrap(), file);
+
+    let error = destroy_environment(&env).unwrap_err();
+    assert!(error.to_string().contains("registered process"));
+    assert_eq!(fs::read_link(&fd).unwrap(), file);
+    assert_writer_blocked_cleanup(&env, &file, 1);
+    assert!(worktree_is_registered(&repo, &worktree));
+    assert!(writer.0.try_wait().unwrap().is_none());
+
+    assert!(cleanup_failed_environment(&env.task_id).is_err());
+    assert_writer_blocked_cleanup(&env, &file, 2);
+    assert!(worktree_is_registered(&repo, &worktree));
+    assert_eq!(fs::read_link(&fd).unwrap(), file);
+
+    // End only the fixture's own child, then exercise the production retry.
+    writer.0.kill().unwrap();
+    writer.0.wait().unwrap();
+    cleanup_failed_environment(&env.task_id).unwrap();
+    assert!(!env.workspace_root.exists());
+    assert!(!env.temp_root.exists());
+    assert!(!worktree_is_registered(&repo, &worktree));
+    assert!(repo.join(".git").is_dir());
+    assert!(!env.state_file().exists());
+    assert!(!cleanup_state_path(&env.task_id).unwrap().exists());
+    assert!(!is_registered(&env.task_id).unwrap());
+    assert_eq!(occupied_slots().unwrap(), 0);
+    assert!(!recover_interrupted(&env.task_id).unwrap());
+}
+
 #[test]
 fn destroying_one_environment_leaves_anothers_orphan_alone() {
     let harness = Harness::new();

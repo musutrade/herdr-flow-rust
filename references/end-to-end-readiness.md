@@ -44,6 +44,32 @@ The dated runs below retain their original outcomes and evidence limits; their
 historical Codex host-blocker statements are superseded by the current table and
 [startup adaptation](../docs/codex-startup-adaptation.md), not by a new model run.
 
+## Stop processes before removing their resources
+
+The no-model regression
+`live_registered_writer_blocks_file_worktree_and_root_cleanup_until_exit`
+registers a real task process, then has that same process exec without its marker
+while holding an open file in a registered Git worktree. Its recorded PID/start
+identity remains live. At baseline `8b76ac5`, destruction returned an
+error but had already removed the worktree obligation. That failed regression
+is not counted as a successful cleanup.
+
+Destruction and saved-plan retries now stop before filesystem removal when the
+process stage fails. The regression checks the saved pending files, worktrees
+and roots, the live process's file descriptor (without a deleted-file suffix),
+the Git registration, and retained registry/plan state on two failed attempts.
+Once the fixture terminates and reaps only its own child, the same cleanup plan
+finishes and removes its roots, registration, environment document and plan.
+Registered files are removed before their enclosing worktrees so that Git does
+not remove a parent needed by the later file-unlink operation. The repository
+outside the task roots is preserved.
+
+This is a cleanup ordering fix with real local processes and Git, not a native
+model run. It does not establish exhaustive process discovery, detection of
+unregistered markerless orphans, completeness of `/proc` observations, or
+outside-root cache/session ownership. Dispatch and delivery replay policies are
+unchanged; #38/#32 remain open.
+
 ## Twenty-round protocol regression
 
 ```sh

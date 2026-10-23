@@ -124,8 +124,18 @@ Do not declare a shared native conversation disposable by deleting only its guar
 metadata. Shared services are not stopped or recursively deleted.
 
 After shared removal is durably recorded, the existing descriptor-pinned
-whole-environment destructor releases worktree registrations, files and both
-roots. A partially removed environment retries the saved destruction plan; it does
+whole-environment destructor releases registered files, worktree registrations
+and both roots, in that order. Files within a worktree are unlinked before Git
+removes their parent directories. The destructor and cleanup-plan retry first
+require a successful process stage. If signalling fails or a registered live process remains without its
+marker, they preserve pending worktrees, files and roots along with the plan and
+occupied slot. They do not unlink those resources beneath the surviving process.
+Local supervisor file handles may already be closed; that is separate from path
+removal. After the process obstruction is resolved, retry resumes the same plan.
+This ordering does not make marker-based discovery exhaustive or grant authority
+to signal an unmarked process.
+
+A partially removed environment retries the saved destruction plan; it does
 not need the already removed queue. Completion is returned only after destruction
 succeeds. The environment document, cleanup plan, registry entry and per-task lock
 file are removed. Task-lock opening and lock-file removal share the registry lock
