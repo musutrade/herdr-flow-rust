@@ -4404,18 +4404,18 @@ fn confirmed_revision_instruction(
 ) -> String {
     let mut text = r#"Authorized disposable confirmed-revision fixture. Do not delegate or create sessions. Use only the supplied queue, registered collector evidence roots and cwd. Do not inspect herdr-flow source, the binary installation repository, operator repositories, sibling role checkouts, or any other paths. The schemas below are complete. Never search code to discover a schema. For each CLI invocation use <BINARY> queue <action> --state-dir <QUEUE> --spec <absolute JSON path in cwd> (ACK uses its notification delivery argument instead). Write a separate JSON spec file for each operation and retain it unchanged. Every task-lineage spec has top-level kind, task="project", state_version from the current project. For kind=continue, activity is a nested object with activity name, role, input, session_epoch, result_wait. For kind=activity, those activity fields are top-level. Use direct separate bash commands and stop on any non-lock-busy failure; never search source or request additional access. Never deliver, edit queue/guard/state, fabricate an ACK, verdict, output, event, or continuation, and never press approvals.
 
-PHASE 1: one accept-native ambiguous notification arrives. Use its exact OPENCODE_SESSION_ID. ACK exactly, then write <PHASE1_APP> with task=accept-native, current child state_version, exact event, exact registered verdict id, and next_action={kind:clarify,owner:native coordinator,reason:independent report,condition:existing authorization}; apply it once with queue task-apply. Run readiness with active_wakeup=true, and finish. Do not revise yet.
+PHASE 1: one accept-native ambiguous notification arrives. Use its exact OPENCODE_SESSION_ID. ACK exactly, then read the current child and pending event. Write <PHASE1_APP> as {"task":"accept-native","state_version":<current child integer>,"event":<exact pending event id>,"verdict":<child.verdict.id>,"next_action":{"kind":"clarify","owner":"native coordinator","reason":"independent report","condition":"existing authorization"}}; substitute actual values for angle placeholders. Omit output, acceptance, findings, resolve_findings and report. Apply it once with queue task-apply. Run readiness with active_wakeup=true, and finish. Do not revise yet.
 
 CONFIRMED-REVISION SIGNAL: later a confirmed-revision notification arrives. ACK its exact delivery as receipt only; do not task-apply it. Read the immutable decision at <DECISION> and require fixture_only=true, user_choice="version B", historical_authority=false. Then use the current project state_version to run exactly these task-lineage commands:
-1) revise with goal "Deliver version B for the disposable confirmed-revision fixture" and basis original=[<ORIGINAL>], changes=[<PRECEDENCE>, <CHANGE>], specifications=[<SPEC>], endpoint="disposable confirmed revision endpoint", confirmation=<USER_CHOICE>. Omit authorization so revision 2 inherits and keeps revision 1 authorization unchanged.
-2) candidate with the exact artifact A id and reason "reselect A for honest independent review under confirmed revision B".
-3) continue with intent=accept-native, authorization=verify, action=review, resolution=<DECISION>, and activity accept-revised role=acceptance input=<A>, session_epoch=2, result_wait={id:accept-revised,task:accept-revised,epoch:2,assignment:accept-revised-a2,owner:reviewer,kind:signal,reason:honest A-versus-B review,condition:terminal report,timeout_seconds:1800}. Run readiness and finish.
+1) Write exactly {"kind":"revise","task":"project","state_version":<current project integer>,"goal":"Deliver version B for the disposable confirmed-revision fixture","basis":{"original":["<ORIGINAL>"],"changes":["<PRECEDENCE>","<CHANGE>"],"specifications":["<SPEC>"],"endpoint":"disposable confirmed revision endpoint","confirmation":"<USER_CHOICE>"}}. endpoint and confirmation are inside basis, never top-level. Omit authorization and acceptance so revision 2 inherits revision 1 authorization and completion criteria unchanged. Invoke task-lineage once.
+2) Write {"kind":"candidate","task":"project","state_version":<current project integer AFTER revise>,"candidate":<exact artifact A id string from project.artifacts>,"reason":"reselect A for honest independent review under confirmed revision B"}. The id field is literally candidate, not artifact, id or input. Invoke task-lineage once.
+3) Write a continue spec with exactly {"kind":"continue","task":"project","state_version":<current project integer AFTER candidate>,"intent":<current project.continuation.id>,"authorization":"verify","action":"review","resolution":"<DECISION>","activity":{"activity":"accept-revised","role":"acceptance","input":<artifact A id string>,"session_epoch":2,"result_wait":{"id":"accept-revised","task":"accept-revised","epoch":2,"assignment":"accept-revised-a2","owner":"reviewer","kind":"signal","reason":"honest A-versus-B review","condition":"terminal report","timeout_seconds":1800}}}. The nested activity key is literally activity, not name, id or task. The intent must be the actual clarify continuation id. Invoke task-lineage once. Run readiness and finish.
 
-ACCEPT-REVISED: one failed independent verdict for A under B arrives. ACK, read the exact registered verdict/binding, apply it with next_action kind=repair, then run one task-lineage continue with intent=accept-revised, authorization=develop, action=development, resolution="confirmed revision B requires development after honest A failure", and activity revised-develop role=development input=<A>, session_epoch=2, result_wait={id:revised-develop,task:revised-develop,epoch:2,assignment:revised-develop-a2,owner:developer,kind:signal,reason:confirmed B development,condition:terminal result,timeout_seconds:1800}. Run readiness and finish. If the verdict is not failed, stop and fail; never approve A.
+ACCEPT-REVISED: one failed independent verdict for A under B arrives. ACK, read the exact registered verdict/binding and current child. Write an application with exactly task="accept-revised", state_version=<current child integer>, event=<exact pending event id>, verdict=<child.verdict.id>, next_action={"kind":"repair","owner":"native coordinator","reason":"independent failed review","condition":"existing development authorization"}. Omit output, acceptance, findings, resolve_findings and report. Apply it once, then write and invoke one task-lineage continue spec {"kind":"continue","task":"project","state_version":<current project integer AFTER failed application>,"intent":<current project.continuation.id>,"authorization":"develop","action":"development","resolution":"confirmed revision B requires development after honest A failure","activity":{"activity":"revised-develop","role":"development","input":<artifact A id string>,"session_epoch":2,"result_wait":{"id":"revised-develop","task":"revised-develop","epoch":2,"assignment":"revised-develop-a2","owner":"developer","kind":"signal","reason":"confirmed B development","condition":"terminal result","timeout_seconds":1800}}}. Run readiness and finish. If the verdict is not failed, stop and fail; never approve A.
 
-REVISED-DEVELOP: one development result for revised-develop arrives. ACK, read its exact collector output, and read the factual release receipt at <RELEASE> (wait at most 15 seconds for the driver to stop/reap; never infer or fabricate stop status). Apply it with task=revised-develop, current child state_version, exact event, output unchanged, acceptance={goal:"development assignment completed"}, release_evidence=<actual receipt status>, next_action kind=complete. Then run task-lineage candidate with the exact output id and reason "confirmed version B development output". Then run task-lineage activity accept-confirmed role=acceptance input=<B>, session_epoch=3, result_wait={id:accept-confirmed,task:accept-confirmed,epoch:3,assignment:accept-confirmed-a3,owner:reviewer,kind:signal,reason:fresh B acceptance,condition:terminal report,timeout_seconds:1800}. Run readiness and finish.
+REVISED-DEVELOP: one development result for revised-develop arrives. ACK, read its exact collector output, and read the factual release receipt at <RELEASE> (wait at most 15 seconds for the driver to stop/reap; never infer or fabricate stop status). Apply it with task=revised-develop, current child state_version, exact event, output unchanged, acceptance={goal:"development assignment completed"}, release_evidence=<actual receipt status>, next_action={"kind":"complete"}. These are top-level application fields; omit verdict and report. Then invoke task-lineage with {"kind":"candidate","task":"project","state_version":<current project integer AFTER development application>,"candidate":<exact collector output.id string>,"reason":"confirmed version B development output"}. Then invoke task-lineage with {"kind":"activity","task":"project","state_version":<current project integer AFTER candidate>,"activity":"accept-confirmed","role":"acceptance","input":<exact B id string>,"session_epoch":3,"result_wait":{"id":"accept-confirmed","task":"accept-confirmed","epoch":3,"assignment":"accept-confirmed-a3","owner":"reviewer","kind":"signal","reason":"fresh B acceptance","condition":"terminal report","timeout_seconds":1800}}. These activity fields are flat, not nested. Run readiness and finish.
 
-ACCEPT-CONFIRMED: one passed independent verdict for B arrives. ACK and read the actual accept-revised failed report gaps. Apply the exact immutable verdict with next_action kind=delivery, ensuring its actual resolutions include every accept-revised gap id with real evidence. Run readiness and finish. No customer delivery and no replacement artifact. If any actual conclusion differs or a gap is unresolved, stop and fail honestly.
+ACCEPT-CONFIRMED: one passed independent verdict for B arrives. ACK and read the actual accept-revised failed report gaps. Write an application with exactly task="accept-confirmed", state_version=<current child integer>, event=<exact pending event id>, verdict=<child.verdict.id>, next_action={"kind":"delivery","owner":"native coordinator","reason":"independent passed review","condition":"existing authorization"}. Omit output, acceptance, findings, resolve_findings and report. Apply this exact immutable verdict once, ensuring its actual resolutions include every accept-revised gap id with real evidence. Run readiness and finish. No customer delivery and no replacement artifact. If any actual conclusion differs or a gap is unresolved, stop and fail honestly.
 
 Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Write each task-lineage/application spec to an absolute path under <CWD> and invoke the named supported command once; retry only lock-busy errors. Preserve phase-1 requirement/verdict/report bytes and revision-2 authorization."#.to_string();
     let replacements = [
@@ -4438,6 +4438,65 @@ Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Writ
         text = text.replace(from, &to);
     }
     text
+}
+
+fn confirmed_spec_shape(command: &str, cwd: &Path) -> J {
+    let parts: Vec<_> = command.split_whitespace().collect();
+    let Some(index) = parts.iter().position(|part| *part == "--spec") else {
+        return J::Null;
+    };
+    let Some(path) = parts.get(index + 1) else {
+        return J::Null;
+    };
+    let path = Path::new(path.trim_matches(|c| c == '\'' || c == '"'));
+    let Ok(resolved) = path.canonicalize() else {
+        return json!({"unavailable":true});
+    };
+    let Ok(root) = cwd.canonicalize() else {
+        return json!({"unavailable":true});
+    };
+    if !resolved.starts_with(root) {
+        return json!({"outside_cwd":true});
+    }
+    let value = bounded_cleanup_document(&resolved, 60 * 1024);
+    let fields = [
+        "kind",
+        "task",
+        "state_version",
+        "candidate",
+        "reason",
+        "intent",
+        "authorization",
+        "action",
+        "resolution",
+        "activity",
+        "role",
+        "input",
+        "session_epoch",
+        "result_wait",
+        "event",
+        "verdict",
+        "next_action",
+        "goal",
+        "basis",
+        "output",
+        "acceptance",
+        "release_evidence",
+    ];
+    let mut shape = serde_json::Map::new();
+    for key in fields {
+        let kind = match value.get(key) {
+            None => "missing",
+            Some(J::Null) => "null",
+            Some(J::Bool(_)) => "bool",
+            Some(J::Number(_)) => "number",
+            Some(J::String(_)) => "string",
+            Some(J::Array(_)) => "array",
+            Some(J::Object(_)) => "object",
+        };
+        shape.insert(key.to_string(), json!(kind));
+    }
+    json!({"sample":"final file, not proof of invocation-time bytes","fields":shape})
 }
 
 fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
@@ -4466,6 +4525,9 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     let ambiguity_application = cwd.join("ambiguity-application.json");
     let command_path = q.parent().unwrap().join("confirmed-revision-commands.json");
     evidence.0.push(command_path.clone());
+    evidence
+        .0
+        .push(q.parent().unwrap().join("ambiguity-command-metadata.json"));
     let revised_release = q.parent().unwrap().join("revised-develop-release.json");
     evidence.0.push(revised_release.clone());
     assert_eq!(
@@ -4484,7 +4546,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     ] {
         evidence.0.push(path);
     }
-    let phase1_instruction = "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include blocked checks with criterion=goal and source exactly equal to each conflicting basis reference. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+    let phase1_instruction = "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include exactly three blocked checks with criterion=goal, one source copied exactly from each conflicting original/changes/specifications reference. checks.source must never name basis.confirmation or an authorization source: review those too, but record them only in agreements_checked, because they are not completion-criterion sources. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
     let phase1_state = native_review_stage(
         env,
         q,
@@ -4647,6 +4709,15 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     let developed = acceptance_live::native_finish(env, &mut developer_turn);
     let developer = util::read_json(&developer_turn.root.join("state.json")).unwrap();
     developer_turn.stop();
+    util::atomic_write_json(
+        &revised_release,
+        &json!({
+            "session":developer["session"],
+            "runtime":revised_developer_root,
+            "status":"server stopped and reaped after terminal collection"
+        }),
+    )
+    .unwrap();
     let output = developed["output"].clone();
     assert_ne!(output["id"], artifact_id);
     assert_eq!(git(&development_cwd, &["rev-parse", "HEAD"]), output["id"]);
@@ -4675,7 +4746,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     assert_eq!(developed_state["lineage"]["input"], artifact_id);
     assert_eq!(developed_state["lineage"]["revision"], 2);
     assert_eq!(developed_state["lineage"]["round"], 0);
-    let developed_queue = queue::load_queue(q).unwrap();
+    let developed_queue = wait_for_stage(q, guard, coordinator, "revised-develop");
     let developer_events: Vec<_> = developed_queue["events"]
         .as_object()
         .unwrap()
@@ -4691,15 +4762,6 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     )
     .expect("developer delivery");
     assert_eq!(developer_delivery.1["phase"], "acknowledged");
-    util::atomic_write_json(
-        &revised_release,
-        &json!({
-            "session":developer["session"],
-            "runtime":revised_developer_root,
-            "status":"server stopped and reaped after terminal collection"
-        }),
-    )
-    .unwrap();
 
     wait_for_registered_task(q, "accept-confirmed");
     let final_cwd = acceptance_live::clone_snapshot(env, &output, "confirmed-reviewer-checkout");
@@ -4931,15 +4993,35 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
             )
         })
         .collect();
+    let diagnostic_commands: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            (command.command.contains("queue ack")
+                || command.command.contains("queue task-lineage")
+                || command.command.contains("queue task-apply"))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
     let mut command_evidence = json!({
         "signal_delivery": signal_delivery,
         "spec_paths": spec_paths,
-        "commands": relevant.iter().take(32).map(|command| json!({
+        "commands": diagnostic_commands.iter().map(|command| json!({
             "command": command.command.chars().take(512).collect::<String>(),
-            "status": command.status, "exit": command.exit,
-            "start": command.start, "end": command.end
+            "status": command.status, "exit": command.exit, "success": command.success,
+            "spec_shape":confirmed_spec_shape(&command.command,cwd),
+            "start": command.start, "end": command.end,
+            "lock_busy":lock_busy_evidence(command),
+            "version_changed":command.output.contains("version changed"),
+            "continuation_changed":command.output.contains("continuation changed"),
+            "wrong_role":command.output.contains("wrong continuation role"),
+            "continuation_not_pending":command.output.contains("continuation is not pending"),
+            "continuation_binding_changed":command.output.contains("continuation candidate or round changed") || command.output.contains("continuation requirements changed"),
+            "artifact_not_registered":command.output.contains("artifact is not registered"),
+            "input_changed":command.output.contains("input changed"),
+            "has_output":!command.output.is_empty(),"has_error":!command.error.is_empty()
         })).collect::<Vec<_>>(),
-        "truncated": relevant.len() > 32
+        "command_count":diagnostic_commands.len(),
+        "truncated": false
     });
     command_evidence = bounded_restore_tool_evidence(command_evidence);
     util::atomic_write_json(&command_path, &command_evidence).unwrap();
@@ -8490,6 +8572,28 @@ fn assert_ambiguous_application_commands(
     application: &Path,
     commands: &[ToolCommand],
 ) {
+    let records: Vec<_> = commands.iter().filter(|command| {
+        command.command.contains("queue task-apply")
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }).map(|command| json!({
+        "command":command.command.chars().take(512).collect::<String>(),
+        "command_truncated":command.command.chars().count()>512,
+        "exit":command.exit,"success":command.success,
+        "start":command.start,"end":command.end,
+        "lock_busy":lock_busy_evidence(command),
+        "version_changed":command.output.contains("task state version changed"),
+        "continuation_mismatch":command.output.contains("continuation contradicts independent verdict"),
+        "obsolete":command.output.contains("obsolete"),
+        "has_output":!command.output.is_empty(),
+        "has_error":!command.error.is_empty()
+    })).collect();
+    let count = records.len();
+    util::atomic_write_json(
+        &q.parent().unwrap().join("ambiguity-command-metadata.json"),
+        &bounded_restore_tool_evidence(json!({"schema":1,"command_count":count,
+            "commands":records,"truncated":false})),
+    )
+    .expect("ambiguity command metadata");
     let session = coordinator["session"]
         .as_str()
         .expect("coordinator session");

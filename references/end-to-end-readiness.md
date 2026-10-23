@@ -1142,7 +1142,35 @@ per result, exact queue/delivery identities and chronological lock-busy-only
 failures. B acceptance is not inferred from the developer's commit, and no
 delivery or permanent evidence archive is created.
 
-This scenario has not yet been run as a live model acceptance. It is not a
-general authorization or product-policy change, not a customer-asset migration,
+Live attempt 10 passed on installed OpenCode 1.19.4 in 260.30 seconds (257.51
+seconds in the test), with the selected config bytes unchanged. The full native
+sequence, strict command audit and final cleanup passed; no customer delivery
+was performed. Failed attempts remain
+retained locally and are not counted as acceptance. Attempt 1 hit the former
+exact OpenCode version pin; compatibility was subsequently published separately.
+Attempt 2 hit a source-access approval request. Attempt 3 failed the exact reviewer
+inspection selector; the actual command was not independently retained, so its
+cause remains unclassified. Attempt 4 read the development event before the
+watcher attached it; the fixture now writes the factual stopped/reaped receipt
+immediately and waits for the real coordinator application. Attempt 5 failed a
+non-lock-busy application audit, with the underlying error unclassified. Attempt
+6 rejected a real report that used confirmation/authorization as check sources;
+the prompt now separates those agreements from the three valid basis check
+sources. Attempt 7 reached final B approval but failed the strict command audit
+on a non-lock-busy continuation attempt; no successful-run claim is made from
+that final state. Attempt 8 likewise reached final B approval but failed the
+strict audit on a non-lock-busy candidate selection attempt; its exact underlying
+error remains unclassified. Attempt 9 also reached final approval but failed
+the same strict audit on a revise attempt; its underlying error is unclassified.
+Candidate selection, revision and final activity registration
+now also have complete JSON interface examples. Bounded private command metadata
+now includes failed attempts
+as well as successful ones, with selected error classifications rather than raw
+output. Complete application/continuation schemas clarify the interface without
+weakening product validation or the lock-busy-only audit. A bounded final-file
+spec-shape sample reports only fixed field types from canonical paths inside the
+coordinator cwd; it does not claim to preserve invocation-time spec bytes.
+
+This is not a general authorization or product-policy change, not a customer-asset migration,
 and not evidence for pre-POST dispatch ambiguity, takeover, server restart, or
 Codex parity. #38/#32 remain OPEN.
