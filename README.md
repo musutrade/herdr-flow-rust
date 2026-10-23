@@ -41,9 +41,16 @@ CI 分别在 stable 和最低版本 1.85.0 上使用锁文件构建、测试。�
 构建并安装：
 
 ```bash
-cargo build --release
+cargo build --release --locked
 install -m 0755 target/release/herdr-flow ~/.local/bin/herdr-flow
 ```
+
+任务专属 Codex worker 的启动适配已合入 PR #103。已验证的组合为 Codex
+0.163.0 worker 与 OpenCode 1.19.4 coordinator/reviewer；宿主须支持外层与
+Codex 内层 sandbox 的嵌套执行。需要专用外层启动器的宿主，应在每个任务的
+launch spec 中显式指定已获授权的 `namespace_launcher` 路径和 SHA-256。
+安装二进制不会自动选择该路径。参见[启动适配与本机接入](docs/codex-startup-adaptation.md)
+和[任务运行时使用说明](references/task-runtime.md)。
 
 将本仓库放入技能目录，或从现有 checkout 建立符号链接（目标位置须尚不存在）：
 
