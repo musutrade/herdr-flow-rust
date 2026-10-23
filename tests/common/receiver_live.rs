@@ -4924,6 +4924,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
             "lineage spec outside cwd: {}",
             spec.display()
         );
+        assert!(exact_path_argument(&command.command, "--spec", spec));
         let value = util::read_json(spec).unwrap();
         assert_eq!(value["task"], "project");
         assert!(value["state_version"]
@@ -4943,6 +4944,22 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
             "activity"
         ]
     );
+    // Each lineage action and each linked result application increments the
+    // parent once; the unassigned operator signal does not change it.
+    let initial_version = phase1_state["tasks"]["project"]["state_version"]
+        .as_u64()
+        .expect("phase-1 parent version");
+    for (spec, offset) in lineage_specs.iter().zip([0, 1, 2, 4, 6, 7]) {
+        assert_eq!(spec["state_version"], json!(initial_version + offset));
+    }
+    assert_eq!(
+        state["tasks"]["project"]["state_version"],
+        json!(initial_version + 3)
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["state_version"],
+        json!(initial_version + 9)
+    );
     assert_eq!(lineage_specs[0]["kind"], "revise");
     assert_eq!(
         lineage_specs[0]["goal"],
@@ -4955,7 +4972,11 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         lineage_specs[1]["reason"],
         "reselect A for honest independent review under confirmed revision B"
     );
-    assert_eq!(lineage_specs[2]["intent"], "accept-native");
+    assert_eq!(
+        lineage_specs[2]["intent"],
+        phase1_state["tasks"]["project"]["continuation"]["id"]
+    );
+    assert_eq!(lineage_specs[2]["resolution"], json!(decision_path));
     assert_eq!(lineage_specs[2]["authorization"], "verify");
     assert_eq!(lineage_specs[2]["action"], "review");
     assert_eq!(lineage_specs[2]["activity"]["activity"], "accept-revised");
@@ -4966,7 +4987,10 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         lineage_specs[2]["activity"]["result_wait"]["id"],
         "accept-revised"
     );
-    assert_eq!(lineage_specs[3]["intent"], "accept-revised");
+    assert_eq!(
+        lineage_specs[3]["intent"],
+        revised["tasks"]["project"]["continuation"]["id"]
+    );
     assert_eq!(lineage_specs[3]["authorization"], "develop");
     assert_eq!(lineage_specs[3]["action"], "development");
     assert_eq!(lineage_specs[3]["activity"]["activity"], "revised-develop");
