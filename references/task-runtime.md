@@ -53,6 +53,60 @@ spec and returns the computed runtime root; subsequent commands use that root.
 The environment must already be registered. There is no implicit new environment
 or replacement session when a command fails.
 
+## Codex coordinator identity bootstrap (not yet an active receiver)
+
+After preparing and launching a dedicated Codex runtime, use
+`herdr-flow task-runtime receiver-bootstrap --task TASK --state-dir ROOT --spec FILE`.
+The spec requires `guard_dir`, a canonical absolute directory strictly below
+ROOT and outside the runtime's cwd; `task` and `role` are optional guard labels.
+For example: `{"guard_dir":"/owned/runtime/receiver","task":"parent","role":"coordinator"}`.
+This keeps future receiver state inside the runtime's existing writable boundary.
+No new activity wait, writer or queue is created or modified.
+
+The environment must be active and owned, with a matching runtime instance and
+live owned process, `adapter=codex`, `phase=started`, a task-owned broker and no
+existing worker/receiver creation attempt. The guard must have no prior state,
+creation journal or watcher record. The existing native model/provider and
+`untrusted` or `on-request` approval policy are retained. No global settings,
+launcher policy, approval decisions or sandbox arguments change.
+
+Before its single `thread/start`, bootstrap durably writes ROOT/receiver.json.
+It checks the returned session, cwd, model/provider and empty turns, persists the
+created identity, then writes the guard with `receiver_kind=task-runtime`, exact
+runtime/instance/session identity, `auto_rotate=false` and `phase=bootstrap`.
+The journal reaches `bound` only after guard publication. Errors after recording
+intent retain `uncertain` (or the last durable phase if writing fails). Every
+existing attempt blocks another create, including worker create; do not delete
+the journal to retry. There is no receiver recovery/restart command in this batch.
+An absent journal is not evidence that an unrelated dispatch was never sent.
+
+**Bootstrap does not activate Codex coordinator delivery.** The receiver factory,
+session selection and guard watcher explicitly reject this receiver kind; it
+cannot fall back to a Herdr terminal or ambient CODEX_THREAD_ID. Queue enablement
+rejects the bootstrap phase. Even manually supplied healthy watcher metadata and
+a changed phase cannot bypass the missing receiver adapter. Scope binds the
+runtime/instance/session/cwd/model without changing existing Herdr/OpenCode scopes.
+
+These checks enforce the supported lifecycle, not an integrity boundary against
+a process that can edit control files. The runtime root (including this bootstrap
+guard and its journal) is writable by the task-owned process. Keep queue/control
+state outside both the runtime root and cwd, for example env.temp_root/queue as a
+sibling of env.temp_root/rt. This batch neither creates nor validates a queue and
+does not guarantee that placement for callers. Before activation, the adapter
+design must enforce control-state placement, protect authoritative receiver
+identity/ACK state, and provide an explicitly scoped route for coordinator ACKs
+without granting general control-file write access. Bootstrap alone establishes
+none of those activation guarantees. The protocol fixtures do not prove sandbox
+write denial or protection against control-file tampering.
+
+The bounded validation uses a synthetic app-server through the production broker:
+one thread creation after the intent, no model turn, exact identity validation,
+transport/write failures without replay, and refusal of readiness/delivery.
+These fixtures are not native approval evidence or a real coordinator loop.
+Baseline integration is 3f7d303; installed Codex remains 0.163.0 and OpenCode 1.19.4.
+The next batch requires a dedicated adapter, watcher and explicit activation.
+#38 and #32 remain open; uncertain dispatch still forbids resend.
+
 ## Isolation and lifetime
 
 Runtime HOME, XDG configuration/data/state/cache/runtime directories, CODEX_HOME,

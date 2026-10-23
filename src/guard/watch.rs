@@ -20,6 +20,7 @@ pub fn validate_watch(root: &Path) -> Result<()> {
 }
 
 fn validate_watch_version(s: &J) -> Result<()> {
+    crate::task_runtime::native::receiver::require_adapter(s)?;
     if model::int(s, "version") != Some(2) {
         return Err(guard_error("legacy guard requires explicit migrate"));
     }
@@ -255,6 +256,7 @@ fn watch_tick(root: &Path, one: bool) -> Result<bool> {
 }
 
 fn watch_active(root: &Path, state: &J, one: bool) -> Result<bool> {
+    crate::task_runtime::native::receiver::require_adapter(state)?;
     let mut h = match Herdr::new(state) {
         Ok(adapter) => adapter,
         Err(error) => return watch_report(&guard_failure_without_adapter(root, &error), one),
