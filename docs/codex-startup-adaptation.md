@@ -1,7 +1,10 @@
 # Codex 原生运行启动适配
 
-日期：2026-10-23。实现位于 `fix/codex-owned-launcher`，集成基线为
-`70bd58b87e5234d35211f1a4d4c81e34d1ad9e33`。
+日期：2026-10-23。实现提交 `8e833854956b1fa0ce143be4affa697a9848fc91`，
+调查与验证基线为 `70bd58b87e5234d35211f1a4d4c81e34d1ad9e33`。
+[PR #103](https://github.com/musutrade/herdr-flow-rust/pull/103) 已合入主分支
+`2512816cdf97b8e0dcdbfb18e6b8513057b55444`，该提交的 Rust checks、CRAP gate、
+Dependency audit 全部通过。
 本机已验证 task-owned Codex worker → OpenCode coordinator → 独立验收 →
 测试交付 → 环境清理闭环；未扩展 Codex coordinator，#38/#32 保持开放。
 
@@ -22,7 +25,8 @@ Codex 必须启动内层 `/usr/bin/bwrap` 来执行该策略。内层并非可�
 本机已有专用外层启动器 `/usr/local/libexec/codexsymphony/bwrap`；
 用户在本会话明确授权将它复用于 Herdr 任务隔离验证。修复让任务显式选择
 这个既有宿主支持路径，保留全部外层挂载参数及 Codex 内层网络保护。
-没有安装二进制、改 AppArmor/sysctl、增加宿主权限或切换 full access。
+启动适配未安装或替换 sandbox 二进制，未改 AppArmor/sysctl、增加宿主权限或
+切换 full access。后续 Herdr CLI 安装见“本机接入”。
 
 另修正两个测量问题：
 
@@ -78,6 +82,46 @@ thread/turn 策略、原生审批 broker、managed network、dispatch 行为不�
 真实混合测试通过 `HERDR_LIVE_CODEX_NAMESPACE_LAUNCHER` 接收同一 JSON 对象，
 预检也调用相同身份验证。
 
+## 本机接入
+
+在已合并主分支 `2512816` 上执行 `cargo build --release --locked` 后，
+已将产物安装为 `/home/gem/.local/bin/herdr-flow`；安装前该命令不存在。
+安装产物 SHA-256 为
+`5906a4f434fe7f8c4eb99cb425798e825824f335dff74fe0ca013fe0d8a359f0`。
+安装复制摘要一致，`herdr-flow task-runtime --help` 成功；这是命令入口检查，
+不算新增模型闭环或审批验证。现有 `herdr`、旧技能入口与常驻服务保持原状。
+
+每个新任务先按 [task-runtime](../references/task-runtime.md) 注册环境和活动，
+执行 prepare 并在私有 runtime 中准备显式选择的配置。将下列结构并入该任务
+的 launch spec；`binary`、`cwd`、provider/model 占位值必须换成该任务的实际值。
+本机启动器路径及摘要只适用于已授权的这套宿主安装。
+
+```json
+{
+  "adapter": "codex",
+  "binary": "/absolute/path/to/codex",
+  "cwd": "/absolute/task/activity-checkout",
+  "model": {"providerID": "CONFIGURED_PROVIDER", "id": "CONFIGURED_MODEL"},
+  "approval_policy": "on-request",
+  "namespace_launcher": {
+    "path": "/usr/local/libexec/codexsymphony/bwrap",
+    "sha256": "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
+  }
+}
+```
+
+CLI 入口如下，其中 TASK、OWNED_RUNTIME 和 TASK_LAUNCH_SPEC 使用前述步骤生成的
+任务标识、runtime 路径和 spec 文件路径：
+
+```text
+herdr-flow task-runtime launch --task TASK --state-dir OWNED_RUNTIME --spec TASK_LAUNCH_SPEC
+```
+
+`HERDR_LIVE_CODEX_NAMESPACE_LAUNCHER` 仅供测试驱动器读取，生产 CLI 通过
+`--spec` 接收选择。安装不会修改旧任务 runtime 记录或自动选择例外启动器；
+没有为安装检查发送模型任务，也未为已有不确定 dispatch 重建或重发请求。
+当前证据仍是上述固定版本的一次真实混合闭环和明确标识的模拟审批验证。
+
 ## 安全边界与验证结果
 
 外层保持根文件系统只读，仅 runtime 和活动 checkout 可写，/tmp、/dev、/proc
@@ -117,7 +161,8 @@ all-targets 中额外的 example 测试。绝对 CRAP 门禁通过（阈值 10�
 最终源码的 `cargo fmt --all -- --check`、`lint-policy`、
 `cargo clippy --all-targets --all-features --locked -- -D warnings` 均通过；
 稳定 Rust 和 Rust 1.85.0 的 `cargo build --release --locked` 均通过。
-修复仅保存在独立工作区和本地分支，尚未发布或替换已安装的 Herdr 二进制。
+主分支合并与后续本机 CLI 安装状态见文首和“本机接入”；原有实测结论仍绑定
+上表版本、启动器和场景，没有因安装步骤扩大其证据范围。
 
 首次并行构建期间，MSRV 的既有 advisor 用例
 `terminal_job_and_duplicate_request_never_reinfer` 失败，随后同一全量命令

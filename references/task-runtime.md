@@ -64,7 +64,7 @@ connectivity; other inherited runtime/session configuration is cleared.
 OpenCode supports the documented **1.19.x** protocol family at or above the 1.19.3 baseline; later patches are accepted only after live protocol/identity checks and the observed version is persisted. Its runtime receives a second Landlock
 restriction limiting writes to its own runtime root and activity checkout.
 Codex 0.163 also uses a fixed `/tmp/codex-daemon-UID` socket/lock fallback. Its
-server therefore runs through `/usr/bin/bwrap` with a private `/tmp`, private
+server therefore runs through the selected outer bwrap (default `/usr/bin/bwrap`) with a private `/tmp`, private
 `/dev` and `/proc`, and a read-only outer filesystem; only its runtime root and
 activity checkout are writable. Bubblewrap and usable unprivileged namespaces
 are required. Missing confinement fails; no shared-directory fallback is used.
@@ -77,9 +77,17 @@ and not group/world writable; the executable digest is checked before launch.
 The operator must authorize that launcher's host security profile for this use.
 This is a trusted launcher input, not arbitrary worker configuration. The default
 remains `/usr/bin/bwrap`; invalid selections fail without fallback. The selection
-is persisted in `runtime.json`. Herdr installs no binary or security profile.
+is persisted in `runtime.json`. Herdr installs no launcher or host security profile.
 All existing outer mount arguments, native approval policies and managed network
 requirements remain in effect. OpenCode rejects this Codex-only option.
+
+Select the launcher in the JSON file passed to `task-runtime launch --spec` for
+each new task runtime. `HERDR_LIVE_CODEX_NAMESPACE_LAUNCHER` is an opt-in test
+input only; the production CLI does not read it. Installing/upgrading herdr-flow
+does not select a launcher or rewrite existing `runtime.json` records. Use the
+[task-spec example and rollout conditions](../docs/codex-startup-adaptation.md#本机接入)
+after preparing the owned environment/runtime as described above. Launch starts
+the server; it is not evidence of a model dispatch or native approval.
 
 A task-owned Codex broker retains the original native connection, preserving a
 fresh thread before its first turn. It records exact-thread turn events and
