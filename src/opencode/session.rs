@@ -1,4 +1,8 @@
-//! OpenCode 1.19.3 native HTTP session binding and durable submissions.
+//! OpenCode 1.19.x native HTTP session binding and durable submissions.
+//!
+//! The compatibility baseline is 1.19.3; later 1.19.x patches are accepted only
+//! after live health/session/cwd/model/pending/status checks. Other protocol
+//! families remain unsupported.
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -17,7 +21,51 @@ mod producer;
 pub use cli::cli;
 pub use producer::{collect, dispatch};
 
-pub const VERSION: &str = "1.19.3";
+/// Documented compatibility floor, not the version of every running server.
+pub const BASELINE_VERSION: &str = "1.19.3";
+/// Backwards-compatible name for the documented baseline.
+pub const VERSION: &str = BASELINE_VERSION;
+
+/// Accept only the conservative 1.19.x protocol family at or above the
+/// documented baseline. This is not a semver compatibility claim for 1.20+.
+pub fn is_compatible_version(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+        })
+    {
+        return false;
+    }
+    let Ok(major) = parts[0].parse::<u64>() else {
+        return false;
+    };
+    let Ok(minor) = parts[1].parse::<u64>() else {
+        return false;
+    };
+    let Ok(patch) = parts[2].parse::<u64>() else {
+        return false;
+    };
+    major == 1 && minor == 19 && patch >= 3
+}
+
+/// Validate a health response and return the actual observed patch version.
+pub fn health_version(health: &J) -> Result<String> {
+    ensure(
+        health.is_object() && health["healthy"] == true,
+        "OpenCode server health must be an object with healthy=true",
+    )?;
+    let version = health["version"]
+        .as_str()
+        .ok_or_else(|| FlowError::guard("OpenCode server health requires a string version"))?;
+    ensure(
+        is_compatible_version(version),
+        "unsupported OpenCode server protocol/version; supports the 1.19.x family at or above 1.19.3 (1.20/2.x unsupported)",
+    )?;
+    Ok(version.to_string())
+}
 
 pub fn is_registered(state: &J) -> bool {
     model::string(state, "adapter").as_deref() == Some("opencode")
@@ -54,11 +102,7 @@ impl SessionAdapter {
     }
 
     pub fn verify_binding(&self) -> Result<J> {
-        let health = self.api.get("/global/health")?;
-        ensure(
-            health["healthy"] == true && health["version"] == VERSION,
-            "OpenCode server must be healthy and exactly 1.19.3; 2.0 integration is deferred",
-        )?;
+        let _server_version = self.server_version()?;
         let session = self.api.get(&self.route(""))?;
         ensure(
             session["id"] == self.state["session"],
@@ -75,6 +119,11 @@ impl SessionAdapter {
         Ok(session)
     }
 
+    /// Query and validate the live server version without mutating state.
+    pub fn server_version(&self) -> Result<String> {
+        health_version(&self.api.get("/global/health")?)
+    }
+
     fn ensure_empty_history(&self) -> Result<()> {
         let rows = self.api.get(&self.route("/message"))?;
         ensure(
@@ -89,7 +138,7 @@ impl SessionAdapter {
             statuses.is_object(),
             "invalid OpenCode session status response",
         )?;
-        // 1.19.3 omits idle sessions from this map; verify_binding establishes
+        // The supported 1.19.x servers omit idle sessions from this map; verify_binding establishes
         // existence first. Pending requests and submissions are checked too.
         match statuses.get(self.session()) {
             Some(value) => required(value, "type"),
@@ -112,6 +161,7 @@ impl SessionAdapter {
     }
 
     pub fn status(&self) -> Result<J> {
+        let server_version = self.server_version()?;
         let live = self.live_state()?;
         let submission = load_submission(&self.root())?;
         let available = live == "idle" && submission_allows_next(submission.as_ref());
@@ -119,7 +169,7 @@ impl SessionAdapter {
         Ok(
             json!({"agent_session":{"value":self.session()},"agent_status":label,
             "interactive_ready":available,"native_status":live,"submission":submission,
-            "context_telemetry":false,"safe_rotation":false,"server_version":VERSION}),
+            "context_telemetry":false,"safe_rotation":false,"server_version":server_version}),
         )
     }
 
@@ -211,8 +261,11 @@ fn model_variant(model: &J) -> Option<&str> {
 
 fn validate_binding(state: &J) -> Result<()> {
     ensure(
-        is_registered(state) && state["server_version"] == VERSION,
-        "unsupported OpenCode registration/version",
+        is_registered(state)
+            && state["server_version"]
+                .as_str()
+                .is_some_and(is_compatible_version),
+        "unsupported OpenCode registration/version; supports the 1.19.x family at or above 1.19.3 (1.20/2.x unsupported)",
     )?;
     ensure(
         state["version"] == 2 && !model::bool_or(state, "auto_rotate", false),
@@ -447,14 +500,17 @@ pub fn register(root: &Path, spec: &J) -> Result<J> {
     ensure(state.is_object(), "OpenCode registration must be an object")?;
     state["version"] = json!(2);
     state["adapter"] = json!("opencode");
-    state["server_version"] = json!(VERSION);
+    state["server_version"] = json!(BASELINE_VERSION);
     state["state_dir"] = json!(root);
     state["cwd"] = json!(cwd);
     state["phase"] = json!("monitoring");
     state["auto_rotate"] = json!(false);
     state["level"] = json!("unknown");
     state["usage"] = Value::Null;
-    SessionAdapter::new(&state)?.verify_binding()?;
+    let adapter = SessionAdapter::new(&state)?;
+    let server_version = adapter.server_version()?;
+    adapter.verify_binding()?;
+    state["server_version"] = json!(server_version);
     crate::guard::save(&root, &mut state)?;
     Ok(state)
 }
@@ -481,7 +537,7 @@ pub fn create_fresh_with_api(root: &Path, spec: &J, api: Box<dyn Api>) -> Result
     let creation = receiver_creation(root, spec)?;
     let _lock = crate::guard::locked(&creation.root)?;
     ensure_creation_absent(&creation.root)?;
-    verify_receiver_health(api.as_ref())?;
+    let _server_version = verify_receiver_health(api.as_ref())?;
     let mut journal = receiver_journal(&creation);
     write_creation_journal(&creation.root, &journal)?;
     let session = create_receiver_session(&creation, &mut journal, api.as_ref())?;
@@ -521,18 +577,24 @@ pub fn recover_fresh_with_api(root: &Path, api: Box<dyn Api>) -> Result<J> {
 }
 
 fn recover_registered(root: &Path, journal: &J, api: Box<dyn Api>) -> Result<J> {
-    let state = util::read_state_json(root, "state.json")?;
+    let mut state = util::read_state_json(root, "state.json")?;
     verify_recovered_match(journal, &state)?;
-    SessionAdapter::with_api(&state, api)?.verify_binding()?;
+    let adapter = SessionAdapter::with_api(&state, api)?;
+    let server_version = adapter.server_version()?;
+    adapter.verify_binding()?;
+    state["server_version"] = json!(server_version);
+    crate::guard::save(root, &mut state)?;
     Ok(state)
 }
 
 fn recover_unregistered(root: &Path, journal: &J, cwd: &Path, api: Box<dyn Api>) -> Result<J> {
     let state = receiver_state_from_journal(root, journal, cwd)?;
     let adapter = SessionAdapter::with_api(&state, api)?;
+    let server_version = adapter.server_version()?;
     adapter.verify_binding()?;
     adapter.ensure_empty_history()?;
     let mut state = state;
+    state["server_version"] = json!(server_version);
     crate::guard::save(root, &mut state)?;
     Ok(state)
 }
@@ -582,12 +644,8 @@ fn ensure_creation_absent(root: &Path) -> Result<()> {
     )
 }
 
-fn verify_receiver_health(api: &dyn Api) -> Result<()> {
-    let health = api.get("/global/health")?;
-    ensure(
-        health["healthy"] == true && health["version"] == VERSION,
-        "OpenCode server must be healthy and exactly 1.19.3; 2.0 integration is deferred",
-    )
+fn verify_receiver_health(api: &dyn Api) -> Result<String> {
+    health_version(&api.get("/global/health")?)
 }
 
 fn receiver_journal(creation: &ReceiverCreation) -> J {
@@ -648,7 +706,7 @@ fn receiver_state(creation: &ReceiverCreation, session: &str) -> Result<J> {
         "model": creation.model,
         "approval_policy": "untrusted",
         "auto_rotate": false,
-        "server_version": VERSION,
+        "server_version": BASELINE_VERSION,
         "endpoint": creation.endpoint,
         "phase": "monitoring",
         "session": session,
@@ -674,7 +732,9 @@ fn finish_receiver_creation(
     }
     journal["phase"] = json!("created");
     write_creation_journal(&creation.root, journal)?;
+    let observed = adapter.server_version()?;
     let mut state = state;
+    state["server_version"] = json!(observed);
     crate::guard::save(&creation.root, &mut state)?;
     Ok(state)
 }

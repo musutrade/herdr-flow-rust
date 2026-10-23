@@ -304,8 +304,31 @@ fn production_entry_creates_and_recovers_over_fixed_routes() {
     let state = session::create_fresh(&harness.guard, &spec).unwrap();
     assert_eq!(state["session"], "sesfixture");
     assert_eq!(state["phase"], "monitoring");
+    assert_eq!(state["server_version"], "1.19.4");
     assert_eq!(harness.journal()["phase"], "created");
 
     let recovered = session::recover_fresh(&harness.guard).unwrap();
     assert_eq!(recovered["session"], "sesfixture");
+    assert_eq!(recovered["server_version"], "1.19.4");
+}
+
+#[test]
+fn patch_upgrade_persists_observed_version_and_recovers_old_state() {
+    let harness = Harness::new();
+    let fake = Fake::new(&harness.cwd, &harness.model);
+    fake.set_health(json!({"healthy":true,"version":"1.19.4"}));
+    let state =
+        session::create_fresh_with_api(&harness.guard, &harness.spec(), Box::new(fake.clone()))
+            .unwrap();
+    assert_eq!(state["server_version"], "1.19.4");
+    assert_eq!(harness.journal()["phase"], "created");
+    assert_eq!(fake.posts(), 1);
+
+    let mut persisted = util::read_json(&harness.guard.join("state.json")).unwrap();
+    persisted["server_version"] = json!("1.19.3");
+    util::atomic_write_json(&harness.guard.join("state.json"), &persisted).unwrap();
+    let recovered =
+        session::recover_fresh_with_api(&harness.guard, Box::new(fake.clone())).unwrap();
+    assert_eq!(recovered["server_version"], "1.19.4");
+    assert_eq!(fake.posts(), 1);
 }

@@ -33,7 +33,7 @@ requires known telemetry and enabled `auto_rotate`. OpenCode automatic rotation
 is explicitly unsupported. Other producers can use a pinned signal or command
 wrapper, without claiming the Codex rotation capability.
 
-For OpenCode 1.19.3, bind the exact native session/model/directory with
+For OpenCode 1.19.x (baseline 1.19.3), bind the exact native session/model/directory with
 `opencode register`, then use `opencode dispatch` / `collect` against a current
 managed signal wait. Collection verifies live identity, message correlation,
 task/epoch/assignment/candidate and workspace HEAD before publishing a report

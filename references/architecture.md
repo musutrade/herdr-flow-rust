@@ -3,7 +3,7 @@
 This is a maintainability overview of the current source and the explicitly
 separate target mode. Implemented paths are drawn as current behavior. Target
 paths are labeled and remain gated by GateHouse #98 and the V1/V2 acceptance
-items in Issues #11/#12/#13. OpenCode 1.19.3 has a native HTTP session adapter
+items in Issues #11/#12/#13. OpenCode 1.19.x (baseline 1.19.3) has a native HTTP session adapter
 and a separate process monitoring helper; automatic rotation remains unsupported.
 Detailed contracts live in
 the linked references; do not copy these diagrams into multiple documents.
@@ -253,7 +253,7 @@ See [CI monitoring](ci-monitor.md), [wait queue](waiting.md) and
 | Result application and takeover | `src/progress.rs`, `herdr-flow queue`, `src/queue/cli.rs` | #11, #15 evidence |
 | Context guard and rotation | `herdr-flow guard` | #13 |
 | Native Codex transport, TUI lifecycle and runtime binding | `src/herdr.rs`, `src/codex/rpc.rs`, `herdr-flow tui` | #13 |
-| OpenCode 1.19.3 | `src/opencode.rs`, `src/opencode/` | native dispatch/result return; no automatic rotation |
+| OpenCode 1.19.x (baseline 1.19.3) | `src/opencode.rs`, `src/opencode/` | native dispatch/result return; no automatic rotation |
 | CI and external Check observation | `herdr-flow ci`, `src/ci/checks.rs` | #11 external Checks |
 | PR provenance and same-PR repair | `src/pr.rs` | #11 |
 | Read-only task and delivery metrics | `src/metrics.rs`, `src/queue/cli.rs` | #6 |

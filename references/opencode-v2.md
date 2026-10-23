@@ -1,16 +1,21 @@
-# OpenCode 1.19.3 integration
+# OpenCode 1.19.x integration
 
 ## Current version policy
 
-The integration baseline is OpenCode **1.19.3**. At the user's direction on
-2026-10-20, **2.0 integration is deferred because of reported bugs**. Do not
-upgrade to 2.0 or copy its API workflow. Reopening 2.0 requires a new user
-decision and separate validation. This file retains its historical
-`opencode-v2.md` name to preserve links; earlier 2.0.32 observations are historical.
+The documented baseline is OpenCode **1.19.3**. The supported protocol family is
+conservative: **1.19.x with patch >= 1.19.3**. Later 1.19 patches are accepted
+only after the live health/session/directory/model/pending/status checks below;
+this is not a semver claim that every future version is compatible. Version
+1.20 and 2.x remain unsupported, and 2.0 integration stays deferred because of
+reported bugs. Do not upgrade to 2.0 or copy its API workflow. Reopening 2.0
+requires a new user decision and separate validation. This file retains its
+historical `opencode-v2.md` name to preserve links; earlier 2.0.32 observations
+are historical. The installed local binary reported 1.19.4 (2026-10-23); that is
+an observed compatibility target, not a replacement baseline.
 
 ## Native session adapter
 
-`src/opencode/session.rs` and its HTTP transport implement native 1.19.3
+`src/opencode/session.rs` and its HTTP transport implement native 1.19.x
 session binding, status, dispatch and durable result collection. They use the
 installed `/global/health`, `/session`, `/session/status`, `/permission` and
 `/question` APIs. The production receiver factory selects this adapter when the
@@ -36,10 +41,17 @@ opencode session --help
 
 Configure the server endpoint when starting an owned session; do not restart an
 active writer, replace its session, or change its model merely to enable this
-integration. Registration checks a healthy server at exactly 1.19.3, the exact
-session ID, directory and model (including a specified variant). Mismatches fail
+integration. Registration accepts a healthy server in the supported 1.19.x family at or above
+1.19.3 and checks the exact session ID, directory and model (including a specified
+variant). Status and dispatch separately require valid pending-request/status
+shape and an idle session; pending questions or permissions block dispatch. The actual observed server version is
+persisted and reported; 1.19.3 is only the documented baseline and old state
+remain recoverable when the live server reports a compatible patch. Mismatches fail
 before submission. Pending questions/permissions block dispatch; no approval is
 answered automatically. Unknown or malformed status cannot establish readiness.
+Fake-API controls cover 1.19.3, 1.19.4, later 1.19 patches, malformed/incompatible
+versions, and create/recover identity failures; the real isolated 1.19.4 live run
+remains pending and is not inferred from those controls.
 
 ## Register a receiver and watcher
 
@@ -143,7 +155,7 @@ continuity.
 
 Neither adapter provides exact runtime snapshot/restoration, automated exit or
 successor launch, safe context rotation or review-policy changes. These require
-separate feasibility evidence and implementation on 1.19.3. Never infer current
+separate feasibility evidence and implementation on the supported 1.19.x baseline family. Never infer current
 context occupancy from cumulative token counters. Recovery that needs a session
 replacement remains an inspected manual operation.
 

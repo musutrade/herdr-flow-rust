@@ -101,7 +101,7 @@ fn make_packet(q: &J, wait: &J, spec: &J) -> Result<J> {
 fn base_state(root: &Path, runtime: &J, journal: &J) -> J {
     json!({"version":2,"adapter":runtime["adapter"],"state_dir":root,"cwd":runtime["cwd"],
         "model":runtime["model"],"approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),"auto_rotate":false,"task":journal["packet"]["binding"]["task"],
-        "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":"1.19.3",
+        "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":crate::opencode::session::BASELINE_VERSION,
         "endpoint":format!("http://127.0.0.1:{}",runtime["port"]),"phase":"monitoring"})
 }
 
@@ -119,10 +119,8 @@ fn create_native(root: &Path, runtime: &J, journal: &J) -> Result<J> {
 fn create_opencode(state: &mut J) -> Result<()> {
     let api = HttpApi::from_state(state)?;
     let health = healthy_opencode(&api)?;
-    ensure(
-        health["healthy"] == true && health["version"] == "1.19.3",
-        "OpenCode 1.19.3 required",
-    )?;
+    let server_version = crate::opencode::session::health_version(&health)?;
+    state["server_version"] = json!(server_version);
     let created = api
         .post(
             "/session",
@@ -302,7 +300,12 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
-    let state = recovered_state(root, &journal)?;
+    let mut state = recovered_state(root, &journal)?;
+    if state["adapter"] == "opencode" {
+        let observed = SessionAdapter::new(&state)?.server_version()?;
+        state["server_version"] = json!(observed);
+        util::atomic_write_json(&root.join("state.json"), &state)?;
+    }
     let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
     crate::task_env::validate_path(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
@@ -703,7 +706,7 @@ fn ensure_receiver(root: &Path, q: &J) -> Result<()> {
 }
 
 fn healthy_opencode(api: &dyn Api) -> Result<J> {
-    // OpenCode 1.19.3 can accept TCP before its first HTTP handler is ready.
+    // The supported OpenCode 1.19.x family can accept TCP before its first HTTP handler is ready.
     // Only this read-only readiness probe is retried, never session creation.
     let mut last = None;
     for _ in 0..3 {

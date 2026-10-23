@@ -20,7 +20,7 @@ pub fn serve(listener: TcpListener, cwd: &Path) {
         let session =
             json!({"id":id,"directory":cwd,"model":{"providerID":"openai","id":"fixture"}});
         let response = match (method.as_str(), path.as_str()) {
-            ("GET", "/global/health") => json!({"healthy":true,"version":"1.19.3"}),
+            ("GET", "/global/health") => json!({"healthy":true,"version":"1.19.4"}),
             ("GET", "/session/status") => json!({}),
             ("GET", "/permission" | "/question") => json!([]),
             ("POST", "/session") => session,
