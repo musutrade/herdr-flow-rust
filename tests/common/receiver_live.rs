@@ -4216,7 +4216,7 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     let mut turn = acceptance_live::native_prepare(env, q, cwd, activity, instruction);
     assert_eq!(turn.root, reviewer_root, "reviewer root identity changed");
     acceptance_live::native_dispatch(env, &turn);
-    let submission = util::read_json(turn.root.join("submission.json")).unwrap();
+    let submission = util::read_json(&turn.root.join("submission.json")).unwrap();
     let message = submission["message_id"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -4270,7 +4270,7 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     assert_eq!(deliveries[0]["phase"], "acknowledged");
     let task = &state["tasks"][activity];
     assert_eq!(task["pending"], json!([]));
-    assert_eq!(&task["lineage"]["input"], input);
+    assert_eq!(task["lineage"]["input"], input["id"]);
     assert_eq!(task["verdict"]["envelope"]["binding"], event["binding"]);
     assert_eq!(
         task["verdict"]["envelope"]["reviewer"]["session"],
@@ -4314,7 +4314,7 @@ REVISED-DEVELOP: one development result for revised-develop arrives. ACK, read i
 
 ACCEPT-CONFIRMED: one passed independent verdict for B arrives. ACK and read the actual accept-revised failed report gaps. Apply the exact immutable verdict with next_action kind=delivery, ensuring its actual resolutions include every accept-revised gap id with real evidence. Run readiness and finish. No customer delivery and no replacement artifact. If any actual conclusion differs or a gap is unresolved, stop and fail honestly.
 
-Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Write each task-lineage/application spec to an absolute path under <CWD> and invoke the named supported command once; retry only lock-busy errors. Preserve phase-1 requirement/verdict/report bytes and revision-2 authorization."#;
+Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Write each task-lineage/application spec to an absolute path under <CWD> and invoke the named supported command once; retry only lock-busy errors. Preserve phase-1 requirement/verdict/report bytes and revision-2 authorization."#.to_string();
     let replacements = [
         ("<DECISION>", decision_path.display().to_string()),
         (
