@@ -19,6 +19,8 @@ const CONFIRMED_REVISION_USER_CHOICE: &str =
     "User explicitly accepted the recommendation on 2026-10-23: for the disposable conflicting fixture, the subsequent version B change overrides the original version A requirement.";
 const CONFIRMED_REVISION_PRECEDENCE: &str =
     "Confirmed revision precedence: the subsequent confirmed version B change overrides the original version A reference for this disposable fixture.";
+const CONFIRMED_REVISION_SPECIFICATION: &str =
+    "Confirmed revision specification: the user's version B decision supersedes the earlier no-precedence confirmation for this disposable fixture.";
 
 struct OwnedEnvironment {
     env: Option<TaskEnvironment>,

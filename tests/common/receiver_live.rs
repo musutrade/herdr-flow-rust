@@ -4197,6 +4197,7 @@ struct RegisteredReviewSpec<'a> {
     instruction: &'a str,
     inspection: &'a str,
     expect_pass: bool,
+    evidence: &'a mut FailureEvidence,
 }
 
 fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
@@ -4212,6 +4213,7 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
         instruction,
         inspection,
         expect_pass,
+        evidence,
     } = spec;
     let mut turn = acceptance_live::native_prepare(env, q, cwd, activity, instruction);
     assert_eq!(turn.root, reviewer_root, "reviewer root identity changed");
@@ -4222,6 +4224,11 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
         .filter(|value| !value.is_empty())
         .expect("reviewer message id")
         .to_string();
+    evidence.0.push(
+        reviewer_root
+            .join("submissions")
+            .join(format!("{message}.json")),
+    );
     let result = acceptance_live::native_finish(env, &mut turn);
     assert_eq!(result["message_id"], json!(message));
     assert_ne!(result["session"], coordinator["session"]);
@@ -4288,6 +4295,13 @@ fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
     assert!(terminal_tool_state(inspect) && inspect.success);
     assert_eq!(inspect.exit, Some(0));
     assert_eq!(inspect.output.trim(), inspection);
+    assert!(
+        inspect.start > 0
+            && inspect.start != i64::MAX
+            && inspect.end >= inspect.start
+            && inspect.end != i64::MAX
+    );
+    exact_terminal_completion_millis(&rows, &result, cwd, activity);
     turn.stop();
     state
 }
@@ -4324,7 +4338,7 @@ Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Writ
         ("<ORIGINAL>", AMBIGUOUS_ORIGINAL.to_string()),
         ("<PRECEDENCE>", CONFIRMED_REVISION_PRECEDENCE.to_string()),
         ("<CHANGE>", AMBIGUOUS_CHANGE.to_string()),
-        ("<SPEC>", AMBIGUOUS_SPECIFICATION.to_string()),
+        ("<SPEC>", CONFIRMED_REVISION_SPECIFICATION.to_string()),
         ("<USER_CHOICE>", CONFIRMED_REVISION_USER_CHOICE.to_string()),
         ("<QUEUE>", queue_path.to_string()),
         ("<BINARY>", binary.to_string()),
@@ -4411,6 +4425,13 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         .join("reviewer-checkout/.herdr-verdict.json");
     let phase1_report = fs::read(&phase1_report_path).unwrap();
     let phase1_verdict = phase1_state["tasks"]["accept-native"]["verdict"].clone();
+    let phase1_event_id = phase1_state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-native")
+        .map(|(id, _)| id.clone())
+        .expect("phase1 acceptance event");
     assert_eq!(
         phase1_state["tasks"]["project"]["requirements"]["1"],
         phase1_requirement
@@ -4435,7 +4456,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     let expected_basis = json!({
         "original":[AMBIGUOUS_ORIGINAL],
         "changes":[CONFIRMED_REVISION_PRECEDENCE, AMBIGUOUS_CHANGE],
-        "specifications":[AMBIGUOUS_SPECIFICATION],
+        "specifications":[CONFIRMED_REVISION_SPECIFICATION],
         "endpoint":"disposable confirmed revision endpoint",
         "confirmation":CONFIRMED_REVISION_USER_CHOICE
     });
@@ -4480,6 +4501,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         instruction: "You are the independent acceptance reviewer. The current confirmed requirement explicitly gives version B precedence over the original version A. Inspect the exact requested HEAD file with `git show HEAD:file` in a direct bash invocation. Report actual checks against the confirmed basis; if the artifact contains version A, write an honest failed verdict with a grounded gap. Never approve A under B and never claim delivery.",
         inspection: "version A",
         expect_pass: false,
+        evidence,
     });
     assert_eq!(
         revised["tasks"]["accept-revised"]["verdict"]["envelope"]["report"]["conclusion"],
@@ -4503,30 +4525,83 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         revised["tasks"]["accept-revised"]["acceptance_origin"]["action"]["kind"],
         "clarify"
     );
+    let revised_event_id = revised["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-revised")
+        .map(|(id, _)| id.clone())
+        .expect("accept-revised event");
 
     wait_for_registered_task(q, "revised-develop");
     let development_cwd =
         acceptance_live::clone_snapshot(env, artifact, "revised-developer-checkout");
-    let (developer, developed) = acceptance_live::native(
+    let mut developer_turn = acceptance_live::native_prepare(
         env,
         q,
         &development_cwd,
         "revised-develop",
         "You are the developer role, not a reviewer or acceptance role. The confirmed requirement is version B. Replace the contents of file with exactly `version B` followed by a newline, stage it, and create one new local Git commit. Do not write a verdict or acceptance report. Stay inside cwd.",
     );
+    assert_eq!(developer_turn.root, revised_developer_root.to_path_buf());
+    acceptance_live::native_dispatch(env, &developer_turn);
+    let developer_submission =
+        util::read_json(&developer_turn.root.join("submission.json")).unwrap();
+    let developer_message = developer_submission["message_id"]
+        .as_str()
+        .expect("developer message id");
+    let developer_report_path = developer_turn
+        .root
+        .join("submissions")
+        .join(format!("{developer_message}.json"));
+    evidence.0.push(developer_report_path.clone());
+    let developed = acceptance_live::native_finish(env, &mut developer_turn);
+    let developer = util::read_json(&developer_turn.root.join("state.json")).unwrap();
+    developer_turn.stop();
     let output = developed["output"].clone();
     assert_ne!(output["id"], artifact_id);
+    assert_eq!(git(&development_cwd, &["rev-parse", "HEAD"]), output["id"]);
     assert_eq!(git(&development_cwd, &["show", "HEAD:file"]), "version B");
+    assert_eq!(
+        fs::read(development_cwd.join("file")).unwrap(),
+        b"version B\n"
+    );
+    assert!(!development_cwd.join(".herdr-verdict.json").exists());
+    assert!(developer["session"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
     assert_ne!(developer["session"], coordinator["session"]);
     assert_ne!(
         developer["session"],
         phase1_state["tasks"]["accept-native"]["verdict"]["envelope"]["reviewer"]["session"]
             .clone()
     );
+    assert_eq!(developer_submission["message_id"], developed["message_id"]);
+    let developer_report = util::read_json(&developer_report_path).unwrap();
+    assert_eq!(developer_report["session"], developed["session"]);
+    assert_eq!(developer_report["message_id"], json!(developer_message));
+    assert_eq!(developer_report["phase"], "signalled");
+    assert_eq!(developer_report["output"], output);
     let developed_state = wait_for_registered_task(q, "revised-develop");
     assert_eq!(developed_state["lineage"]["input"], artifact_id);
     assert_eq!(developed_state["lineage"]["revision"], 2);
     assert_eq!(developed_state["lineage"]["round"], 0);
+    let developed_queue = queue::load_queue(q).unwrap();
+    let developer_events: Vec<_> = developed_queue["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, event)| event["wait"] == "revised-develop")
+        .collect();
+    assert_eq!(developer_events.len(), 1);
+    assert_eq!(developer_events[0].1["applied"], true);
+    let developer_delivery = delivery_for_event(
+        &developed_queue,
+        coordinator["session"].as_str().unwrap(),
+        developer_events[0].0,
+    )
+    .expect("developer delivery");
+    assert_eq!(developer_delivery.1["phase"], "acknowledged");
     util::atomic_write_json(
         &revised_release,
         &json!({
@@ -4567,6 +4642,7 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         instruction: &final_instruction,
         inspection: "version B",
         expect_pass: true,
+        evidence,
     });
     assert_eq!(final_state["tasks"]["project"]["candidate"], output["id"]);
     assert_eq!(
@@ -4581,10 +4657,41 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         final_state["tasks"]["accept-confirmed"]["lineage"]["round"],
         final_state["tasks"]["project"]["acceptance_round"]
     );
-    assert_ne!(
-        final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["reviewer"]["session"],
-        revised["tasks"]["accept-revised"]["verdict"]["envelope"]["reviewer"]["session"]
-    );
+    let phase1_session = phase1_state["tasks"]["accept-native"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("phase1 reviewer session");
+    let revised_session = revised["tasks"]["accept-revised"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("revised reviewer session");
+    let developer_session = developer["session"].as_str().expect("developer session");
+    let final_session = final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("final reviewer session");
+    let coordinator_session = coordinator["session"]
+        .as_str()
+        .expect("coordinator session");
+    for (label, session) in [
+        ("phase1", phase1_session),
+        ("revised", revised_session),
+        ("developer", developer_session),
+        ("final", final_session),
+        ("coordinator", coordinator_session),
+    ] {
+        assert!(!session.trim().is_empty(), "{label} session empty");
+    }
+    let sessions: std::collections::BTreeSet<_> = [
+        phase1_session,
+        revised_session,
+        developer_session,
+        final_session,
+        coordinator_session,
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(sessions.len(), 5, "all role sessions must be distinct");
     let expected_tasks: std::collections::BTreeSet<_> = final_state["tasks"]
         .as_object()
         .unwrap()
@@ -4596,6 +4703,24 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         [
             "project",
             "accept-native",
+            "accept-revised",
+            "revised-develop",
+            "accept-confirmed"
+        ]
+        .into_iter()
+        .collect()
+    );
+    let expected_waits: std::collections::BTreeSet<_> = final_state["waits"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        expected_waits,
+        [
+            "accept-native",
+            "confirmed-revision",
             "accept-revised",
             "revised-develop",
             "accept-confirmed"
@@ -4686,7 +4811,6 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
     assert_eq!(signal_event["acknowledged"], true);
     assert_ne!(signal_event["applied"], true);
     assert!(signal_event["binding"].is_null());
-    let coordinator_session = coordinator["session"].as_str().unwrap();
     let signal_delivery = delivery_for_event(&final_state, coordinator_session, &signal_event_id)
         .expect("signal delivery")
         .0
@@ -4703,6 +4827,67 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
                 && exact_path_argument(&command.command, "--state-dir", q)
         })
         .collect();
+    let spec_paths: Vec<_> = relevant
+        .iter()
+        .filter_map(|command| {
+            let parts: Vec<_> = command.command.split_whitespace().collect();
+            let index = parts.iter().position(|part| *part == "--spec")?;
+            Some(
+                parts
+                    .get(index + 1)?
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .chars()
+                    .take(512)
+                    .collect::<String>(),
+            )
+        })
+        .collect();
+    let mut command_evidence = json!({
+        "signal_delivery": signal_delivery,
+        "spec_paths": spec_paths,
+        "commands": relevant.iter().take(32).map(|command| json!({
+            "command": command.command.chars().take(512).collect::<String>(),
+            "status": command.status, "exit": command.exit,
+            "start": command.start, "end": command.end
+        })).collect::<Vec<_>>(),
+        "truncated": relevant.len() > 32
+    });
+    command_evidence = bounded_restore_tool_evidence(command_evidence);
+    util::atomic_write_json(&command_path, &command_evidence).unwrap();
+    let mut expected_deliveries = Vec::new();
+    for wait in [
+        "accept-native",
+        "confirmed-revision",
+        "accept-revised",
+        "revised-develop",
+        "accept-confirmed",
+    ] {
+        let events: Vec<_> = final_state["events"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, event)| event["wait"] == wait)
+            .collect();
+        assert_eq!(events.len(), 1, "one event for {wait}");
+        let delivery =
+            delivery_for_event(&final_state, coordinator_session, events[0].0).expect("delivery");
+        assert_eq!(delivery.1["phase"], "acknowledged");
+        expected_deliveries.push(delivery.0.to_string());
+    }
+    assert_eq!(expected_deliveries.len(), 5);
+    for delivery in &expected_deliveries {
+        assert_eq!(
+            relevant
+                .iter()
+                .filter(|command| {
+                    command.command.contains("queue ack")
+                        && exact_path_argument(&command.command, "--delivery", Path::new(delivery))
+                })
+                .count(),
+            1,
+            "one exact ACK for {delivery}"
+        );
+    }
     let signal_ack = relevant
         .iter()
         .find(|command| {
@@ -4723,38 +4908,186 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
         .iter()
         .all(|command| command.command.contains("--spec")));
     let mut spec_kinds = Vec::new();
+    let mut lineage_specs = Vec::new();
     for command in &lineage {
         let parts: Vec<_> = command.command.split_whitespace().collect();
-        let index = parts
+        let positions: Vec<_> = parts
             .iter()
-            .position(|part| *part == "--spec")
-            .expect("lineage spec argument");
-        let spec = Path::new(parts[index + 1].trim_matches(|c| c == '\'' || c == '"'));
+            .enumerate()
+            .filter(|(_, part)| **part == "--spec")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "exactly one lineage --spec");
+        let spec = Path::new(parts[positions[0] + 1].trim_matches(|c| c == '\'' || c == '"'));
         assert!(
             spec.starts_with(cwd),
             "lineage spec outside cwd: {}",
             spec.display()
         );
         let value = util::read_json(spec).unwrap();
+        assert_eq!(value["task"], "project");
+        assert!(value["state_version"]
+            .as_u64()
+            .is_some_and(|version| version > 0));
         spec_kinds.push(value["kind"].as_str().unwrap_or_default().to_string());
+        lineage_specs.push(value);
     }
-    spec_kinds.sort();
     assert_eq!(
         spec_kinds,
         [
-            "activity",
-            "candidate",
+            "revise",
             "candidate",
             "continue",
             "continue",
-            "revise"
+            "candidate",
+            "activity"
         ]
+    );
+    assert_eq!(lineage_specs[0]["kind"], "revise");
+    assert_eq!(
+        lineage_specs[0]["goal"],
+        "Deliver version B for the disposable confirmed-revision fixture"
+    );
+    assert_eq!(lineage_specs[0]["basis"], expected_basis);
+    assert!(lineage_specs[0].get("authorization").is_none());
+    assert_eq!(lineage_specs[1]["candidate"], artifact_id);
+    assert_eq!(
+        lineage_specs[1]["reason"],
+        "reselect A for honest independent review under confirmed revision B"
+    );
+    assert_eq!(lineage_specs[2]["intent"], "accept-native");
+    assert_eq!(lineage_specs[2]["authorization"], "verify");
+    assert_eq!(lineage_specs[2]["action"], "review");
+    assert_eq!(lineage_specs[2]["activity"]["activity"], "accept-revised");
+    assert_eq!(lineage_specs[2]["activity"]["role"], "acceptance");
+    assert_eq!(lineage_specs[2]["activity"]["input"], artifact_id);
+    assert_eq!(lineage_specs[2]["activity"]["session_epoch"], 2);
+    assert_eq!(
+        lineage_specs[2]["activity"]["result_wait"]["id"],
+        "accept-revised"
+    );
+    assert_eq!(lineage_specs[3]["intent"], "accept-revised");
+    assert_eq!(lineage_specs[3]["authorization"], "develop");
+    assert_eq!(lineage_specs[3]["action"], "development");
+    assert_eq!(lineage_specs[3]["activity"]["activity"], "revised-develop");
+    assert_eq!(lineage_specs[3]["activity"]["role"], "development");
+    assert_eq!(lineage_specs[3]["activity"]["input"], artifact_id);
+    assert_eq!(lineage_specs[3]["activity"]["session_epoch"], 2);
+    assert_eq!(
+        lineage_specs[3]["activity"]["result_wait"]["id"],
+        "revised-develop"
+    );
+    assert_eq!(lineage_specs[4]["candidate"], output["id"]);
+    assert_eq!(
+        lineage_specs[4]["reason"],
+        "confirmed version B development output"
+    );
+    assert_eq!(lineage_specs[5]["activity"]["activity"], "accept-confirmed");
+    assert_eq!(lineage_specs[5]["activity"]["role"], "acceptance");
+    assert_eq!(lineage_specs[5]["activity"]["input"], output["id"]);
+    assert_eq!(lineage_specs[5]["activity"]["session_epoch"], 3);
+    assert_eq!(
+        lineage_specs[5]["activity"]["result_wait"]["id"],
+        "accept-confirmed"
     );
     let applies: Vec<_> = relevant
         .iter()
         .filter(|command| command.command.contains("queue task-apply"))
         .collect();
     assert_eq!(applies.len(), 4, "four successful coordinator applications");
+    let developer_event_id = developer_events[0].0.clone();
+    let final_event_id = final_state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-confirmed")
+        .map(|(id, _)| id.clone())
+        .expect("accept-confirmed event");
+    let mut apply_specs = std::collections::BTreeMap::new();
+    for command in &applies {
+        let parts: Vec<_> = command.command.split_whitespace().collect();
+        let positions: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| **part == "--spec")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "exactly one application --spec");
+        let path = Path::new(parts[positions[0] + 1].trim_matches(|c| c == '\'' || c == '"'));
+        assert!(path.starts_with(cwd), "application spec outside cwd");
+        let value = util::read_json(path).unwrap();
+        let task = value["task"]
+            .as_str()
+            .expect("application task")
+            .to_string();
+        assert!(
+            apply_specs.insert(task, value).is_none(),
+            "duplicate application task"
+        );
+    }
+    assert_eq!(
+        apply_specs
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "accept-native",
+            "accept-revised",
+            "revised-develop",
+            "accept-confirmed"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    );
+    let phase1_apply = &apply_specs["accept-native"];
+    assert_eq!(
+        phase1_apply["state_version"].as_u64().unwrap() + 1,
+        phase1_state["tasks"]["accept-native"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(phase1_apply["event"], phase1_event_id);
+    assert_eq!(phase1_apply["verdict"], phase1_verdict["id"]);
+    assert_eq!(phase1_apply["next_action"]["kind"], "clarify");
+    let revised_apply = &apply_specs["accept-revised"];
+    assert_eq!(
+        revised_apply["state_version"].as_u64().unwrap() + 1,
+        revised["tasks"]["accept-revised"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(revised_apply["event"], revised_event_id);
+    assert_eq!(
+        revised_apply["verdict"],
+        revised["tasks"]["accept-revised"]["verdict"]["id"]
+    );
+    assert_eq!(revised_apply["next_action"]["kind"], "repair");
+    let developer_apply = &apply_specs["revised-develop"];
+    assert_eq!(
+        developer_apply["state_version"].as_u64().unwrap() + 1,
+        developed_state["state_version"].as_u64().unwrap()
+    );
+    assert_eq!(developer_apply["event"], developer_event_id);
+    assert_eq!(developer_apply["output"], output);
+    assert_eq!(
+        developer_apply["release_evidence"],
+        revision_receipt["status"]
+    );
+    assert_eq!(developer_apply["next_action"]["kind"], "complete");
+    let final_apply = &apply_specs["accept-confirmed"];
+    assert_eq!(
+        final_apply["state_version"].as_u64().unwrap() + 1,
+        final_state["tasks"]["accept-confirmed"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(final_apply["event"], final_event_id);
+    assert_eq!(
+        final_apply["verdict"],
+        final_state["tasks"]["accept-confirmed"]["verdict"]["id"]
+    );
+    assert_eq!(final_apply["next_action"]["kind"], "delivery");
     assert!(signal_ack.start > 0 && signal_ack.end >= signal_ack.start);
     assert!(
         lineage[0].start >= signal_ack.end,
@@ -4781,16 +5114,6 @@ fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
             command.exit
         );
     }
-    let command_evidence = json!({
-        "signal_delivery": signal_delivery,
-        "commands": relevant.iter().take(32).map(|command| json!({
-            "command": command.command.chars().take(512).collect::<String>(),
-            "status": command.status, "exit": command.exit,
-            "start": command.start, "end": command.end
-        })).collect::<Vec<_>>(),
-        "truncated": relevant.len() > 32
-    });
-    util::atomic_write_json(&command_path, &command_evidence).unwrap();
     assert_eq!(final_state["tasks"]["project"]["pending"], json!([]));
     assert!(final_state["tasks"].get("delivery").is_none());
 }
