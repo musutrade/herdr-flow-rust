@@ -13,6 +13,14 @@ const AMBIGUOUS_SPECIFICATION: &str = "Project specification: both conflicting c
 const AMBIGUOUS_CONFIRMATION: &str = "Operator confirmation identifies both content references as current but does not choose between version A and version B.";
 const AMBIGUOUS_AUTHORIZATION_SOURCE: &str =
     "Existing operator authorization for independent acceptance review of the fixed artifact.";
+const CONFIRMED_REVISION_DEVELOP_AUTHORIZATION_SOURCE: &str =
+    "Newly configured disposable fixture authority derived from the user's standing authorization to implement this confirmed-revision scenario; it is not historical phase-1 authority.";
+const CONFIRMED_REVISION_USER_CHOICE: &str =
+    "User explicitly accepted the recommendation on 2026-10-23: for the disposable conflicting fixture, the subsequent version B change overrides the original version A requirement.";
+const CONFIRMED_REVISION_PRECEDENCE: &str =
+    "Confirmed revision precedence: the subsequent confirmed version B change overrides the original version A reference for this disposable fixture.";
+const CONFIRMED_REVISION_SPECIFICATION: &str =
+    "Confirmed revision specification: the user's version B decision supersedes the earlier no-precedence confirmation for this disposable fixture.";
 
 struct OwnedEnvironment {
     env: Option<TaskEnvironment>,
@@ -276,6 +284,42 @@ fn setup_in_queue_inner(
     }
     queue::save(q, &mut state).unwrap();
     (q.to_path_buf(), cwd)
+}
+
+fn setup_in_queue_with_confirmed_revision_fixture(env: &TaskEnvironment, q: &Path) -> J {
+    let source = env.workspace_root.join("source");
+    common::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(&source, &["config", "user.name", "Test"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    fs::write(source.join("file"), "version A").unwrap();
+    git(&source, &["add", "file"]);
+    git(&source, &["commit", "-qm", "A"]);
+    let sha = git(&source, &["rev-parse", "HEAD"]);
+    let now = herdr_flow::util::now();
+    let mut state = queue::load_queue(q).unwrap();
+    let plan = json!({
+        "kind":"plan", "task":"project",
+        "goal":"Review the fixed file against all current requirement references",
+        "basis":{
+            "original":[AMBIGUOUS_ORIGINAL],
+            "changes":[AMBIGUOUS_CHANGE],
+            "specifications":[AMBIGUOUS_SPECIFICATION],
+            "endpoint":"disposable acceptance endpoint",
+            "confirmation":AMBIGUOUS_CONFIRMATION
+        },
+        "authorization":[
+            {"id":"verify","action":"review","source":AMBIGUOUS_AUTHORIZATION_SOURCE},
+            {"id":"develop","action":"development","source":CONFIRMED_REVISION_DEVELOP_AUTHORIZATION_SOURCE}
+        ]
+    });
+    progress::lineage::action(&mut state, &plan, now).unwrap();
+    let artifact = json!({"id":sha,"adapter":"git","location":source});
+    let mut spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
+    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
+    progress::lineage::action(&mut state, &spec, now).unwrap();
+    queue::save(q, &mut state).unwrap();
+    artifact
 }
 
 fn setup_in_queue_with_ambiguous_requirement(env: &TaskEnvironment, q: &Path) -> J {

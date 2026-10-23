@@ -265,6 +265,7 @@ fn installed_real_opencode_submitted_worker_is_collected_by_fresh_cli() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: true,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -299,6 +300,7 @@ fn installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -333,6 +335,7 @@ fn installed_real_opencode_fixed_snapshot_late_result_is_rejected_by_native_rece
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -367,6 +370,7 @@ fn installed_real_opencode_unable_restore_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -401,6 +405,7 @@ fn installed_real_opencode_restored_review_is_applied_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: Some(UNAVAILABLE_DEPENDENCY),
         base,
         formal_target: &formal_target,
@@ -435,6 +440,42 @@ fn installed_real_opencode_ambiguous_requirement_is_applied_by_native_receiver()
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
+        unavailable_dependency: None,
+        base,
+        formal_target: &formal_target,
+        user_asset: &user_asset,
+        excluded: &[],
+    });
+}
+
+#[test]
+#[ignore = "requires real ambiguity, explicit user B confirmation, coordinator revise/candidate/continue, native failed A review, native B development and fresh native acceptance"]
+fn installed_real_opencode_confirmed_revision_resumes_with_b_development() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let base = temp.path();
+    let formal_target = base.join("unused-formal.git");
+    let user_asset = base.join("unused-user.txt");
+    run_native_receiver_in(ReceiverSpec {
+        development_adapter: DevelopmentAdapter::OpenCode,
+        apply_development: false,
+        apply_acceptance: false,
+        apply_delivery: false,
+        apply_repair: false,
+        apply_restart: false,
+        apply_ack_stall_recovery: false,
+        apply_late_acceptance: false,
+        apply_unable_restore: false,
+        apply_restored_review: false,
+        apply_ambiguous: false,
+        apply_concurrent: false,
+        apply_approval_block: false,
+        apply_missing_report: false,
+        apply_unknown_delivery: false,
+        apply_cleanup_recovery: false,
+        apply_worker_recovery: false,
+        apply_confirmed_revision: true,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -469,6 +510,7 @@ fn installed_real_opencode_concurrent_developer_while_reviewer_fixed_a() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -503,6 +545,7 @@ fn installed_real_opencode_approval_block_stops_without_result() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -537,6 +580,7 @@ fn installed_real_opencode_missing_verdict_is_restored_by_native_receiver() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -578,6 +622,7 @@ fn installed_real_opencode_accepted_delivery_unknown_is_reconciled_by_fresh_supe
         apply_unknown_delivery: true,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -631,6 +676,7 @@ fn installed_real_opencode_confirmed_delivery_cleanup_fault_is_resumed_by_fresh_
         apply_unknown_delivery: false,
         apply_cleanup_recovery: true,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -667,6 +713,7 @@ fn installed_real_codex_developer_with_opencode_coordinator_and_delivery() {
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base,
         formal_target: &formal_target,
@@ -1055,6 +1102,7 @@ fn run_campaign(base: &Path, rounds: &[CampaignRound]) {
             apply_unknown_delivery: false,
             apply_cleanup_recovery: false,
             apply_worker_recovery: false,
+            apply_confirmed_revision: false,
             unavailable_dependency: None,
             base,
             formal_target: &round.formal,
@@ -1232,6 +1280,7 @@ struct ReceiverSpec<'a> {
     apply_unknown_delivery: bool,
     apply_cleanup_recovery: bool,
     apply_worker_recovery: bool,
+    apply_confirmed_revision: bool,
     unavailable_dependency: Option<&'a str>,
     base: &'a Path,
     formal_target: &'a Path,
@@ -1269,6 +1318,7 @@ fn run_native_receiver(
         apply_unknown_delivery: false,
         apply_cleanup_recovery: false,
         apply_worker_recovery: false,
+        apply_confirmed_revision: false,
         unavailable_dependency: None,
         base: temp.path(),
         formal_target: &formal_target,
@@ -1296,6 +1346,7 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         apply_unknown_delivery,
         apply_cleanup_recovery,
         apply_worker_recovery,
+        apply_confirmed_revision,
         unavailable_dependency,
         base,
         formal_target,
@@ -1468,6 +1519,28 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         "cleanup recovery requires the native repair/restart delivery fixture"
     );
     assert!(
+        !apply_confirmed_revision
+            || (development_adapter == DevelopmentAdapter::OpenCode
+                && !apply_development
+                && !apply_acceptance
+                && !apply_delivery
+                && !apply_repair
+                && !apply_restart
+                && !apply_ack_stall_recovery
+                && !apply_late_acceptance
+                && !apply_unable_restore
+                && !apply_restored_review
+                && !apply_ambiguous
+                && !apply_concurrent
+                && !apply_approval_block
+                && !apply_missing_report
+                && !apply_unknown_delivery
+                && !apply_cleanup_recovery
+                && !apply_worker_recovery
+                && unavailable_dependency.is_none()),
+        "confirmed revision requires isolated OpenCode coordination"
+    );
+    assert!(
         !apply_worker_recovery
             || (development_adapter == DevelopmentAdapter::OpenCode
                 && apply_development
@@ -1493,7 +1566,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         || apply_missing_report
         || apply_unknown_delivery
         || apply_cleanup_recovery
-        || apply_worker_recovery)
+        || apply_worker_recovery
+        || apply_confirmed_revision)
         .then(|| fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap());
     if apply_delivery {
         fs::write(user_asset, "unrelated user asset").unwrap();
@@ -1518,13 +1592,19 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     } else {
         "accept-native"
     };
-    let reviewer_root =
-        apply_acceptance.then(|| task_runtime::prepare(&env, reviewer_name).unwrap());
+    let reviewer_root = (apply_acceptance || apply_confirmed_revision)
+        .then(|| task_runtime::prepare(&env, reviewer_name).unwrap());
     let restored_reviewer_root =
         apply_restored_review.then(|| task_runtime::prepare(&env, "accept-restored").unwrap());
     let repair_root = apply_repair.then(|| task_runtime::prepare(&env, "repair-native").unwrap());
     let final_reviewer_root =
         apply_repair.then(|| task_runtime::prepare(&env, "accept-final").unwrap());
+    let revised_reviewer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "accept-revised").unwrap());
+    let revised_developer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "revised-develop").unwrap());
+    let final_confirmed_reviewer_root =
+        apply_confirmed_revision.then(|| task_runtime::prepare(&env, "accept-confirmed").unwrap());
     let mut runtime_roots = vec![root.clone()];
     for runtime in [
         &worker_root,
@@ -1532,6 +1612,9 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         &restored_reviewer_root,
         &repair_root,
         &final_reviewer_root,
+        &revised_reviewer_root,
+        &revised_developer_root,
+        &final_confirmed_reviewer_root,
     ]
     .into_iter()
     .flatten()
@@ -1588,8 +1671,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     if apply_restored_review {
         artifact_names.push("restored-reviewer-checkout");
     }
+    if apply_confirmed_revision {
+        artifact_names.extend([
+            "revised-reviewer-checkout",
+            "revised-developer-checkout",
+            "confirmed-reviewer-checkout",
+        ]);
+    }
     let artifact_roots: Vec<_> = if apply_development
         || apply_ambiguous
+        || apply_confirmed_revision
         || apply_concurrent
         || apply_approval_block
         || apply_missing_report
@@ -1669,6 +1760,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
             final_reviewer_root.join("submission.json"),
         ]);
     }
+    for root in [
+        &revised_reviewer_root,
+        &revised_developer_root,
+        &final_confirmed_reviewer_root,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        evidence_paths.extend([root.join("server.log"), root.join("submission.json")]);
+    }
     if apply_delivery {
         evidence_paths.extend([
             base.join("inventory-before.json"),
@@ -1721,6 +1822,16 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         if let Some(final_reviewer_root) = &final_reviewer_root {
             allow_owned_external_directory(&mut config, final_reviewer_root);
         }
+        for root in [
+            &revised_reviewer_root,
+            &revised_developer_root,
+            &final_confirmed_reviewer_root,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            allow_owned_external_directory(&mut config, root);
+        }
         for artifact_root in &artifact_roots {
             // Read-only to this coordinator at the kernel layer; these are
             // exact disposable test checkouts, never operator repositories.
@@ -1731,6 +1842,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
     let late_application = cwd.join("late-application.json");
     let binary = util::shell_quote(env!("CARGO_BIN_EXE_herdr-flow"));
     let queue_path = util::shell_quote(q.to_str().unwrap());
+    let confirmed_decision_path = q.parent().unwrap().join("confirmed-revision-decision.json");
+    let confirmed_release_path = q.parent().unwrap().join("revised-develop-release.json");
     let mut instruction_text = format!(
         "This is an authorized disposable receiver integration test. Do not delegate or create sessions. Upon receiving the queue notification, use its exact OPENCODE_SESSION_ID to execute the exact ACK command in that notification first. If it succeeds, run {binary} queue readiness --state-dir {queue_path} and require active_wakeup=true. An unacknowledged active delivery intentionally makes readiness false; do not treat that as permission to edit state. Retry only lock-busy errors for at most 15 seconds. Do not fabricate JSON or edit queue/watch files. ACK means receipt only. Then finish your turn. No other task work is authorized."
     );
@@ -1800,6 +1913,15 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         instruction_text = format!(
             "Authorized disposable coordinator test. Do not delegate or create sessions. This is a four-notification protocol in the same coordinator session: review (development), accept-first (acceptance), repair-native (development), accept-final (acceptance). Later notifications reopen this session after you finish a turn. For every notification use the exact OPENCODE_SESSION_ID, execute its exact queue ack first, read the exact task/event and referenced collector report, run queue task-apply, then queue readiness with active_wakeup=true. Application JSON is written in cwd. For development tasks review and repair-native write task=<task>, state_version=<current>, event=<pending event>, output=<collector output unchanged>, acceptance={{goal: development assignment completed; independent acceptance still required}}, release_evidence=<the actual bounded receipt status read from {developer_release} for review or {repair_release} for repair-native>, next_action={{kind:complete}}. Read the corresponding receipt before applying; if absent wait bounded15seconds for the driver to stop/reap and publish it, then require matching collector session and stopped/reaped status. Do not infer or fabricate a stop status. For acceptance tasks accept-first and accept-final write task=<task>, state_version=<current>, event=<pending>, verdict=<the registered immutable verdict.id>, next_action kind from the actual report conclusion: passed to delivery, failed to repair, unable to restore, ambiguous to clarify, with owner=native coordinator, reason=independent report, condition=existing authorization. Never supply acceptance, output, report or a replacement verdict for an acceptance task; never rewrite the verdict. Do not invent or assume a conclusion. Run {binary} queue task-apply --state-dir {queue_path} --spec YOUR_APPLICATION_FILE for each notification. Do not inspect herdr-flow source, operator repositories, sibling roles or any paths outside the supplied disposable roots. Write only the application JSON in cwd; do not fabricate queue/guard/report/verdict state. Finish each turn after readiness; the next notification will reopen the same session.",
             developer_release=developer_release.display(), repair_release=repair_release.display()
+        );
+    }
+    if apply_confirmed_revision {
+        instruction_text = confirmed_revision_instruction(
+            &binary,
+            &queue_path,
+            &cwd,
+            &confirmed_decision_path,
+            &confirmed_release_path,
         );
     }
     instruction_text.push_str(" Use only the supplied queue path. Never create, copy, rename, edit or probe queue, guard or state directories. Stop and fail on any non-lock-busy error; never fabricate task-apply, output, event, verdict or readiness, and never create a replacement or duplicate artifact.");
@@ -1917,13 +2039,52 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
         delivery_expected = Some(source_base);
     }
-    let ambiguous_artifact =
-        apply_ambiguous.then(|| setup_in_queue_with_ambiguous_requirement(&env, &q));
+    let ambiguous_artifact = (apply_ambiguous || apply_confirmed_revision).then(|| {
+        if apply_confirmed_revision {
+            setup_in_queue_with_confirmed_revision_fixture(&env, &q)
+        } else {
+            setup_in_queue_with_ambiguous_requirement(&env, &q)
+        }
+    });
     let concurrent_artifact =
         apply_concurrent.then(|| setup_in_queue_with_concurrent_activities(&env, &q));
     let approval_cwd = apply_approval_block.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let missing_cwd = apply_missing_report.then(|| setup_in_queue(&env, "acceptance", &q).1);
     let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
+    if apply_confirmed_revision {
+        confirmed_revision_stage(ConfirmedRevisionSpec {
+            env: &mut env,
+            q: &q,
+            guard: &guard,
+            coordinator: &registered,
+            artifact: ambiguous_artifact.as_ref().unwrap(),
+            reviewer_root: reviewer_root.as_ref().unwrap(),
+            revised_reviewer_root: revised_reviewer_root.as_ref().unwrap(),
+            revised_developer_root: revised_developer_root.as_ref().unwrap(),
+            final_reviewer_root: final_confirmed_reviewer_root.as_ref().unwrap(),
+            client: &client,
+            endpoint: &endpoint,
+            cwd: &cwd,
+            evidence: &mut failure_evidence,
+        });
+        let selected_config_after =
+            fs::read(std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap()).unwrap();
+        assert!(
+            selected_config_after
+                == *selected_config_before
+                    .as_ref()
+                    .expect("confirmed-revision config snapshot"),
+            "selected OpenCode configuration changed during confirmed-revision scenario"
+        );
+        destroy_environment(&env).unwrap();
+        wait_bounded(&mut server, "native server");
+        wait_bounded(&mut guard_child, "guard watcher");
+        wait_bounded(&mut queue_child, "queue watcher");
+        assert!(!env.workspace_root.exists());
+        assert!(!env.temp_root.exists());
+        assert_eq!(occupied_slots().unwrap(), 0);
+        return;
+    }
     if let Some(artifact) = ambiguous_artifact.as_ref() {
         let application = cwd.join("ambiguity-application.json");
         let instruction = String::from(
@@ -3924,6 +4085,1231 @@ fn worker_custody_reacquires_the_same_instance_and_cleans_on_failure() {
     drop(outer);
     assert!(!is_registered("worker-custody-panic").unwrap());
     assert!(!root.join("workspace").exists());
+}
+
+struct ConfirmedRevisionSpec<'a> {
+    env: &'a mut TaskEnvironment,
+    q: &'a Path,
+    guard: &'a Path,
+    coordinator: &'a J,
+    artifact: &'a J,
+    reviewer_root: &'a Path,
+    revised_reviewer_root: &'a Path,
+    revised_developer_root: &'a Path,
+    final_reviewer_root: &'a Path,
+    client: &'a ureq::Agent,
+    endpoint: &'a str,
+    cwd: &'a Path,
+    evidence: &'a mut FailureEvidence,
+}
+
+fn register_confirmed_revision_wait(q: &Path) {
+    let _lock = queue::locked(q, true).unwrap();
+    queue::add(
+        q,
+        &json!({
+            "id":"confirmed-revision",
+            "task":"project",
+            "epoch":1,
+            "owner":"operator",
+            "reason":"record the actual user's B-precedence decision",
+            "condition":"bounded immutable user decision evidence",
+            "kind":"signal",
+            "timeout_seconds":600
+        }),
+    )
+    .unwrap();
+}
+
+fn write_confirmed_revision_decision(path: &Path) -> J {
+    let evidence = json!({
+        "schema":1,
+        "fixture_only":true,
+        "user_choice":"version B",
+        "precedence":"the subsequent version B change overrides the original version A requirement",
+        "source":CONFIRMED_REVISION_USER_CHOICE,
+        "recorded_at":"2026-10-23",
+        "historical_authority":false
+    });
+    util::atomic_write_json(path, &evidence).unwrap();
+    evidence
+}
+
+fn signal_confirmed_revision(env: &mut TaskEnvironment, q: &Path, evidence: &Path) {
+    let mut cmd = env.command(env!("CARGO_BIN_EXE_herdr-flow"));
+    cmd.args([
+        "queue",
+        "signal",
+        "--state-dir",
+        q.to_str().expect("queue UTF-8"),
+        "--wait",
+        "confirmed-revision",
+        "--outcome",
+        "complete",
+        "--summary",
+        "actual user selected version B for the disposable fixture",
+        "--evidence",
+        evidence.to_str().expect("decision evidence UTF-8"),
+    ])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    let mut guard = BoundedChild::new(cmd.spawn().unwrap());
+    let pid = guard.child_mut().id();
+    let mut observed = None;
+    if let Err(error) = env.register_process(pid as i32) {
+        match guard.child_mut().try_wait() {
+            Ok(Some(status)) if status.success() => {
+                guard.release();
+                observed = Some(status);
+            }
+            Ok(Some(status)) => {
+                panic!("operator signal exited before registration: {status:?}")
+            }
+            _ => panic!("operator signal registration failed: {error}"),
+        }
+    }
+    let status = match observed {
+        Some(status) => status,
+        None => guard
+            .wait_status()
+            .unwrap_or_else(|error| panic!("operator signal wait failed: {error}")),
+    };
+    assert!(status.success(), "operator signal exited {status:?}");
+}
+
+fn wait_for_registered_task(q: &Path, name: &str) -> J {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let state = queue::load_queue(q).unwrap();
+        if let Some(task) = state["tasks"].get(name).filter(|task| !task.is_null()) {
+            return task.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "coordinator did not register {name}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+struct RegisteredReviewSpec<'a> {
+    env: &'a mut TaskEnvironment,
+    q: &'a Path,
+    guard: &'a Path,
+    coordinator: &'a J,
+    reviewer_root: &'a Path,
+    activity: &'a str,
+    cwd: &'a Path,
+    input: &'a J,
+    instruction: &'a str,
+    inspection: &'a str,
+    expect_pass: bool,
+    evidence: &'a mut FailureEvidence,
+}
+
+fn registered_review_stage(spec: RegisteredReviewSpec<'_>) -> J {
+    let RegisteredReviewSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        reviewer_root,
+        activity,
+        cwd,
+        input,
+        instruction,
+        inspection,
+        expect_pass,
+        evidence,
+    } = spec;
+    let metadata_path = reviewer_root.join("review-metadata.json");
+    evidence.0.push(metadata_path.clone());
+    let report_path = cwd.join(".herdr-verdict.json");
+    if !evidence.0.contains(&report_path) {
+        evidence.0.push(report_path.clone());
+    }
+    let mut turn = acceptance_live::native_prepare(env, q, cwd, activity, instruction);
+    assert_eq!(turn.root, reviewer_root, "reviewer root identity changed");
+    acceptance_live::native_dispatch(env, &turn);
+    let submission = util::read_json(&turn.root.join("submission.json")).unwrap();
+    let message = submission["message_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("reviewer message id")
+        .to_string();
+    evidence.0.push(
+        reviewer_root
+            .join("submissions")
+            .join(format!("{message}.json")),
+    );
+    let result = acceptance_live::native_finish(env, &mut turn);
+    assert_eq!(result["message_id"], json!(message));
+    assert_ne!(result["session"], coordinator["session"]);
+    let report_bytes = fs::read(&report_path).unwrap();
+    let report = util::read_json(&report_path).unwrap();
+    assert_eq!(
+        report["conclusion"],
+        if expect_pass { "passed" } else { "failed" }
+    );
+    let state = wait_for_stage(q, guard, coordinator, activity);
+    let events: Vec<_> = state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, event)| event["wait"] == activity)
+        .collect();
+    assert_eq!(events.len(), 1, "one event for {activity}");
+    let (event_id, event) = (events[0].0.clone(), events[0].1.clone());
+    assert_eq!(event["acknowledged"], true);
+    assert_eq!(event["applied"], true);
+    assert_eq!(event["binding"], result["context"]["binding"]);
+    assert_eq!(
+        event["evidence"],
+        json!(q.join(format!("results/{activity}.json")))
+    );
+    let signal = util::read_json(Path::new(
+        event["evidence"].as_str().expect("review event evidence"),
+    ))
+    .unwrap();
+    let submission_report_path = reviewer_root
+        .join("submissions")
+        .join(format!("{message}.json"));
+    assert_eq!(signal["evidence"], json!(submission_report_path));
+    let submission_report = util::read_json(&submission_report_path).unwrap();
+    assert_eq!(submission_report["session"], result["session"]);
+    assert_eq!(submission_report["message_id"], json!(message));
+    let deliveries: Vec<_> = state["deliveries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|delivery| delivery["events"] == json!([event_id]))
+        .collect();
+    assert_eq!(deliveries.len(), 1, "one delivery for {activity}");
+    assert_eq!(deliveries[0]["session"], coordinator["session"]);
+    assert_eq!(deliveries[0]["phase"], "acknowledged");
+    let task = &state["tasks"][activity];
+    assert_eq!(task["pending"], json!([]));
+    assert_eq!(task["lineage"]["input"], input["id"]);
+    assert_eq!(task["verdict"]["envelope"]["binding"], event["binding"]);
+    assert_eq!(
+        task["verdict"]["envelope"]["reviewer"]["session"],
+        result["session"]
+    );
+    assert_eq!(task["verdict"]["envelope"]["report"], report);
+    assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+    let session = result["session"].as_str().expect("reviewer session");
+    let rows = session_rows(&turn.client, &turn.endpoint, session, cwd);
+    let commands = tool_commands(&rows, session);
+    write_reviewer_metadata(
+        &metadata_path,
+        activity,
+        &submission,
+        &result,
+        &commands,
+        &rows,
+    );
+    let inspect = commands
+        .iter()
+        .find(|command| command.command.trim() == "git show HEAD:file")
+        .expect("reviewer artifact inspection");
+    assert!(terminal_tool_state(inspect) && inspect.success);
+    assert_eq!(inspect.exit, Some(0));
+    let inspected = inspect.output.trim();
+    assert!(
+        inspected == inspection,
+        "reviewer inspection content mismatch: expected {:?}, actual {:?}",
+        inspection.chars().take(512).collect::<String>(),
+        inspected.chars().take(512).collect::<String>()
+    );
+    assert!(
+        inspect.start > 0
+            && inspect.start != i64::MAX
+            && inspect.end >= inspect.start
+            && inspect.end != i64::MAX
+    );
+    exact_terminal_completion_millis(&rows, &result, cwd, activity);
+    turn.stop();
+    state
+}
+
+fn write_reviewer_metadata(
+    path: &Path,
+    activity: &str,
+    submission: &J,
+    result: &J,
+    commands: &[ToolCommand],
+    rows: &J,
+) {
+    let session = result["session"].as_str().unwrap_or_default();
+    let message = result["message_id"].as_str().unwrap_or_default();
+    let reply = result["reply_id"].as_str().unwrap_or_default();
+    let completed: Vec<_> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row["info"]["sessionID"] == session
+                && row["info"]["role"] == "assistant"
+                && row["info"]["id"] == reply
+                && row["info"]["parentID"] == message
+        })
+        .filter_map(|row| row["info"]["time"]["completed"].as_f64())
+        .collect();
+    let field_truncated = commands
+        .iter()
+        .any(|command| command.command.chars().count() > 512);
+    let records: Vec<_> = commands
+        .iter()
+        .map(|command| {
+            json!({
+                "command": command.command.chars().take(512).collect::<String>(),
+                "status": command.status,
+                "exit": command.exit,
+                "success": command.success,
+                "start": command.start,
+                "end": command.end,
+            })
+        })
+        .collect();
+    let command_count = records.len();
+    let metadata = bounded_restore_tool_evidence(json!({
+        "schema":1,
+        "activity":activity,
+        "session":session,
+        "message_id":message,
+        "reply_id":reply,
+        "submission_created_at":submission["created_at"],
+        "result_phase":result["phase"],
+        "result_outcome":result["outcome"],
+        "reply_completion_times":completed,
+        "commands":records,
+        "command_count":command_count,
+        "inspection_matches":commands.iter().filter(|command| command.command.trim() == "git show HEAD:file").count(),
+        "field_truncated":field_truncated,
+        "truncated":field_truncated
+    }));
+    assert!(
+        serde_json::to_vec_pretty(&metadata).unwrap().len() <= 60 * 1024,
+        "reviewer metadata snapshot exceeds 60KiB"
+    );
+    util::atomic_write_json(path, &metadata).expect("reviewer metadata snapshot");
+}
+
+fn confirmed_revision_instruction(
+    binary: &str,
+    queue_path: &str,
+    cwd: &Path,
+    decision_path: &Path,
+    release_path: &Path,
+) -> String {
+    let mut text = r#"Authorized disposable confirmed-revision fixture. Do not delegate or create sessions. Use only the supplied queue, registered collector evidence roots and cwd. Do not inspect herdr-flow source, the binary installation repository, operator repositories, sibling role checkouts, or any other paths. The schemas below are complete. Never search code to discover a schema. For each CLI invocation use <BINARY> queue <action> --state-dir <QUEUE> --spec <absolute JSON path in cwd> (ACK uses its notification delivery argument instead). Write a separate JSON spec file for each operation and retain it unchanged. Every task-lineage spec has top-level kind, task="project", state_version from the current project. For kind=continue, activity is a nested object with activity name, role, input, session_epoch, result_wait. For kind=activity, those activity fields are top-level. Use direct separate bash commands and stop on any non-lock-busy failure; never search source or request additional access. Never deliver, edit queue/guard/state, fabricate an ACK, verdict, output, event, or continuation, and never press approvals.
+
+PHASE 1: one accept-native ambiguous notification arrives. Use its exact OPENCODE_SESSION_ID. ACK exactly, then read the current child and pending event. Write <PHASE1_APP> as {"task":"accept-native","state_version":<current child integer>,"event":<exact pending event id>,"verdict":<child.verdict.id>,"next_action":{"kind":"clarify","owner":"native coordinator","reason":"independent report","condition":"existing authorization"}}; substitute actual values for angle placeholders. Omit output, acceptance, findings, resolve_findings and report. Apply it once with queue task-apply. Run readiness with active_wakeup=true, and finish. Do not revise yet.
+
+CONFIRMED-REVISION SIGNAL: later a confirmed-revision notification arrives. ACK its exact delivery as receipt only; do not task-apply it. Read the immutable decision at <DECISION> and require fixture_only=true, user_choice="version B", historical_authority=false. Then use the current project state_version to run exactly these task-lineage commands:
+1) Write exactly {"kind":"revise","task":"project","state_version":<current project integer>,"goal":"Deliver version B for the disposable confirmed-revision fixture","basis":{"original":["<ORIGINAL>"],"changes":["<PRECEDENCE>","<CHANGE>"],"specifications":["<SPEC>"],"endpoint":"disposable confirmed revision endpoint","confirmation":"<USER_CHOICE>"}}. endpoint and confirmation are inside basis, never top-level. Omit authorization and acceptance so revision 2 inherits revision 1 authorization and completion criteria unchanged. Invoke task-lineage once.
+2) Write {"kind":"candidate","task":"project","state_version":<current project integer AFTER revise>,"candidate":<exact artifact A id string from project.artifacts>,"reason":"reselect A for honest independent review under confirmed revision B"}. The id field is literally candidate, not artifact, id or input. Invoke task-lineage once.
+3) Write a continue spec with exactly {"kind":"continue","task":"project","state_version":<current project integer AFTER candidate>,"intent":<current project.continuation.id>,"authorization":"verify","action":"review","resolution":"<DECISION>","activity":{"activity":"accept-revised","role":"acceptance","input":<artifact A id string>,"session_epoch":2,"result_wait":{"id":"accept-revised","task":"accept-revised","epoch":2,"assignment":"accept-revised-a2","owner":"reviewer","kind":"signal","reason":"honest A-versus-B review","condition":"terminal report","timeout_seconds":1800}}}. The nested activity key is literally activity, not name, id or task. The intent must be the actual clarify continuation id. Invoke task-lineage once. Run readiness and finish.
+
+ACCEPT-REVISED: one failed independent verdict for A under B arrives. ACK, read the exact registered verdict/binding and current child. Write an application with exactly task="accept-revised", state_version=<current child integer>, event=<exact pending event id>, verdict=<child.verdict.id>, next_action={"kind":"repair","owner":"native coordinator","reason":"independent failed review","condition":"existing development authorization"}. Omit output, acceptance, findings, resolve_findings and report. Apply it once, then write and invoke one task-lineage continue spec {"kind":"continue","task":"project","state_version":<current project integer AFTER failed application>,"intent":<current project.continuation.id>,"authorization":"develop","action":"development","resolution":"confirmed revision B requires development after honest A failure","activity":{"activity":"revised-develop","role":"development","input":<artifact A id string>,"session_epoch":2,"result_wait":{"id":"revised-develop","task":"revised-develop","epoch":2,"assignment":"revised-develop-a2","owner":"developer","kind":"signal","reason":"confirmed B development","condition":"terminal result","timeout_seconds":1800}}}. Run readiness and finish. If the verdict is not failed, stop and fail; never approve A.
+
+REVISED-DEVELOP: one development result for revised-develop arrives. ACK, read its exact collector output, and read the factual release receipt at <RELEASE> (wait at most 15 seconds for the driver to stop/reap; never infer or fabricate stop status). Apply it with task=revised-develop, current child state_version, exact event, output unchanged, acceptance={goal:"development assignment completed"}, release_evidence=<actual receipt status>, next_action={"kind":"complete"}. These are top-level application fields; omit verdict and report. Then invoke task-lineage with {"kind":"candidate","task":"project","state_version":<current project integer AFTER development application>,"candidate":<exact collector output.id string>,"reason":"confirmed version B development output"}. Then invoke task-lineage with {"kind":"activity","task":"project","state_version":<current project integer AFTER candidate>,"activity":"accept-confirmed","role":"acceptance","input":<exact B id string>,"session_epoch":3,"result_wait":{"id":"accept-confirmed","task":"accept-confirmed","epoch":3,"assignment":"accept-confirmed-a3","owner":"reviewer","kind":"signal","reason":"fresh B acceptance","condition":"terminal report","timeout_seconds":1800}}. These activity fields are flat, not nested. Run readiness and finish.
+
+ACCEPT-CONFIRMED: one passed independent verdict for B arrives. ACK and read the actual accept-revised failed report gaps. Write an application with exactly task="accept-confirmed", state_version=<current child integer>, event=<exact pending event id>, verdict=<child.verdict.id>, next_action={"kind":"delivery","owner":"native coordinator","reason":"independent passed review","condition":"existing authorization"}. Omit output, acceptance, findings, resolve_findings and report. Apply this exact immutable verdict once, ensuring its actual resolutions include every accept-revised gap id with real evidence. Run readiness and finish. No customer delivery and no replacement artifact. If any actual conclusion differs or a gap is unresolved, stop and fail honestly.
+
+Use the exact queue at <QUEUE>, binary at <BINARY>, decision at <DECISION>. Write each task-lineage/application spec to an absolute path under <CWD> and invoke the named supported command once; retry only lock-busy errors. Preserve phase-1 requirement/verdict/report bytes and revision-2 authorization."#.to_string();
+    let replacements = [
+        ("<DECISION>", decision_path.display().to_string()),
+        (
+            "<PHASE1_APP>",
+            cwd.join("ambiguity-application.json").display().to_string(),
+        ),
+        ("<ORIGINAL>", AMBIGUOUS_ORIGINAL.to_string()),
+        ("<PRECEDENCE>", CONFIRMED_REVISION_PRECEDENCE.to_string()),
+        ("<CHANGE>", AMBIGUOUS_CHANGE.to_string()),
+        ("<SPEC>", CONFIRMED_REVISION_SPECIFICATION.to_string()),
+        ("<USER_CHOICE>", CONFIRMED_REVISION_USER_CHOICE.to_string()),
+        ("<QUEUE>", queue_path.to_string()),
+        ("<BINARY>", binary.to_string()),
+        ("<CWD>", cwd.display().to_string()),
+        ("<RELEASE>", release_path.display().to_string()),
+    ];
+    for (from, to) in replacements {
+        text = text.replace(from, &to);
+    }
+    text
+}
+
+fn confirmed_spec_shape(command: &str, cwd: &Path) -> J {
+    let parts: Vec<_> = command.split_whitespace().collect();
+    let Some(index) = parts.iter().position(|part| *part == "--spec") else {
+        return J::Null;
+    };
+    let Some(path) = parts.get(index + 1) else {
+        return J::Null;
+    };
+    let path = Path::new(path.trim_matches(|c| c == '\'' || c == '"'));
+    let Ok(resolved) = path.canonicalize() else {
+        return json!({"unavailable":true});
+    };
+    let Ok(root) = cwd.canonicalize() else {
+        return json!({"unavailable":true});
+    };
+    if !resolved.starts_with(root) {
+        return json!({"outside_cwd":true});
+    }
+    let value = bounded_cleanup_document(&resolved, 60 * 1024);
+    let fields = [
+        "kind",
+        "task",
+        "state_version",
+        "candidate",
+        "reason",
+        "intent",
+        "authorization",
+        "action",
+        "resolution",
+        "activity",
+        "role",
+        "input",
+        "session_epoch",
+        "result_wait",
+        "event",
+        "verdict",
+        "next_action",
+        "goal",
+        "basis",
+        "output",
+        "acceptance",
+        "release_evidence",
+    ];
+    let mut shape = serde_json::Map::new();
+    for key in fields {
+        let kind = match value.get(key) {
+            None => "missing",
+            Some(J::Null) => "null",
+            Some(J::Bool(_)) => "bool",
+            Some(J::Number(_)) => "number",
+            Some(J::String(_)) => "string",
+            Some(J::Array(_)) => "array",
+            Some(J::Object(_)) => "object",
+        };
+        shape.insert(key.to_string(), json!(kind));
+    }
+    json!({"sample":"final file, not proof of invocation-time bytes","fields":shape})
+}
+
+fn confirmed_revision_stage(spec: ConfirmedRevisionSpec<'_>) {
+    let ConfirmedRevisionSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        artifact,
+        reviewer_root,
+        revised_reviewer_root,
+        revised_developer_root,
+        final_reviewer_root,
+        client,
+        endpoint,
+        cwd,
+        evidence,
+    } = spec;
+    let artifact_id = artifact["id"]
+        .as_str()
+        .expect("confirmed revision artifact id");
+    let phase1_requirement =
+        queue::load_queue(q).unwrap()["tasks"]["project"]["requirements"]["1"].clone();
+    let phase1_authorization = phase1_requirement["authorization"].clone();
+    register_confirmed_revision_wait(q);
+    let ambiguity_application = cwd.join("ambiguity-application.json");
+    let command_path = q.parent().unwrap().join("confirmed-revision-commands.json");
+    evidence.0.push(command_path.clone());
+    evidence
+        .0
+        .push(q.parent().unwrap().join("ambiguity-command-metadata.json"));
+    let revised_release = q.parent().unwrap().join("revised-develop-release.json");
+    evidence.0.push(revised_release.clone());
+    assert_eq!(
+        revised_developer_root,
+        env.temp_root.join("rt").join("revised-develop")
+    );
+    for path in [
+        env.workspace_root
+            .join("reviewer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("revised-reviewer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("revised-developer-checkout/.herdr-verdict.json"),
+        env.workspace_root
+            .join("confirmed-reviewer-checkout/.herdr-verdict.json"),
+    ] {
+        evidence.0.push(path);
+    }
+    let phase1_instruction = "You are the independent acceptance reviewer, not the coordinator or developer. Inspect the fixed artifact at the exact requested HEAD against all current requirement references. Use direct tools only. Inspect the artifact contents with exactly `git show HEAD:file` in a separate direct bash invocation; do not append echo, status printing, pipes, shell wrappers or OR-true; preserve its actual exit status, output and timestamps. The requirement basis contains conflicting original, confirmed-change and specification references with no stated precedence. Do not assume which reference wins and do not invent a user decision. Check every original/changes/specifications reference, the basis confirmation, and every authorization source. Write .herdr-verdict.json in cwd following acceptance_protocol. Include exactly three blocked checks with criterion=goal, one source copied exactly from each conflicting original/changes/specifications reference. checks.source must never name basis.confirmation or an authorization source: review those too, but record them only in agreements_checked, because they are not completion-criterion sources. If the conflict actually remains unresolved after review, use conclusion=ambiguous with a nonempty scope, nonempty top-level question and unresolved_after_review strings (at most 1000 characters), agreements_checked containing every original/changes/specifications entry plus basis.confirmation and every authorization.source, and gaps=[], resolutions=[] and reuses=[]. Do not use a blocker or restore_condition as a substitute. Derive the conclusion yourself and do not claim approval or delivery. Do not edit tracked files, commit, read sibling roles, coordinator instructions, operator repositories, or paths outside cwd.";
+    let phase1_state = native_review_stage(
+        env,
+        q,
+        guard,
+        coordinator,
+        ReviewSpec {
+            artifact,
+            reviewer_root,
+            activity: "accept-native",
+            checkout: "reviewer-checkout",
+            instruction: phase1_instruction,
+            expected_waits: &["accept-native"],
+            expect_pass: false,
+            unavailable_dependency: None,
+            development_session: None,
+            prepared_checkout: None,
+            capture_tools: false,
+            expect_ambiguous: true,
+            expected_application: Some(ambiguity_application.as_path()),
+            coordinator_client: Some(client),
+            coordinator_endpoint: Some(endpoint),
+            coordinator_cwd: Some(cwd),
+        },
+    );
+    let phase1_report_path = env
+        .workspace_root
+        .join("reviewer-checkout/.herdr-verdict.json");
+    let phase1_report = fs::read(&phase1_report_path).unwrap();
+    let phase1_verdict = phase1_state["tasks"]["accept-native"]["verdict"].clone();
+    let phase1_event_id = phase1_state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-native")
+        .map(|(id, _)| id.clone())
+        .expect("phase1 acceptance event");
+    assert_eq!(
+        phase1_state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(phase1_state["tasks"]["project"]["requirement_revision"], 1);
+
+    let decision_path = q.parent().unwrap().join("confirmed-revision-decision.json");
+    evidence.0.push(decision_path.clone());
+    write_confirmed_revision_decision(&decision_path);
+    let decision_bytes = fs::read(&decision_path).unwrap();
+    signal_confirmed_revision(env, q, &decision_path);
+
+    wait_for_registered_task(q, "accept-revised");
+    let state = queue::load_queue(q).unwrap();
+    let parent = &state["tasks"]["project"];
+    assert_eq!(parent["requirement_revision"], 2);
+    assert_eq!(parent["requirements"]["1"], phase1_requirement);
+    assert_eq!(
+        parent["requirements"]["2"]["authorization"],
+        phase1_authorization
+    );
+    let expected_basis = json!({
+        "original":[AMBIGUOUS_ORIGINAL],
+        "changes":[CONFIRMED_REVISION_PRECEDENCE, AMBIGUOUS_CHANGE],
+        "specifications":[CONFIRMED_REVISION_SPECIFICATION],
+        "endpoint":"disposable confirmed revision endpoint",
+        "confirmation":CONFIRMED_REVISION_USER_CHOICE
+    });
+    assert_eq!(parent["requirements"]["2"]["basis"], expected_basis);
+    assert_eq!(
+        parent["requirements"]["2"]["authorization"],
+        phase1_authorization
+    );
+    assert_eq!(parent["candidate"], artifact_id);
+    assert_eq!(state["tasks"]["accept-native"]["verdict"], phase1_verdict);
+    assert_eq!(fs::read(&phase1_report_path).unwrap(), phase1_report);
+    assert_eq!(
+        state["events"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|event| event["wait"] == "confirmed-revision")
+            .count(),
+        1
+    );
+    let signal_event = state["events"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|event| event["wait"] == "confirmed-revision")
+        .unwrap();
+    assert_eq!(signal_event["acknowledged"], true);
+    assert_ne!(signal_event["applied"], true);
+    assert!(signal_event["binding"].is_null());
+    assert_eq!(fs::read(&decision_path).unwrap(), decision_bytes);
+
+    let revised_cwd = acceptance_live::clone_snapshot(env, artifact, "revised-reviewer-checkout");
+    let revised = registered_review_stage(RegisteredReviewSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        reviewer_root: revised_reviewer_root,
+        activity: "accept-revised",
+        cwd: &revised_cwd,
+        input: artifact,
+        instruction: "You are the independent acceptance reviewer. The current confirmed requirement explicitly gives version B precedence over the original version A. Inspect the exact requested HEAD file by running exactly `git show HEAD:file` as the complete command in its own direct bash tool call. Do not use cd, &&, ;, pipes, redirection, echo, printf, cat, status printing, shell wrappers, or any other command in that call; preserve its actual exit status, output and timestamps. Report actual checks against the confirmed basis; if the artifact contains version A, write an honest failed verdict with a grounded gap. Do not inspect source, operator repositories, sibling checkouts, coordinator instructions, or paths outside cwd. Never approve A under B and never claim delivery.",
+        inspection: "version A",
+        expect_pass: false,
+        evidence,
+    });
+    assert_eq!(
+        revised["tasks"]["accept-revised"]["verdict"]["envelope"]["report"]["conclusion"],
+        "failed"
+    );
+    assert!(revised["tasks"]["project"]["approved"].is_null());
+    assert_eq!(
+        revised["tasks"]["project"]["continuation"]["action"]["kind"],
+        "repair"
+    );
+    assert_eq!(
+        revised["tasks"]["accept-revised"]["lineage"]["input"],
+        artifact_id
+    );
+    assert_eq!(revised["tasks"]["accept-revised"]["lineage"]["revision"], 2);
+    assert_eq!(
+        revised["tasks"]["accept-revised"]["lineage"]["round"],
+        revised["tasks"]["project"]["acceptance_round"]
+    );
+    assert_eq!(
+        revised["tasks"]["accept-revised"]["acceptance_origin"]["action"]["kind"],
+        "clarify"
+    );
+    let revised_event_id = revised["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-revised")
+        .map(|(id, _)| id.clone())
+        .expect("accept-revised event");
+
+    wait_for_registered_task(q, "revised-develop");
+    let development_cwd =
+        acceptance_live::clone_snapshot(env, artifact, "revised-developer-checkout");
+    let mut developer_turn = acceptance_live::native_prepare(
+        env,
+        q,
+        &development_cwd,
+        "revised-develop",
+        "You are the developer role, not a reviewer or acceptance role. The confirmed requirement is version B. Replace the contents of file with exactly `version B` followed by a newline, stage it, and create one new local Git commit. Do not write a verdict or acceptance report. Stay inside cwd.",
+    );
+    assert_eq!(developer_turn.root, revised_developer_root.to_path_buf());
+    acceptance_live::native_dispatch(env, &developer_turn);
+    let developer_submission =
+        util::read_json(&developer_turn.root.join("submission.json")).unwrap();
+    let developer_message = developer_submission["message_id"]
+        .as_str()
+        .expect("developer message id");
+    let developer_report_path = developer_turn
+        .root
+        .join("submissions")
+        .join(format!("{developer_message}.json"));
+    evidence.0.push(developer_report_path.clone());
+    let developed = acceptance_live::native_finish(env, &mut developer_turn);
+    let developer = util::read_json(&developer_turn.root.join("state.json")).unwrap();
+    developer_turn.stop();
+    util::atomic_write_json(
+        &revised_release,
+        &json!({
+            "session":developer["session"],
+            "runtime":revised_developer_root,
+            "status":"server stopped and reaped after terminal collection"
+        }),
+    )
+    .unwrap();
+    let output = developed["output"].clone();
+    assert_ne!(output["id"], artifact_id);
+    assert_eq!(git(&development_cwd, &["rev-parse", "HEAD"]), output["id"]);
+    assert_eq!(git(&development_cwd, &["show", "HEAD:file"]), "version B");
+    assert_eq!(
+        fs::read(development_cwd.join("file")).unwrap(),
+        b"version B\n"
+    );
+    assert!(!development_cwd.join(".herdr-verdict.json").exists());
+    assert!(developer["session"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert_ne!(developer["session"], coordinator["session"]);
+    assert_ne!(
+        developer["session"],
+        phase1_state["tasks"]["accept-native"]["verdict"]["envelope"]["reviewer"]["session"]
+            .clone()
+    );
+    assert_eq!(developer_submission["message_id"], developed["message_id"]);
+    let developer_report = util::read_json(&developer_report_path).unwrap();
+    assert_eq!(developer_report["session"], developed["session"]);
+    assert_eq!(developer_report["message_id"], json!(developer_message));
+    assert_eq!(developer_report["phase"], "signalled");
+    assert_eq!(developer_report["output"], output);
+    let developed_state = wait_for_registered_task(q, "revised-develop");
+    assert_eq!(developed_state["lineage"]["input"], artifact_id);
+    assert_eq!(developed_state["lineage"]["revision"], 2);
+    assert_eq!(developed_state["lineage"]["round"], 0);
+    let developed_queue = wait_for_stage(q, guard, coordinator, "revised-develop");
+    let developer_events: Vec<_> = developed_queue["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, event)| event["wait"] == "revised-develop")
+        .collect();
+    assert_eq!(developer_events.len(), 1);
+    assert_eq!(developer_events[0].1["applied"], true);
+    let developer_delivery = delivery_for_event(
+        &developed_queue,
+        coordinator["session"].as_str().unwrap(),
+        developer_events[0].0,
+    )
+    .expect("developer delivery");
+    assert_eq!(developer_delivery.1["phase"], "acknowledged");
+
+    wait_for_registered_task(q, "accept-confirmed");
+    let final_cwd = acceptance_live::clone_snapshot(env, &output, "confirmed-reviewer-checkout");
+    let revised_report = &revised["tasks"]["accept-revised"]["verdict"]["envelope"]["report"];
+    let gaps = revised_report["gaps"].as_array().expect("failed A gaps");
+    assert!(!gaps.is_empty(), "failed A review had no grounded gaps");
+    let gap_list = gaps
+        .iter()
+        .map(|gap| {
+            format!(
+                "activity=accept-revised gap={} evidence={}",
+                gap["id"], gap["evidence"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let final_instruction = format!(
+        "You are the independent acceptance reviewer. Inspect the exact requested HEAD file against the current confirmed revision, which gives version B precedence. Run exactly `git show HEAD:file` as the complete command in its own direct bash tool call. Do not use cd, &&, ;, pipes, redirection, echo, printf, cat, status printing, shell wrappers, or any other command in that call; preserve its actual exit status, output and timestamps. Derive the verdict from the actual content. Do not inspect source, operator repositories, sibling checkouts, coordinator instructions, or paths outside cwd. Resolve every actual accept-revised gap using its exact activity/id and real evidence: {gap_list}. Write .herdr-verdict.json following acceptance_protocol with a factual resolutions entry for each gap; do not deliver or edit tracked files."
+    );
+    let final_state = registered_review_stage(RegisteredReviewSpec {
+        env,
+        q,
+        guard,
+        coordinator,
+        reviewer_root: final_reviewer_root,
+        activity: "accept-confirmed",
+        cwd: &final_cwd,
+        input: &output,
+        instruction: &final_instruction,
+        inspection: "version B",
+        expect_pass: true,
+        evidence,
+    });
+    assert_eq!(final_state["tasks"]["project"]["candidate"], output["id"]);
+    assert_eq!(
+        final_state["tasks"]["accept-confirmed"]["lineage"]["input"],
+        output["id"]
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-confirmed"]["lineage"]["revision"],
+        2
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-confirmed"]["lineage"]["round"],
+        final_state["tasks"]["project"]["acceptance_round"]
+    );
+    let phase1_session = phase1_state["tasks"]["accept-native"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("phase1 reviewer session");
+    let revised_session = revised["tasks"]["accept-revised"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("revised reviewer session");
+    let developer_session = developer["session"].as_str().expect("developer session");
+    let final_session = final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["reviewer"]
+        ["session"]
+        .as_str()
+        .expect("final reviewer session");
+    let coordinator_session = coordinator["session"]
+        .as_str()
+        .expect("coordinator session");
+    for (label, session) in [
+        ("phase1", phase1_session),
+        ("revised", revised_session),
+        ("developer", developer_session),
+        ("final", final_session),
+        ("coordinator", coordinator_session),
+    ] {
+        assert!(!session.trim().is_empty(), "{label} session empty");
+    }
+    let sessions: std::collections::BTreeSet<_> = [
+        phase1_session,
+        revised_session,
+        developer_session,
+        final_session,
+        coordinator_session,
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(sessions.len(), 5, "all role sessions must be distinct");
+    let expected_tasks: std::collections::BTreeSet<_> = final_state["tasks"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        expected_tasks,
+        [
+            "project",
+            "accept-native",
+            "accept-revised",
+            "revised-develop",
+            "accept-confirmed"
+        ]
+        .into_iter()
+        .collect()
+    );
+    let expected_waits: std::collections::BTreeSet<_> = final_state["waits"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        expected_waits,
+        [
+            "accept-native",
+            "confirmed-revision",
+            "accept-revised",
+            "revised-develop",
+            "accept-confirmed"
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["candidate"],
+        output["id"]
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["report"]["conclusion"],
+        "passed"
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["2"],
+        parent["requirements"]["2"]
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["1"],
+        phase1_requirement
+    );
+    assert_eq!(
+        final_state["tasks"]["accept-native"]["verdict"],
+        phase1_verdict
+    );
+    assert_eq!(fs::read(&phase1_report_path).unwrap(), phase1_report);
+    assert_eq!(fs::read(&decision_path).unwrap(), decision_bytes);
+    assert_eq!(
+        final_state["tasks"]["project"]["requirements"]["2"]["authorization"],
+        phase1_authorization
+    );
+    assert_eq!(git(&final_cwd, &["show", "HEAD:file"]), "version B");
+    let final_report = &final_state["tasks"]["accept-confirmed"]["verdict"]["envelope"]["report"];
+    let resolutions = final_report["resolutions"]
+        .as_array()
+        .expect("final resolutions");
+    for gap in gaps {
+        let gap_id = gap["id"].as_str().expect("revised gap id");
+        assert!(
+            resolutions.iter().any(|resolution| {
+                resolution["activity"] == "accept-revised"
+                    && resolution["gap"] == gap_id
+                    && resolution["evidence"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+            }),
+            "final report did not resolve actual gap {gap_id}"
+        );
+    }
+    assert_eq!(final_state["tasks"]["project"]["open_gaps"], json!({}));
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["activity"],
+        "accept-confirmed"
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["round"],
+        final_state["tasks"]["accept-confirmed"]["lineage"]["round"]
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["approved"]["verdict"],
+        final_state["tasks"]["accept-confirmed"]["verdict"]["id"]
+    );
+    assert_ne!(
+        final_state["tasks"]["project"]["approved"]["candidate"],
+        artifact_id
+    );
+    let revision_receipt = util::read_json(&revised_release).unwrap();
+    assert_eq!(revision_receipt["session"], developer["session"]);
+    assert_eq!(
+        final_state["tasks"]["revised-develop"]["last_release"]["evidence"],
+        revision_receipt["status"]
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["continuation"]["action"]["kind"],
+        "delivery"
+    );
+    assert_eq!(final_state["events"].as_object().unwrap().len(), 5);
+    assert_eq!(final_state["deliveries"].as_object().unwrap().len(), 5);
+    let (signal_event_id, signal_event) = final_state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "confirmed-revision")
+        .map(|(id, event)| (id.clone(), event.clone()))
+        .unwrap();
+    assert_eq!(signal_event["acknowledged"], true);
+    assert_ne!(signal_event["applied"], true);
+    assert!(signal_event["binding"].is_null());
+    let signal_delivery = delivery_for_event(&final_state, coordinator_session, &signal_event_id)
+        .expect("signal delivery")
+        .0
+        .to_string();
+    let rows = session_rows(client, endpoint, coordinator_session, cwd);
+    let commands = tool_commands(&rows, coordinator_session);
+    let relevant: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command.success
+                && (command.command.contains("queue ack")
+                    || command.command.contains("queue task-lineage")
+                    || command.command.contains("queue task-apply"))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    let spec_paths: Vec<_> = relevant
+        .iter()
+        .filter_map(|command| {
+            let parts: Vec<_> = command.command.split_whitespace().collect();
+            let index = parts.iter().position(|part| *part == "--spec")?;
+            Some(
+                parts
+                    .get(index + 1)?
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .chars()
+                    .take(512)
+                    .collect::<String>(),
+            )
+        })
+        .collect();
+    let diagnostic_commands: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            (command.command.contains("queue ack")
+                || command.command.contains("queue task-lineage")
+                || command.command.contains("queue task-apply"))
+                && exact_path_argument(&command.command, "--state-dir", q)
+        })
+        .collect();
+    let mut command_evidence = json!({
+        "signal_delivery": signal_delivery,
+        "spec_paths": spec_paths,
+        "commands": diagnostic_commands.iter().map(|command| json!({
+            "command": command.command.chars().take(512).collect::<String>(),
+            "status": command.status, "exit": command.exit, "success": command.success,
+            "spec_shape":confirmed_spec_shape(&command.command,cwd),
+            "start": command.start, "end": command.end,
+            "lock_busy":lock_busy_evidence(command),
+            "version_changed":command.output.contains("version changed"),
+            "continuation_changed":command.output.contains("continuation changed"),
+            "wrong_role":command.output.contains("wrong continuation role"),
+            "continuation_not_pending":command.output.contains("continuation is not pending"),
+            "continuation_binding_changed":command.output.contains("continuation candidate or round changed") || command.output.contains("continuation requirements changed"),
+            "artifact_not_registered":command.output.contains("artifact is not registered"),
+            "input_changed":command.output.contains("input changed"),
+            "has_output":!command.output.is_empty(),"has_error":!command.error.is_empty()
+        })).collect::<Vec<_>>(),
+        "command_count":diagnostic_commands.len(),
+        "truncated": false
+    });
+    command_evidence = bounded_restore_tool_evidence(command_evidence);
+    util::atomic_write_json(&command_path, &command_evidence).unwrap();
+    let mut expected_deliveries = Vec::new();
+    for wait in [
+        "accept-native",
+        "confirmed-revision",
+        "accept-revised",
+        "revised-develop",
+        "accept-confirmed",
+    ] {
+        let events: Vec<_> = final_state["events"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, event)| event["wait"] == wait)
+            .collect();
+        assert_eq!(events.len(), 1, "one event for {wait}");
+        let delivery =
+            delivery_for_event(&final_state, coordinator_session, events[0].0).expect("delivery");
+        assert_eq!(delivery.1["phase"], "acknowledged");
+        expected_deliveries.push(delivery.0.to_string());
+    }
+    assert_eq!(expected_deliveries.len(), 5);
+    for delivery in &expected_deliveries {
+        assert_eq!(
+            relevant
+                .iter()
+                .filter(|command| {
+                    command.command.contains("queue ack")
+                        && exact_path_argument(&command.command, "--delivery", Path::new(delivery))
+                })
+                .count(),
+            1,
+            "one exact ACK for {delivery}"
+        );
+    }
+    let signal_ack = relevant
+        .iter()
+        .find(|command| {
+            command.command.contains("queue ack")
+                && exact_path_argument(&command.command, "--delivery", Path::new(&signal_delivery))
+        })
+        .expect("signal ACK command");
+    let lineage: Vec<_> = relevant
+        .iter()
+        .filter(|command| command.command.contains("queue task-lineage"))
+        .collect();
+    assert_eq!(
+        lineage.len(),
+        6,
+        "six successful coordinator lineage commands"
+    );
+    assert!(lineage
+        .iter()
+        .all(|command| command.command.contains("--spec")));
+    let mut spec_kinds = Vec::new();
+    let mut lineage_specs = Vec::new();
+    for command in &lineage {
+        let parts: Vec<_> = command.command.split_whitespace().collect();
+        let positions: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| **part == "--spec")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "exactly one lineage --spec");
+        let spec = Path::new(parts[positions[0] + 1].trim_matches(|c| c == '\'' || c == '"'));
+        assert!(
+            spec.starts_with(cwd),
+            "lineage spec outside cwd: {}",
+            spec.display()
+        );
+        assert!(exact_path_argument(&command.command, "--spec", spec));
+        let value = util::read_json(spec).unwrap();
+        assert_eq!(value["task"], "project");
+        assert!(value["state_version"]
+            .as_u64()
+            .is_some_and(|version| version > 0));
+        spec_kinds.push(value["kind"].as_str().unwrap_or_default().to_string());
+        lineage_specs.push(value);
+    }
+    assert_eq!(
+        spec_kinds,
+        [
+            "revise",
+            "candidate",
+            "continue",
+            "continue",
+            "candidate",
+            "activity"
+        ]
+    );
+    // Each lineage action and each linked result application increments the
+    // parent once; the unassigned operator signal does not change it.
+    let initial_version = phase1_state["tasks"]["project"]["state_version"]
+        .as_u64()
+        .expect("phase-1 parent version");
+    for (spec, offset) in lineage_specs.iter().zip([0, 1, 2, 4, 6, 7]) {
+        assert_eq!(spec["state_version"], json!(initial_version + offset));
+    }
+    assert_eq!(
+        state["tasks"]["project"]["state_version"],
+        json!(initial_version + 3)
+    );
+    assert_eq!(
+        final_state["tasks"]["project"]["state_version"],
+        json!(initial_version + 9)
+    );
+    assert_eq!(lineage_specs[0]["kind"], "revise");
+    assert_eq!(
+        lineage_specs[0]["goal"],
+        "Deliver version B for the disposable confirmed-revision fixture"
+    );
+    assert_eq!(lineage_specs[0]["basis"], expected_basis);
+    assert!(lineage_specs[0].get("authorization").is_none());
+    assert_eq!(lineage_specs[1]["candidate"], artifact_id);
+    assert_eq!(
+        lineage_specs[1]["reason"],
+        "reselect A for honest independent review under confirmed revision B"
+    );
+    assert_eq!(
+        lineage_specs[2]["intent"],
+        phase1_state["tasks"]["project"]["continuation"]["id"]
+    );
+    assert_eq!(lineage_specs[2]["resolution"], json!(decision_path));
+    assert_eq!(lineage_specs[2]["authorization"], "verify");
+    assert_eq!(lineage_specs[2]["action"], "review");
+    assert_eq!(lineage_specs[2]["activity"]["activity"], "accept-revised");
+    assert_eq!(lineage_specs[2]["activity"]["role"], "acceptance");
+    assert_eq!(lineage_specs[2]["activity"]["input"], artifact_id);
+    assert_eq!(lineage_specs[2]["activity"]["session_epoch"], 2);
+    assert_eq!(
+        lineage_specs[2]["activity"]["result_wait"]["id"],
+        "accept-revised"
+    );
+    assert_eq!(
+        lineage_specs[3]["intent"],
+        revised["tasks"]["project"]["continuation"]["id"]
+    );
+    assert_eq!(lineage_specs[3]["authorization"], "develop");
+    assert_eq!(lineage_specs[3]["action"], "development");
+    assert_eq!(lineage_specs[3]["activity"]["activity"], "revised-develop");
+    assert_eq!(lineage_specs[3]["activity"]["role"], "development");
+    assert_eq!(lineage_specs[3]["activity"]["input"], artifact_id);
+    assert_eq!(lineage_specs[3]["activity"]["session_epoch"], 2);
+    assert_eq!(
+        lineage_specs[3]["activity"]["result_wait"]["id"],
+        "revised-develop"
+    );
+    assert_eq!(lineage_specs[4]["candidate"], output["id"]);
+    assert_eq!(
+        lineage_specs[4]["reason"],
+        "confirmed version B development output"
+    );
+    assert_eq!(lineage_specs[5]["activity"], "accept-confirmed");
+    assert_eq!(lineage_specs[5]["role"], "acceptance");
+    assert_eq!(lineage_specs[5]["input"], output["id"]);
+    assert_eq!(lineage_specs[5]["session_epoch"], 3);
+    assert_eq!(lineage_specs[5]["result_wait"]["id"], "accept-confirmed");
+    let applies: Vec<_> = relevant
+        .iter()
+        .filter(|command| command.command.contains("queue task-apply"))
+        .collect();
+    assert_eq!(applies.len(), 4, "four successful coordinator applications");
+    let developer_event_id = developer_events[0].0.clone();
+    let final_event_id = final_state["events"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, event)| event["wait"] == "accept-confirmed")
+        .map(|(id, _)| id.clone())
+        .expect("accept-confirmed event");
+    let mut apply_specs = std::collections::BTreeMap::new();
+    for command in &applies {
+        let parts: Vec<_> = command.command.split_whitespace().collect();
+        let positions: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| **part == "--spec")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "exactly one application --spec");
+        let path = Path::new(parts[positions[0] + 1].trim_matches(|c| c == '\'' || c == '"'));
+        assert!(path.starts_with(cwd), "application spec outside cwd");
+        let value = util::read_json(path).unwrap();
+        let task = value["task"]
+            .as_str()
+            .expect("application task")
+            .to_string();
+        assert!(
+            apply_specs.insert(task, value).is_none(),
+            "duplicate application task"
+        );
+    }
+    assert_eq!(
+        apply_specs
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "accept-native",
+            "accept-revised",
+            "revised-develop",
+            "accept-confirmed"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    );
+    let phase1_apply = &apply_specs["accept-native"];
+    assert_eq!(
+        phase1_apply["state_version"].as_u64().unwrap() + 1,
+        phase1_state["tasks"]["accept-native"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(phase1_apply["event"], phase1_event_id);
+    assert_eq!(phase1_apply["verdict"], phase1_verdict["id"]);
+    assert_eq!(phase1_apply["next_action"]["kind"], "clarify");
+    let revised_apply = &apply_specs["accept-revised"];
+    assert_eq!(
+        revised_apply["state_version"].as_u64().unwrap() + 1,
+        revised["tasks"]["accept-revised"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(revised_apply["event"], revised_event_id);
+    assert_eq!(
+        revised_apply["verdict"],
+        revised["tasks"]["accept-revised"]["verdict"]["id"]
+    );
+    assert_eq!(revised_apply["next_action"]["kind"], "repair");
+    let developer_apply = &apply_specs["revised-develop"];
+    assert_eq!(
+        developer_apply["state_version"].as_u64().unwrap() + 1,
+        final_state["tasks"]["revised-develop"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(developer_apply["event"], developer_event_id);
+    assert_eq!(developer_apply["output"], output);
+    assert_eq!(
+        developer_apply["release_evidence"],
+        revision_receipt["status"]
+    );
+    assert_eq!(developer_apply["next_action"]["kind"], "complete");
+    let final_apply = &apply_specs["accept-confirmed"];
+    assert_eq!(
+        final_apply["state_version"].as_u64().unwrap() + 1,
+        final_state["tasks"]["accept-confirmed"]["state_version"]
+            .as_u64()
+            .unwrap()
+    );
+    assert_eq!(final_apply["event"], final_event_id);
+    assert_eq!(
+        final_apply["verdict"],
+        final_state["tasks"]["accept-confirmed"]["verdict"]["id"]
+    );
+    assert_eq!(final_apply["next_action"]["kind"], "delivery");
+    assert!(signal_ack.start > 0 && signal_ack.end >= signal_ack.start);
+    assert!(
+        lineage[0].start >= signal_ack.end,
+        "signal ACK must precede revise"
+    );
+    assert!(applies
+        .iter()
+        .all(|command| command.start > 0 && command.end >= command.start));
+    for pair in relevant.windows(2) {
+        assert!(
+            pair[0].end <= pair[1].start,
+            "coordinator commands overlapped or reordered"
+        );
+    }
+    for command in commands.iter().filter(|command| {
+        !command.success
+            && (command.command.contains("queue task-lineage")
+                || command.command.contains("queue task-apply"))
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }) {
+        assert!(
+            lock_busy_evidence(command),
+            "non-lock-busy confirmed revision failure exit={:?}",
+            command.exit
+        );
+    }
+    assert_eq!(final_state["tasks"]["project"]["pending"], json!([]));
+    assert!(final_state["tasks"].get("delivery").is_none());
 }
 
 fn exact_original_event(state: &J) -> Option<(String, J)> {
@@ -7186,6 +8572,28 @@ fn assert_ambiguous_application_commands(
     application: &Path,
     commands: &[ToolCommand],
 ) {
+    let records: Vec<_> = commands.iter().filter(|command| {
+        command.command.contains("queue task-apply")
+            && exact_path_argument(&command.command, "--state-dir", q)
+    }).map(|command| json!({
+        "command":command.command.chars().take(512).collect::<String>(),
+        "command_truncated":command.command.chars().count()>512,
+        "exit":command.exit,"success":command.success,
+        "start":command.start,"end":command.end,
+        "lock_busy":lock_busy_evidence(command),
+        "version_changed":command.output.contains("task state version changed"),
+        "continuation_mismatch":command.output.contains("continuation contradicts independent verdict"),
+        "obsolete":command.output.contains("obsolete"),
+        "has_output":!command.output.is_empty(),
+        "has_error":!command.error.is_empty()
+    })).collect();
+    let count = records.len();
+    util::atomic_write_json(
+        &q.parent().unwrap().join("ambiguity-command-metadata.json"),
+        &bounded_restore_tool_evidence(json!({"schema":1,"command_count":count,
+            "commands":records,"truncated":false})),
+    )
+    .expect("ambiguity command metadata");
     let session = coordinator["session"]
         .as_str()
         .expect("coordinator session");
