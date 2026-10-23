@@ -534,7 +534,7 @@ pub fn read_state_json_bounded_if_exists(
     }
     ensure_private_dir(root, false)?;
     let directory = secure::directory(root, false)?;
-    let file = match OpenOptions::new()
+    let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(secure::anchor(&directory).join(name))
@@ -544,9 +544,12 @@ pub fn read_state_json_bounded_if_exists(
         Err(error) => return Err(error.into()),
     };
     validate_state_file(&file)?;
+    let bounded = limit
+        .checked_add(1)
+        .ok_or_else(|| FlowError::guard("bounded state read limit overflow"))?;
     let mut bytes = Vec::new();
-    Read::by_ref(&file)
-        .take((limit + 1) as u64)
+    Read::by_ref(&mut file)
+        .take(bounded as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(FlowError::guard(
@@ -799,6 +802,7 @@ mod tests {
         fs::write(&valid, br#"{"value":12345678901234567890}"#).unwrap();
         fs::set_permissions(&valid, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_state_json_bounded(directory.path(), "valid.json", 8).is_err());
+        assert!(read_state_json_bounded(directory.path(), "valid.json", usize::MAX).is_err());
         let link = directory.path().join("link.json");
         symlink(&valid, &link).unwrap();
         assert!(read_state_json_bounded(directory.path(), "link.json", 64).is_err());

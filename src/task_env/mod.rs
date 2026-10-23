@@ -54,6 +54,39 @@ pub fn create_environment(
     env::create(task_id, workspace_root, delivery_targets, temp_root)
 }
 
+#[cfg(test)]
+static TEST_ENV_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct TestEnvRootGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_root(path: &std::path::Path) -> TestEnvRootGuard {
+    let lock = TEST_ENV_ROOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var_os("HERDR_TASK_ENV_ROOT");
+    std::env::set_var("HERDR_TASK_ENV_ROOT", path);
+    TestEnvRootGuard {
+        previous,
+        _lock: lock,
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvRootGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("HERDR_TASK_ENV_ROOT", previous);
+        } else {
+            std::env::remove_var("HERDR_TASK_ENV_ROOT");
+        }
+    }
+}
+
 /// Reopen the environment belonging to `task_id`.
 ///
 /// Restoring never allocates a second environment: it returns the registered

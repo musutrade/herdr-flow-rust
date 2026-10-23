@@ -261,11 +261,15 @@ is sampled under `sampled_guard_busy`; it cannot prove an atomic marker pair.
 
 There is no automatic recovery for a dispatch marker without a submission
 journal. If that state is observed, preserve it and block/abandon the work; do
-not infer an unsent POST or call dispatch again. A terminal submission is
-reported as terminal with no collection action. If a non-terminal submission
-journal exists, the existing `collect` path is the only supported recovery and
-must still revalidate its identity. Codex turn journals are not interpreted by
-this OpenCode status; unsupported adapters are reported explicitly.
+not infer an unsent POST or call dispatch again. The markers-absent action is
+`inspect_dispatch_prerequisites`, not a dispatch or retry permission. The native
+terminal phases `complete`, `failed` and `decision` remain collectable so the
+producer can
+publish their signal; `signalled` is the already-published phase and has no
+collection action. Any non-signalled submission journal with an exact sampled
+identity may use the existing `collect` path, which must still revalidate that
+identity. Codex turn journals are not interpreted by this OpenCode status;
+unsupported adapters are reported explicitly.
 
 ### ACK/stall recovery boundary
 

@@ -272,17 +272,33 @@ fn configure_server(cmd: &mut Command, root: &Path, spec: &J, adapter: &str) -> 
 }
 
 pub fn verify(env: &TaskEnvironment, root: &Path) -> Result<J> {
+    verify_environment(env, root)?;
+    let record = util::read_state_json(root, "runtime.json")?;
+    validate_runtime_record(env, root, &record)?;
+    Ok(record)
+}
+
+pub(crate) fn verify_bounded(env: &TaskEnvironment, root: &Path, limit: usize) -> Result<J> {
+    verify_environment(env, root)?;
+    let record = util::read_state_json_bounded(root, "runtime.json", limit)?;
+    validate_runtime_record(env, root, &record)?;
+    Ok(record)
+}
+
+fn verify_environment(env: &TaskEnvironment, root: &Path) -> Result<()> {
     crate::task_env::validate_path(env, root)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "runtime environment is not active/owned",
-    )?;
-    let record = util::read_state_json(root, "runtime.json")?;
+    )
+}
+
+fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
     ensure(
         record["instance"] == env.instance_id && record["root"] == json!(root),
         "runtime belongs to another environment",
     )?;
-    let pid = model::u64_field(&record, "pid").unwrap_or(0) as i32;
+    let pid = model::u64_field(record, "pid").unwrap_or(0) as i32;
     ensure(
         env.owns_process(pid),
         "runtime process is absent or unowned",
@@ -290,8 +306,7 @@ pub fn verify(env: &TaskEnvironment, root: &Path) -> Result<J> {
     ensure(
         record["start_time"] == json!(crate::task_env::process_start_time(pid)),
         "runtime process identity changed",
-    )?;
-    Ok(record)
+    )
 }
 
 pub(super) fn required(value: &J, key: &str) -> Result<String> {

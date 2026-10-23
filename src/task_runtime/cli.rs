@@ -101,7 +101,7 @@ mod lifecycle_tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .unwrap();
-        std::env::set_var("HERDR_TASK_ENV_ROOT", temp.path().join("registry"));
+        let _env_root = crate::task_env::test_env_root(&temp.path().join("registry"));
         let mut env = crate::task_env::create_environment(
             "runtime-cli",
             &temp.path().join("work"),
