@@ -114,6 +114,112 @@ pub(crate) fn writer_reservation(s: &J, owner: &str, workspace: &Path) -> Result
     foreign_tasks(s, owner, |other| sending_checkout(other, workspace))
 }
 
+/// Admission only: prepared intents and independent development do not acquire
+/// this slot. The caller persists sending under the same queue lock.
+pub(crate) fn publication_slot(s: &J, task: &J, record: &J) -> Result<()> {
+    let owner = text(task.get("task"), "publication task", 1000)?;
+    let requested = intent(record)?;
+    foreign_tasks(s, &owner, |other| foreign_slot(other, &requested))
+}
+
+fn foreign_slot(task: &J, requested: &[String; 4]) -> Result<()> {
+    let Some(pr) = present(task, "pr") else {
+        return Ok(());
+    };
+    if intent(pr)?[..3] != requested[..3] {
+        return Ok(());
+    }
+    ensure(
+        slot_available(pr),
+        "publication target is occupied by another task; reconcile its landing before beginning",
+    )
+}
+
+fn slot_available(pr: &J) -> bool {
+    match (
+        model::dig_str(pr, &["publication", "phase"]).as_deref(),
+        model::string(pr, "phase").as_deref(),
+    ) {
+        (Some("prepared"), Some("publication_prepared")) => unstarted_create(pr),
+        (Some("observed"), Some("merged")) => confirmed_landing(pr),
+        // Open/repair/update, ambiguous sends, closed-unmerged, and unknown or
+        // contradictory records retain the slot. Task cancel/release is not a
+        // publication disposition and is deliberately not consulted.
+        _ => false,
+    }
+}
+
+fn absent_fields(record: &J, fields: &[&str]) -> bool {
+    fields.iter().all(|key| present(record, key).is_none())
+}
+
+fn unstarted_create(pr: &J) -> bool {
+    let op = &pr["publication"];
+    [
+        op["kind"] == "create",
+        valid_sha(&pr["head"]),
+        op["head"] == pr["head"],
+        absent_fields(pr, &["number", "landing", "remote", "observation"]),
+        absent_fields(
+            op,
+            &["started_at", "observed_at", "previous_head", "operation"],
+        ),
+        pr["versions"].as_array().is_some_and(Vec::is_empty),
+        pr["repairs"]
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty),
+    ]
+    .into_iter()
+    .all(|valid| valid)
+}
+
+fn valid_sha(value: &J) -> bool {
+    value.as_str().is_some_and(model::is_full_sha)
+}
+
+fn confirmed_landing(pr: &J) -> bool {
+    landing_identity(pr) && landing_observation(pr) && landing_shape(pr)
+}
+
+fn landing_identity(pr: &J) -> bool {
+    ["repo", "base_ref", "number", "head"]
+        .iter()
+        .all(|key| pr["landing"][key] == pr[key])
+}
+
+fn landing_shape(pr: &J) -> bool {
+    let landing = &pr["landing"];
+    [
+        valid_sha(&pr["head"]),
+        valid_sha(&landing["commit"]),
+        valid_sha(&landing["latest_base"]),
+        pr["number"].as_u64().is_some_and(|number| number > 0),
+        matches!(
+            pr["publication"]["kind"].as_str(),
+            Some("create" | "update")
+        ),
+    ]
+    .into_iter()
+    .all(|valid| valid)
+}
+
+fn landing_observation(pr: &J) -> bool {
+    let remote = &pr["remote"];
+    let op = &pr["publication"];
+    let at = &pr["landing"]["observed_at"];
+    [
+        remote["merged"] == true,
+        remote["state"] == "closed",
+        remote["head"] == pr["head"],
+        op["head"] == pr["head"],
+        at.as_f64().is_some_and(|at| at.is_finite() && at > 0.0),
+        remote["at"] == *at,
+        op["observed_at"] == *at,
+    ]
+    .into_iter()
+    .all(|valid| valid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +236,7 @@ mod tests {
         let s = json!({"tasks":{"owner":task}});
         // The original own-task idle/repair checks remain in their callers.
         publication(&s, &task, &record).unwrap();
+        publication_slot(&s, &task, &record).unwrap();
         writer_reservation(&s, "owner", checkout.path()).unwrap();
     }
 }

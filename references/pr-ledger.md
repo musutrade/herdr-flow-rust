@@ -65,8 +65,42 @@ The reverse check runs when reserving a writer: another task's publication in
 writer release. While checking a sending publication, both paths must be
 verifiable existing directories. `prepared` does not itself prevent local
 development; `pr-begin` rechecks any writer acquired in the meantime. Observed
-publication no longer holds this sending restriction. Distinct branches with
-disjoint worktrees remain parallel; this adds no global CI/developer limit.
+publication no longer holds this sending restriction. Independent development
+in disjoint worktrees remains parallel; this adds no global CI/developer limit.
+
+### One active publication per target
+
+At `pr-begin`, before persisting `sending`, another task's PR on the same
+`(host, repo, base_ref)` holds the publication slot even with a different
+`head_ref` or checkout. Host/repo comparison ignores ASCII case; target branch
+names are case-sensitive. This check uses the caller's existing queue lock and
+does not run at `pr-prepare` or when assigning independent development. Different
+targets remain independent; it is not a global publisher/CI lock.
+
+| Saved foreign PR state | Effect on the target slot |
+|---|---|
+| Initial create/prepared, matching valid head, no number/start/observation/landing/remote/repair history | Free: only an unstarted intent |
+| Sending, uncertain or unconfirmed | Occupied; no resend or timeout release |
+| Observed but open, CI pending/failed, conflict or repair | Occupied; finding the PR is not landing |
+| Update/prepared for an existing PR | Occupied throughout same-PR repair/update |
+| Task paused/cancelled/completed or writer released | Does not release an occupied publication slot |
+| Closed-unmerged, unknown or contradictory record | Occupied; inspect rather than infer abandonment |
+| Merged/observed with matching confirmed landing | Free for another intent on this target |
+
+Landing release requires the existing reconcile record: matching repo, target,
+positive PR number and head; full commit/latest-base SHAs; a merged/closed remote
+observation; and matching landing/publication/remote observation timestamps and
+heads. It trusts that saved, identity-consistent `pr-reconcile` evidence under the
+existing queue ownership model; admission does not issue another remote query or
+create a new receipt. A bare `phase=merged`, CI success, ACK, task completion or
+writer release is insufficient. Same-task update/repair is exempt from foreign
+slot checks and retains its original authorization, freshness and no-replay checks.
+Initial prepared records with missing/contradictory lifecycle data fail closed.
+
+This does not bound the number of prepared intents, create accepted-pending
+members, or authorize a next development claim. Those intake/receipt gaps remain
+separate. The earlier four-field intent ownership rule still prevents reassigning
+the same branch to another task even after landing.
 
 These checks reuse `tasks[*].writer`, `tasks[*].pr` and the existing queue lock.
 The CLI acquires the lock; direct library callers must hold it across

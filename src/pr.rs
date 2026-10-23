@@ -897,6 +897,7 @@ fn publication_check_inputs(
     authorization: String,
 ) -> Result<J> {
     progress::ownership::publication(s, &pull_request_state.task, &pull_request_state.record)?;
+    progress::ownership::publication_slot(s, &pull_request_state.task, &pull_request_state.record)?;
     let api = GitHub::new(pull_request_state.record.clone());
     publication_check(s, &pull_request_state.task, now, Some(&api))?;
     publication_dependencies(s, now, pull_request_state, authorization, &api)
