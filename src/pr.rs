@@ -837,6 +837,7 @@ fn prepare_assemble(
         "prepared_at": now,
         "head": record.get("head").cloned().unwrap_or(Value::Null)
     });
+    progress::ownership::publication(s, &t, &record)?;
     t["pr"] = record;
     store(s, t, now, "pr_prepared")
 }
@@ -895,6 +896,7 @@ fn publication_check_inputs(
     pull_request_state: PullRequestState,
     authorization: String,
 ) -> Result<J> {
+    progress::ownership::publication(s, &pull_request_state.task, &pull_request_state.record)?;
     let api = GitHub::new(pull_request_state.record.clone());
     publication_check(s, &pull_request_state.task, now, Some(&api))?;
     publication_dependencies(s, now, pull_request_state, authorization, &api)

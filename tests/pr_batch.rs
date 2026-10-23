@@ -1,6 +1,8 @@
 //! PR provenance/publication and bounded batch integration over real Git.
 
 pub mod common;
+#[path = "pr_batch/ownership.rs"]
+mod ownership;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
