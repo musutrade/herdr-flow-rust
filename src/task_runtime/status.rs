@@ -41,7 +41,9 @@ fn field<'a>(value: Option<&'a J>, path: &[&str]) -> Option<&'a J> {
 }
 
 fn text<'a>(value: Option<&'a J>, path: &[&str]) -> Option<&'a str> {
-    field(value, path)?.as_str()
+    field(value, path)?
+        .as_str()
+        .filter(|value| !value.is_empty())
 }
 
 fn compare(left: Option<&str>, right: Option<&str>) -> &'static str {
