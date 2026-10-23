@@ -1,4 +1,4 @@
-//! OpenCode 1.19.3 adapter behavior and diagnostic CLI tests.
+//! OpenCode 1.19.x adapter behavior and diagnostic CLI tests.
 
 pub mod common;
 
@@ -91,12 +91,12 @@ fn monitoring_capabilities_require_native_registration() {
     let (adapter, calls) = adapter_with(&state(), Vec::new(), identity_ok);
     let caps = adapter.check_capabilities().unwrap();
     assert_eq!(caps, baseline_capabilities());
-    assert_eq!(caps["adapter"], "OpenCode 1.19.3");
+    assert_eq!(caps["adapter"], "OpenCode 1.19.x (baseline 1.19.3)");
     assert_eq!(caps["available"], false);
     assert_eq!(caps["probe_required"], true);
     assert_eq!(
         caps["server_info"],
-        json!({"name": "opencode", "version": "1.19.3"})
+        json!({"name": "opencode", "baseline_version": "1.19.3", "version_source": "documented baseline; not a runtime probe"})
     );
     assert_eq!(
         caps["missing"][0],
@@ -231,19 +231,19 @@ fn unsupported_operations_keep_guard_error_boundaries() {
     let message = guard_message(adapter.rpc("thread/read", &json!({})).unwrap_err());
     assert_eq!(
         message,
-        "OpenCode 1.19.3 does not support RPC method: thread/read"
+        "OpenCode 1.19.x adapter does not support RPC method: thread/read"
     );
 
     let message = guard_message(adapter.prompt("hello").unwrap_err());
     assert_eq!(
         message,
-        "OpenCode 1.19.3 prompt requires manual input or file-based handoff"
+        "OpenCode 1.19.x adapter prompt requires manual input or file-based handoff"
     );
 
     let message = guard_message(adapter.exit_tui().unwrap_err());
     assert_eq!(
         message,
-        "OpenCode 1.19.3 exit requires manual Ctrl+C or process signal"
+        "OpenCode 1.19.x adapter exit requires manual Ctrl+C or process signal"
     );
 
     let message = guard_message(
@@ -253,7 +253,7 @@ fn unsupported_operations_keep_guard_error_boundaries() {
     );
     assert_eq!(
         message,
-        "OpenCode 1.19.3 does not support runtime restoration"
+        "OpenCode 1.19.x adapter does not support runtime restoration"
     );
 
     // None of the unsupported operations may invoke the Herdr CLI.
@@ -332,7 +332,7 @@ fn factory_uses_the_standard_boundaries() {
     assert_eq!(adapter.state, state());
     assert_eq!(
         adapter.check_capabilities().unwrap()["adapter"],
-        "OpenCode 1.19.3"
+        "OpenCode 1.19.x (baseline 1.19.3)"
     );
 }
 

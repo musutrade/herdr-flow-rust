@@ -5,7 +5,7 @@ monitor is a local supervisor process, not another model. Version 2 uses Codex
 app-server JSON-RPC over a Unix WebSocket for thread identity, runtime settings
 and turn submission. Herdr owns panes and frontend process lifecycle. It does not install hooks
 or change global Codex permissions. Claude/other agents and remote Herdr machines
-are not supported by this rotation adapter. OpenCode 1.19.3 has a separate
+are not supported by this rotation adapter. OpenCode 1.19.x (baseline 1.19.3) has a separate
 native HTTP session adapter and watcher with no automatic rotation; see
 [OpenCode integration](opencode-v2.md).
 

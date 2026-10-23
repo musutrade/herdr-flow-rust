@@ -49,7 +49,7 @@ Historical upstream Python observations in `v1-acceptance.md` do not satisfy thi
 Rust deployment requirement. Coverage percentages, when reported, require a
 commit, command and matching raw coverage artifact.
 
-## OpenCode 1.19.3 native session checks (2026-10-20)
+## OpenCode 1.19.3 baseline native session checks (2026-10-20)
 
 `cargo test --locked --test opencode_session` covers the production loopback HTTP
 transport, exact binding, blocked/busy states, ambiguous accepted submissions,

@@ -1,4 +1,4 @@
-//! OpenCode 1.19.3 native sessions and legacy process monitoring.
+//! OpenCode 1.19.x native sessions and legacy process monitoring.
 //!
 //! [`session`] implements the native HTTP receiver and durable producer path.
 //! The legacy [`OpenCodeAdapter`] below checks the shell PID and `/proc`
@@ -24,8 +24,9 @@ use crate::util::process::command;
 pub(crate) mod http;
 pub mod session;
 
-/// Human-readable adapter identity from the original capability baseline.
-pub const ADAPTER_NAME: &str = "OpenCode 1.19.3";
+/// Human-readable adapter identity; 1.19.3 is the documented baseline, not a
+/// claim about the version of every running server.
+pub const ADAPTER_NAME: &str = "OpenCode 1.19.x (baseline 1.19.3)";
 
 /// Timeout used for every herdr CLI invocation (`runner(..., timeout=30)`).
 pub const HERDR_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,7 +40,7 @@ pub type HerdrRunner<'a> = dyn Fn(&[String], Duration, bool) -> Result<Vec<u8>> 
 /// Resolve a PID to a stable process identity (`pid` and `start_ticks`).
 pub type ProcessIdentityFn<'a> = dyn Fn(u32) -> Result<J> + 'a;
 
-/// Minimal OpenCode 1.19.3 adapter: process identity + shell readiness only.
+/// Minimal OpenCode 1.19.x adapter: process identity + shell readiness only.
 pub struct OpenCodeAdapter<'a> {
     /// The guard state document (`pane`, `shell_pid`, `cwd`, `terminal`).
     pub state: J,
@@ -108,7 +109,7 @@ impl<'a> OpenCodeAdapter<'a> {
         Ok(model::get(&result, "result").cloned().unwrap_or(result))
     }
 
-    /// Report the OpenCode 1.19.3 capability baseline (cached per adapter).
+    /// Report the OpenCode 1.19.x capability baseline (cached per adapter).
     pub fn check_capabilities(&self) -> Result<J> {
         Ok(self.capabilities.get_or_init(baseline_capabilities).clone())
     }
@@ -212,28 +213,28 @@ impl<'a> OpenCodeAdapter<'a> {
     /// The process monitor cannot snapshot runtime settings.
     pub fn snapshot(&self, _session: Option<&str>) -> Result<J> {
         Err(FlowError::guard(
-            "OpenCode 1.19.3 does not support runtime snapshots",
+            "OpenCode 1.19.x adapter does not support runtime snapshots",
         ))
     }
 
     /// The process monitor cannot invoke Codex app-server RPC methods.
     pub fn rpc(&self, method: &str, _params: &J) -> Result<J> {
         Err(FlowError::guard(format!(
-            "OpenCode 1.19.3 does not support RPC method: {method}"
+            "OpenCode 1.19.x adapter does not support RPC method: {method}"
         )))
     }
 
     /// Prompting requires the separately registered native session adapter.
     pub fn prompt(&self, _text: &str) -> Result<String> {
         Err(FlowError::guard(
-            "OpenCode 1.19.3 prompt requires manual input or file-based handoff",
+            "OpenCode 1.19.x adapter prompt requires manual input or file-based handoff",
         ))
     }
 
     /// OpenCode exit is not automated.
     pub fn exit_tui(&self) -> Result<()> {
         Err(FlowError::guard(
-            "OpenCode 1.19.3 exit requires manual Ctrl+C or process signal",
+            "OpenCode 1.19.x adapter exit requires manual Ctrl+C or process signal",
         ))
     }
 
@@ -247,25 +248,25 @@ impl<'a> OpenCodeAdapter<'a> {
             return Err(FlowError::guard("OpenCode launch requires idle shell"));
         }
         Err(FlowError::guard(
-            "OpenCode 1.19.3 successor launch not automated; manual restart required",
+            "OpenCode 1.19.x adapter successor launch not automated; manual restart required",
         ))
     }
 
     /// OpenCode cannot restore runtime settings programmatically.
     pub fn restore_runtime(&self, _expected: &J, _session: &str) -> Result<()> {
         Err(FlowError::guard(
-            "OpenCode 1.19.3 does not support runtime restoration",
+            "OpenCode 1.19.x adapter does not support runtime restoration",
         ))
     }
 }
 
-/// The exact OpenCode 1.19.3 capability baseline from `opencode_adapter.py`.
+/// The documented OpenCode 1.19.x capability baseline from `opencode_adapter.py`.
 pub fn baseline_capabilities() -> J {
     json!({
         "available": false,
         "probe_required": true,
         "adapter": ADAPTER_NAME,
-        "server_info": {"name": "opencode", "version": "1.19.3"},
+        "server_info": {"name": "opencode", "baseline_version": session::BASELINE_VERSION, "version_source": "documented baseline; not a runtime probe"},
         "missing": [
             "app-server RPC (no thread/read, thread/resume, thread/settings/update)",
             "TUI bridge protocol (no session probing)",
@@ -313,12 +314,12 @@ pub fn create_opencode_adapter(state: &J) -> Result<OpenCodeAdapter<'static>> {
 
 const USAGE: &str = "Usage: herdr-flow opencode <action> [options]\n\
 Actions:\n\
-  register --state-dir DIR --spec FILE  bind a native OpenCode 1.19.3 session\n\
+  register --state-dir DIR --spec FILE  bind a native OpenCode 1.19.x session (baseline 1.19.3)\n\
   status --state-dir DIR                verify native identity and readiness\n\
   dispatch --state-dir DIR --spec FILE  submit a bound managed task once\n\
   collect --state-dir DIR               collect the bound result and signal\n\
   watch --state-dir DIR [--once]        reconcile native submissions\n\
-  capabilities [--state-dir DIR]  print the OpenCode 1.19.3 capability baseline\n\
+  capabilities [--state-dir DIR]  print the OpenCode 1.19.x capability baseline\n\
   verify --state-dir DIR --pane PANE --terminal TERM --shell-pid PID\n\
                                   verify pane, process and shell identity (read-only)";
 

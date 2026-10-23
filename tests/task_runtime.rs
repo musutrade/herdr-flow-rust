@@ -756,6 +756,9 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             assert!(!root.join("creation.json").exists());
             fs::remove_file(cwd.join(".herdr-verdict.json"))?;
             let state = task_runtime::native::create(&env, &root, &request)?;
+            if adapter == "opencode" {
+                assert_eq!(state["server_version"], "1.19.4");
+            }
             assert_eq!(
                 state["session"],
                 if adapter == "codex" {
@@ -766,7 +769,26 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             );
             assert!(task_runtime::launch(&mut env, &root, &spec).is_err());
             assert!(task_runtime::native::create(&env, &root, &request).is_err());
-            task_runtime::native::recover(&env, &root)?;
+            if adapter == "opencode" {
+                let mut stale = herdr_flow::util::read_json(&root.join("state.json"))?;
+                stale["server_version"] = json!("1.19.3");
+                herdr_flow::util::atomic_write_json(&root.join("state.json"), &stale)?;
+                let saved_state = fs::read(root.join("state.json"))?;
+                let saved_journal = fs::read(root.join("creation.json"))?;
+                let original_queue = queue::load_queue(&q)?;
+                let mut mismatched = original_queue.clone();
+                mismatched["id"] = json!("other-queue");
+                queue::save(&q, &mut mismatched)?;
+                assert!(task_runtime::native::recover(&env, &root).is_err());
+                assert_eq!(fs::read(root.join("state.json"))?, saved_state);
+                assert_eq!(fs::read(root.join("creation.json"))?, saved_journal);
+                let mut original_queue = original_queue;
+                queue::save(&q, &mut original_queue)?;
+            }
+            let recovered = task_runtime::native::recover(&env, &root)?;
+            if adapter == "opencode" {
+                assert_eq!(recovered["server_version"], "1.19.4");
+            }
             assert!(task_runtime::native::dispatch(&env, &root).is_err()); // no coordinator readiness
             let (_g, _q) = receiver(&env, &q, &cwd, port);
             let turn = task_runtime::native::dispatch(&env, &root)?;
