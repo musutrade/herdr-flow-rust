@@ -5,6 +5,16 @@ description: Coordinate issue development through Herdr with bounded agent sessi
 
 # Herdr Issue Flow
 
+Keep agent/session communication and lifecycle in Herdr. Reuse the existing
+guard, queue delivery journal, ACK, task application and delivery commands.
+Task-owned native app-server / OpenCode serve tests are backend evidence, not
+Herdr-managed workflow acceptance: their roles have no Herdr pane agents.
+Do not replace this workflow with an independent controller, process supervisor
+or parallel authority/ACK transaction system. The task-owned Codex receiver
+bootstrap remains inactive. Follow the [workflow boundary and acceptance
+steps](references/herdr-workflow.md) before selecting a transport or claiming a
+full-chain result.
+
 Control Codex threads, runtime settings and task submission through the app-server
 adapter; use Herdr for panes and frontend processes. Register native workers through
 the protocol bridge in [context rotation](references/context-rotation.md), never UI

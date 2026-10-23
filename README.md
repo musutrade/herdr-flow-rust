@@ -2,6 +2,12 @@
 
 通过 Herdr 编排 issue 开发，以任务交接和独立 CI 监控减少 agent 长会话。
 
+**工作流范围**：Herdr 管理可见 agent、会话、终端和 worktree；herdr-flow
+复用现有 guard、队列、ACK、任务应用及交付。此前 task-owned 原生测试直接启动
+后台 Codex app-server / OpenCode serve，没有创建 Herdr pane agent，不能作为
+Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr 交接也是单独证据。
+证据分类和下一步验收入口见 [Herdr 工作流边界](references/herdr-workflow.md)。
+
 本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
 
 ## 当前功能
@@ -51,6 +57,10 @@ Codex 内层 sandbox 的嵌套执行。需要专用外层启动器的宿主，�
 launch spec 中显式指定已获授权的 `namespace_launcher` 路径和 SHA-256。
 安装二进制不会自动选择该路径。参见[启动适配与本机接入](docs/codex-startup-adaptation.md)
 和[任务运行时使用说明](references/task-runtime.md)。
+
+以上组合验证的是后台原生 worker/coordinator 链路。它不证明 Herdr-managed
+OpenCode 接入，也不证明 task-owned Codex coordinator 已可用；已合入的 receiver
+bootstrap 仍未激活。当前不继续建设独立 controller 或另一套 ACK 事务系统。
 
 将本仓库放入技能目录，或从现有 checkout 建立符号链接（目标位置须尚不存在）：
 

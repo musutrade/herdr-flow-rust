@@ -8,6 +8,12 @@ Dependency audit 全部通过。
 本机已验证 task-owned Codex worker → OpenCode coordinator → 独立验收 →
 测试交付 → 环境清理闭环；未扩展 Codex coordinator，#38/#32 保持开放。
 
+**验收范围更正（2026-10-23）**：上述闭环是后台原生链路。测试直接启动
+Codex app-server 和 OpenCode serve，没有通过 Herdr 创建这些角色的 pane agent。
+原生 OpenCode coordinator 执行 ACK/task-apply，测试驱动执行 Local 交付；
+这不构成 Herdr 管理 agent 生命周期的全链路验收。启动修复和原生队列证据
+仍保留，下一步按 [Herdr 工作流边界](../references/herdr-workflow.md) 收敛。
+
 ## 根因与修复
 
 原有 `thread/start` 使用 `workspace-write`，`turn/start` 已传
