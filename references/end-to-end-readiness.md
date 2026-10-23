@@ -1134,8 +1134,13 @@ version A. The signal event remains ACK-only with no binding/application. Each
 native role must have its own real session and exact collector/event identity;
 the coordinator must run the revision/candidate/continuation/application commands.
 A genuine failed A report and a genuine passed B report are required; if the
-model concludes differently the scenario fails. B acceptance is not inferred from
-the developer's commit, and no delivery or permanent evidence archive is created.
+model concludes differently the scenario fails. The final B report must resolve
+every actual gap from the failed A review by its exact activity/gap/evidence, and
+the parent open-gap set must be empty. Coordinator command evidence separately
+checks the signal ACK, model-written lineage specs, one successful application
+per result, exact queue/delivery identities and chronological lock-busy-only
+failures. B acceptance is not inferred from the developer's commit, and no
+delivery or permanent evidence archive is created.
 
 This scenario has not yet been run as a live model acceptance. It is not a
 general authorization or product-policy change, not a customer-asset migration,
