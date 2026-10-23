@@ -1107,8 +1107,12 @@ It is not a crash
 or server-restart proof, and it does not cover a dispatch interruption after
 `dispatch.json` but before `submission.json`: no supported API
 can prove that the POST was not sent, so that boundary remains fail-closed.
-Worker takeover, coordinator process restart, a second POST and invention of a
-replacement session are not claimed. #38/#32 remain OPEN.
+A `task-runtime status` journal observation (whose normal CLI ownership restore
+has its own side effects) now exposes marker and identity facts without
+inferring delivery from absence, but it does not satisfy recovery acceptance and
+does not make that boundary recoverable. Worker takeover,
+coordinator process restart, a second POST and invention of a replacement
+session are not claimed. #38/#32 remain OPEN.
 
 ## Confirmed requirement revision with native B development
 

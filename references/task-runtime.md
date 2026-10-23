@@ -234,6 +234,39 @@ the same session concurrently. The absence check alone is not an atomic claim
 against a sender that ignores this ownership contract. This is not same-UID
 isolation or a generalized guarantee for independent concurrent send APIs.
 
+### Dispatch journal status
+
+`herdr-flow task-runtime status --task TASK --state-dir DIR` is a read-only
+observation of the OpenCode dispatch and submission journals. It reads selected,
+bounded metadata only: no prompt/packet contents, configuration, raw errors or
+credentials are emitted, and it never sends, retries, collects, creates a
+session or deletes a journal. The normal CLI first restores task ownership; that
+restore has its own registry/lock side effects, so this is not a claim that the
+whole command is globally side-effect-free. A concurrently owned environment
+cannot be inspected this way; guard-active is an API/same-owner observation, not
+a CLI bypass. File reads may update atime.
+
+The output reports marker facts (`markers_absent`, `dispatch_marker_only`,
+`dispatch_and_submission_present`, `submission_marker_only`, or an explicit
+invalid/unknown value), the existing guard probe, sampled consistency, matched
+runtime/session/packet/submission identity, `submission_evidence`, and
+`collect_available`. `safe_to_retry` is always false. The submission journal is
+written before the POST, so its presence is not proof that the POST succeeded
+and its absence is not proof that no POST occurred. `collect_available=true`
+means only that the sampled journal identity matches and the existing collector
+may be invoked; it is not a state-machine guarantee, and the collector may change
+the submission after the snapshot. Missing, symlink, non-regular, unsafe-mode or
+unreadable guard locks are unknown/error observations, never free. A busy guard
+is sampled under `sampled_guard_busy`; it cannot prove an atomic marker pair.
+
+There is no automatic recovery for a dispatch marker without a submission
+journal. If that state is observed, preserve it and block/abandon the work; do
+not infer an unsent POST or call dispatch again. A terminal submission is
+reported as terminal with no collection action. If a non-terminal submission
+journal exists, the existing `collect` path is the only supported recovery and
+must still revalidate its identity. Codex turn journals are not interpreted by
+this OpenCode status; unsupported adapters are reported explicitly.
+
 ### ACK/stall recovery boundary
 
 The opt-in `installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver`

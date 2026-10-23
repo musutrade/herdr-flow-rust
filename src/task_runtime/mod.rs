@@ -13,6 +13,7 @@ use std::{
 pub mod broker;
 pub mod cli;
 pub mod native;
+pub mod status;
 
 fn ensure(ok: bool, message: &str) -> Result<()> {
     if ok {

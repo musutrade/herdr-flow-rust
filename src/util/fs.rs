@@ -305,6 +305,12 @@ pub fn fsync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub enum LockProbe {
+    Acquired(FileLock),
+    Busy,
+    Missing,
+}
+
 pub struct FileLock {
     file: File,
 }
@@ -350,6 +356,40 @@ impl FileLock {
 
     pub fn as_raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+}
+
+/// Probe an existing lock without creating, changing its mode or removing it.
+/// Missing is explicit and is never reported as free. Symlinks, non-regular
+/// files and open/validation failures are returned as errors.
+pub fn probe_existing_lock(path: &Path) -> Result<LockProbe> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| FlowError::io("lock has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FlowError::io("lock has no filename"))?;
+    let directory = secure::directory(parent, false)?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(secure::anchor(&directory).join(name))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LockProbe::Missing)
+        }
+        Err(error) => {
+            return Err(FlowError::io(format!(
+                "cannot probe existing lock: {error}"
+            )))
+        }
+    };
+    validate_state_file(&file)?;
+    match FileLock::from_file(file, false)? {
+        Some(lock) => Ok(LockProbe::Acquired(lock)),
+        None => Ok(LockProbe::Busy),
     }
 }
 
@@ -473,6 +513,49 @@ pub fn read_state_json(root: &Path, name: &str) -> Result<Value> {
     let mut text = String::new();
     file.read_to_string(&mut text)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+/// Read one state document without following links or exceeding `limit` bytes.
+pub fn read_state_json_bounded(root: &Path, name: &str, limit: usize) -> Result<Value> {
+    read_state_json_bounded_if_exists(root, name, limit)?
+        .ok_or_else(|| FlowError::io("state document is missing"))
+}
+
+/// Bounded state read that returns `None` only when the owned regular file is
+/// absent. Symlinks, non-regular files, oversized documents and parse errors
+/// fail closed.
+pub fn read_state_json_bounded_if_exists(
+    root: &Path,
+    name: &str,
+    limit: usize,
+) -> Result<Option<Value>> {
+    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+        return Err(FlowError::io("state filename must be a basename"));
+    }
+    ensure_private_dir(root, false)?;
+    let directory = secure::directory(root, false)?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(secure::anchor(&directory).join(name))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    validate_state_file(&file)?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&file)
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(FlowError::guard(
+            "state document exceeds bounded read limit",
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))
 }
 
 fn validate_state_file(file: &File) -> Result<()> {
@@ -650,6 +733,79 @@ mod tests {
         assert!(!lock_is_free(&path));
         drop(lock);
         assert!(lock_is_free(&path));
+    }
+
+    #[test]
+    fn existing_lock_probe_never_creates_or_changes_the_lock() {
+        let directory = crate::util::fs::test_tempdir();
+        let path = directory.path().join("guard.lock");
+        assert!(matches!(probe_existing_lock(&path), Ok(LockProbe::Missing)));
+        assert!(!path.exists());
+
+        let lock = FileLock::acquire(&path, false).unwrap().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        drop(lock);
+        assert!(matches!(
+            probe_existing_lock(&path),
+            Ok(LockProbe::Acquired(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode(), mode);
+
+        let held = FileLock::acquire(&path, false).unwrap().unwrap();
+        assert!(matches!(probe_existing_lock(&path), Ok(LockProbe::Busy)));
+        drop(held);
+    }
+
+    #[test]
+    fn existing_lock_probe_rejects_symlink_and_nonregular_paths() {
+        let directory = crate::util::fs::test_tempdir();
+        let target = directory.path().join("target");
+        fs::write(&target, b"not a lock").unwrap();
+        let link = directory.path().join("link.lock");
+        symlink(&target, &link).unwrap();
+        assert!(probe_existing_lock(&link).is_err());
+        assert!(probe_existing_lock(directory.path()).is_err());
+        let writable = directory.path().join("writable.lock");
+        fs::write(&writable, b"x").unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(probe_existing_lock(&writable).is_err());
+        // SAFETY: geteuid takes no pointer arguments or caller preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            let unreadable = directory.path().join("unreadable.lock");
+            fs::write(&unreadable, b"x").unwrap();
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(probe_existing_lock(&unreadable).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_state_json_reads_fail_closed_without_creating_files() {
+        let directory = crate::util::fs::test_tempdir();
+        let valid = directory.path().join("valid.json");
+        fs::write(&valid, br#"{"value":1}"#).unwrap();
+        fs::set_permissions(&valid, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_state_json_bounded(directory.path(), "valid.json", 64).unwrap()["value"],
+            1
+        );
+        assert!(
+            read_state_json_bounded_if_exists(directory.path(), "missing.json", 64)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!directory.path().join("missing.json").exists());
+        fs::write(&valid, br#"{"value":12345678901234567890}"#).unwrap();
+        fs::set_permissions(&valid, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_state_json_bounded(directory.path(), "valid.json", 8).is_err());
+        let link = directory.path().join("link.json");
+        symlink(&valid, &link).unwrap();
+        assert!(read_state_json_bounded(directory.path(), "link.json", 64).is_err());
+        let broken = directory.path().join("broken.json");
+        fs::write(&broken, b"{").unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_state_json_bounded(directory.path(), "broken.json", 64).is_err());
     }
 
     #[test]

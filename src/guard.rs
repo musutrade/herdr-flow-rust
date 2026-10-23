@@ -92,6 +92,12 @@ pub fn locked(root: &Path) -> Result<util::FileLock> {
     }
 }
 
+/// Probe an existing guard lock without creating, changing or removing it.
+pub fn probe(root: &Path) -> Result<util::LockProbe> {
+    let root = util::state_dir(root, false)?;
+    util::probe_existing_lock(&root.join("guard.lock"))
+}
+
 pub fn save(root: &Path, s: &mut J) -> Result<()> {
     util::ensure_private_dir(root, true)?;
     s["updated_at"] = json!(util::now());
