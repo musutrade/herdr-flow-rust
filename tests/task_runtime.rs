@@ -837,6 +837,15 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             let (_g, _q) = receiver(&env, &q, &cwd, port);
             let turn = task_runtime::native::dispatch(&env, &root)?;
             assert_eq!(turn["phase"], "submitted");
+            if adapter == "opencode" {
+                let submission_before = fs::read(root.join("submission.json"))?;
+                let dispatch_before = fs::read(root.join("dispatch.json"))?;
+                let observed = task_runtime::status::status(&env, &root)?;
+                assert_eq!(observed["collect_available"], true, "{observed}");
+                assert_eq!(observed["safe_to_retry"], false);
+                assert_eq!(fs::read(root.join("submission.json"))?, submission_before);
+                assert_eq!(fs::read(root.join("dispatch.json"))?, dispatch_before);
+            }
             assert!(task_runtime::native::dispatch(&env, &root).is_err());
             std::fs::write(
                 cwd.join(".herdr-verdict.json"),
@@ -846,6 +855,15 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             )?;
             let result = task_runtime::native::collect(&env, &root)?;
             assert_eq!(result["phase"], "signalled");
+            if adapter == "opencode" {
+                let observed = task_runtime::status::status(&env, &root)?;
+                assert_eq!(
+                    observed["operator_action"], "already_published",
+                    "{observed}"
+                );
+                assert_eq!(observed["collect_available"], false);
+                assert_eq!(observed["safe_to_retry"], false);
+            }
             let collected = queue::load_queue(&q)?;
             assert_eq!(
                 collected["tasks"]["review"]["verdict"]["envelope"]["reviewer"]["adapter"],

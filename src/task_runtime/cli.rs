@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|recover|dispatch|collect> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
 
 fn run(args: &[String]) -> Result<J> {
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
@@ -48,6 +48,7 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
+        "status" => status::status(env, root),
         _ => Err(FlowError::usage(USAGE)),
     }
 }
@@ -100,7 +101,7 @@ mod lifecycle_tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .unwrap();
-        std::env::set_var("HERDR_TASK_ENV_ROOT", temp.path().join("registry"));
+        let _env_root = crate::task_env::test_env_root(&temp.path().join("registry"));
         let mut env = crate::task_env::create_environment(
             "runtime-cli",
             &temp.path().join("work"),

@@ -234,6 +234,50 @@ the same session concurrently. The absence check alone is not an atomic claim
 against a sender that ignores this ownership contract. This is not same-UID
 isolation or a generalized guarantee for independent concurrent send APIs.
 
+### Dispatch journal status
+
+`herdr-flow task-runtime status --task TASK --state-dir DIR` is a read-only
+observation of the OpenCode dispatch and submission journals. It reads selected,
+bounded metadata only: no prompt/packet contents, configuration, raw errors or
+credentials are emitted, and it never sends, retries, collects, creates a
+session or deletes a journal. The normal CLI first restores task ownership; that
+restore has its own registry/lock side effects, so this is not a claim that the
+whole command is globally side-effect-free. A concurrently owned environment
+cannot be inspected this way; guard-active is an API/same-owner observation, not
+a CLI bypass. File reads may update atime.
+
+The output reports marker facts (`markers_absent`, `dispatch_marker_only`,
+`dispatch_and_submission_present`, `submission_marker_only`, or an explicit
+invalid/unknown value), the existing guard probe, sampled consistency, matched
+runtime/session/packet/submission identity, `submission_evidence`, and
+`collect_available`. `safe_to_retry` is always false. The submission journal is
+written before the POST, so its presence is not proof that the POST succeeded
+and its absence is not proof that no POST occurred. `collect_available=true`
+means only that the sampled journal identity matches and the existing collector
+may be invoked; it is not a state-machine guarantee, and the collector may change
+the submission after the snapshot. Missing, symlink, non-regular, unsafe-mode or
+unreadable guard locks are unknown/error observations, never free. A busy guard
+is sampled under `sampled_guard_busy`; it cannot prove an atomic marker pair.
+
+There is no automatic recovery for a dispatch marker without a submission
+journal. If that state is observed, preserve it and block/abandon the work; do
+not infer an unsent POST or call dispatch again. The markers-absent action is
+`inspect_dispatch_prerequisites`, not a dispatch or retry permission. The native
+terminal phases `complete`, `failed` and `decision` remain collectable so the
+producer can publish their signal; `signalled` is the already-published phase and has no
+collection action. Any non-signalled submission journal with an exact sampled
+identity may use the existing `collect` path, which must still revalidate that
+identity. Codex turn journals are not interpreted by this OpenCode status;
+unsupported adapters are reported explicitly.
+
+Deterministic validation covers the journal/identity/terminal-phase matrix,
+existing-lock and bounded-read failures, and status observations of journals
+produced by the existing native protocol fixture before and after collection.
+The stable coverage run and Rust 1.85 run each passed 517 tests with 26 ignored
+live tests; no model scenario was run for this observability change. The absolute
+CRAP threshold remains 10 with zero violations. Initial compile and complexity
+gate failures were retained and corrected; they are not counted as passing runs.
+
 ### ACK/stall recovery boundary
 
 The opt-in `installed_real_opencode_ack_stall_recovery_is_applied_by_native_receiver`
