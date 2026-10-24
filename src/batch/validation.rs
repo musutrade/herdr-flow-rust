@@ -496,7 +496,12 @@ fn publication_target(
     lane: &J,
     batch: &J,
 ) -> Result<()> {
-    ensure_publication_ready(t, batch)?;
+    crate::batch::actions::check(lane)?;
+    if crate::batch::actions::enabled(lane) {
+        crate::batch::actions::publication(lane, batch)?;
+    } else {
+        ensure_publication_ready(t, batch)?;
+    }
     let fallback = crate::ci::GitHub::new(lane.clone());
     let api: &dyn GitHubApi = api.unwrap_or(&fallback);
     publication_dependencies(s, t, now, lane, batch, api)
@@ -535,6 +540,9 @@ fn publication_dependencies(
 
 fn publication_latest(t: &J, now: f64, lane: &J, batch: &J, api: &dyn GitHubApi) -> Result<()> {
     let latest = latest(lane, api)?;
+    if crate::batch::actions::enabled(lane) {
+        crate::batch::actions::publication_settings(t, api)?;
+    }
     publication_after_target(t, now, batch, &latest, lane)
 }
 
@@ -543,6 +551,9 @@ fn publication_after_target(t: &J, now: f64, batch: &J, latest: &str, lane: &J) 
         return Err(FlowError::progress(
             "target changed before publication; rebuild and revalidate",
         ));
+    }
+    if crate::batch::actions::enabled(lane) {
+        return publication_pr(t, batch);
     }
     publication_gate(t, now, lane, batch)
 }

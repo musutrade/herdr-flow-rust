@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::batch::{gate, git, validation};
+use crate::batch::{actions, gate, git, validation};
 use crate::ci::{GitHub, GitHubApi};
 use crate::error::{FlowError, Result};
 use crate::model::{self, J};
@@ -91,6 +91,7 @@ fn mutable(s: &J, spec: &J) -> Result<(J, J)> {
         .filter(|value| model::truthy(Some(value)))
         .cloned()
         .ok_or_else(|| FlowError::progress("task has no batch lane"))?;
+    actions::check(&lane)?;
     Ok((t, lane))
 }
 
@@ -268,6 +269,7 @@ struct LaneInit {
     root: PathBuf,
     capacity: i64,
     gate: Value,
+    ci: Option<J>,
     max_repairs: i64,
 }
 
@@ -324,7 +326,12 @@ fn init_capacity(s: &mut J, spec: &J, now: f64, t: &mut J, setup: &mut LaneInit)
 }
 
 fn init_gate(s: &mut J, spec: &J, now: f64, t: &mut J, setup: &mut LaneInit) -> Result<J> {
-    setup.gate = gate::validate(model::get(spec, "gate"))?;
+    if let Some(ci) = actions::initialize(spec)? {
+        setup.gate = Value::Null;
+        setup.ci = Some(ci);
+    } else {
+        setup.gate = gate::validate(model::get(spec, "gate"))?;
+    }
     init_conflicts(s, spec, now, t, setup)
 }
 
@@ -369,6 +376,10 @@ fn init_store(s: &mut J, spec: &J, now: f64, t: &mut J, setup: &LaneInit) -> Res
         "gate_operations": {},
         "progress_timeout": progress::duration(model::get(spec, "progress_timeout_seconds"), Some(600.0))?
     });
+    if let Some(ci) = &setup.ci {
+        t["lane"]["ci_policy_digest"] = json!(actions::digest(ci));
+        t["lane"]["ci"] = ci.clone();
+    }
     block(
         t,
         "lane waiting for completed tasks",
@@ -1837,6 +1848,11 @@ fn snapshot_candidate(
     batch_state.batch["revision"] = json!(revision);
     batch_state.batch["snapshot"] = json!({"head": candidate_source.head.clone(), "tree": tree.clone(), "frozen_at": now, "revision": revision});
     batch_state.batch["gate"] = Value::Null;
+    if actions::enabled(&batch_state.lane) {
+        model::remove(&mut batch_state.batch, "ci_repair_source");
+        batch_state.batch["ci"] = Value::Null;
+        batch_state.batch["failure_token"] = Value::Null;
+    }
     batch_state.batch["phase"] = json!("snapshot_frozen");
     batch_state.batch["progress_deadline"] =
         json!(now + model::number(&batch_state.lane, "progress_timeout").unwrap_or(600.0));
@@ -1975,7 +1991,11 @@ fn snapshot_finish(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J
     block(
         &mut batch_state.task,
         "final snapshot frozen",
-        "batch-gate-begin followed by trusted gate verification",
+        if actions::enabled(&batch_state.lane) {
+            "pr-begin, pr-reconcile, then batch-ci-observe; publication is not merge approval"
+        } else {
+            "batch-gate-begin followed by trusted gate verification"
+        },
     );
     batch_state.lane["active"] = batch_state.batch;
     batch_state.task["lane"] = batch_state.lane;
@@ -1984,6 +2004,11 @@ fn snapshot_finish(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J
 
 pub fn gate_begin(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
     let (t, lane) = mutable(s, spec)?;
+    if actions::enabled(&lane) {
+        return Err(FlowError::progress(
+            "Actions lane cannot execute or record a trusted Gate",
+        ));
+    }
     gate_begin_idle(s, spec, now, api, t, lane)
 }
 
@@ -2254,6 +2279,11 @@ fn gate_begin_state(
 
 pub fn gate_record(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
     let (t, lane) = mutable(s, spec)?;
+    if actions::enabled(&lane) {
+        return Err(FlowError::progress(
+            "Actions lane cannot execute or record a trusted Gate",
+        ));
+    }
     gate_record_idle(s, spec, now, api, t, lane)
 }
 
@@ -2625,6 +2655,16 @@ fn reconcile_receipt(
     batch_landing: BatchLanding,
     ctx: ReconcileCtx<'_>,
 ) -> Result<J> {
+    if actions::enabled(&batch_state.lane) {
+        actions::landing(
+            &batch_state.task,
+            &batch_state.lane,
+            &batch_state.batch,
+            &batch_landing.landing,
+            ctx.api,
+        )?;
+        return reconcile_commit(working, s, batch_state, batch_landing, ctx);
+    }
     let receipt = reconcile_receipt_value(&batch_state.batch)?;
     reconcile_receipt_decision(working, s, batch_state, batch_landing, receipt, ctx)
 }
@@ -2914,6 +2954,9 @@ fn reconcile_idle_landing(
 }
 
 pub fn repair_token(batch: &J) -> String {
+    if batch["ci"]["kind"] == "github-actions" {
+        return actions::repair_token(batch);
+    }
     sha256_json_sorted(&json!({
         "batch": batch.get("id").cloned().unwrap_or(Value::Null),
         "revision": batch.get("revision").cloned().unwrap_or(Value::Null),
@@ -3041,6 +3084,7 @@ fn repair_intent_phase(
             "batch has no inspected failure eligible for repair",
         ));
     }
+    actions::check_intent(t, &lane, &batch, now)?;
     let expected = repair_expected(t, &batch);
     repair_intent_binding(t, action, event, now, lane, batch, expected)
 }
@@ -3048,7 +3092,7 @@ fn repair_intent_phase(
 fn repair_phase_eligible(batch: &J) -> bool {
     matches!(
         model::string(batch, "phase").as_deref(),
-        Some("integration_conflict" | "gate_failed")
+        Some("integration_conflict" | "gate_failed" | "ci_failed")
     )
 }
 
@@ -3286,7 +3330,7 @@ fn repair_skipped(lane: Option<&J>, intent: &J) -> bool {
     lane.is_none() || !model::bool_or(intent, "writes", true)
 }
 
-fn check_repair_batch(s: &J, t: &J, lane: &J, intent: &J, now: f64, live: bool) -> Result<()> {
+fn check_repair_batch(_s: &J, t: &J, lane: &J, intent: &J, now: f64, live: bool) -> Result<()> {
     let batch = model::get(lane, "active")
         .filter(|value| model::truthy(Some(value)))
         .cloned();
@@ -3296,7 +3340,10 @@ fn check_repair_batch(s: &J, t: &J, lane: &J, intent: &J, now: f64, live: bool) 
             "batch changed before repair takeover; inspect the existing operation",
         ));
     }
-    check_repair_live(s, now, live, lane, batch)
+    if let Some(batch) = &batch {
+        actions::check_intent(t, lane, batch, now)?;
+    }
+    check_repair_live(t, live, lane, batch)
 }
 
 fn repair_binding_valid(batch: &Option<J>, binding: &Option<J>, t: &J) -> bool {
@@ -3317,18 +3364,28 @@ fn repair_binding_matches(batch: &J, binding: &J, t: &J) -> bool {
     .all(|ok| ok)
 }
 
-fn check_repair_live(s: &J, now: f64, live: bool, lane: &J, batch: Option<J>) -> Result<()> {
+fn check_repair_live(t: &J, live: bool, lane: &J, batch: Option<J>) -> Result<()> {
     if live {
-        return check_repair_remote(lane, &batch.unwrap_or(Value::Null));
+        return check_repair_remote(t, lane, &batch.unwrap_or(Value::Null));
     }
-    let _ = s;
-    let _ = now;
     Ok(())
 }
 
-fn check_repair_remote(lane: &J, batch: &J) -> Result<()> {
+fn check_repair_remote(t: &J, lane: &J, batch: &J) -> Result<()> {
     let owned = GitHub::new(lane.clone());
-    let latest = validation::latest(lane, &owned)?;
+    check_repair_observation(t, lane, batch, &owned)
+}
+
+pub(crate) fn check_repair_observation(
+    t: &J,
+    lane: &J,
+    batch: &J,
+    api: &dyn GitHubApi,
+) -> Result<()> {
+    if actions::enabled(lane) && batch["phase"] == "ci_failed" {
+        actions::check_failure(t, lane, batch, api)?;
+    }
+    let latest = validation::latest(lane, api)?;
     check_repair_target(&latest, batch)
 }
 
@@ -3343,7 +3400,23 @@ fn check_repair_target(latest: &str, batch: &J) -> Result<()> {
 }
 
 pub fn repair(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    repair_with_api(s, spec, now, None)
+}
+
+pub fn repair_with_api(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
     let (t, lane) = mutable(s, spec)?;
+    let batch = active(&lane, spec)?;
+    if batch["phase"] == "ci_failed" {
+        actions::check_saved_failure(&t, &lane, &batch)?;
+        let fallback = GitHub::new(lane.clone());
+        let op = model::string(spec, "operation").unwrap_or_default();
+        if t["operations"][&op]["intent"]["batch_repair"]["token"] != repair_token(&batch) {
+            return Err(FlowError::progress(
+                "Actions repair operation token changed",
+            ));
+        }
+        actions::check_failure(&t, &lane, &batch, api.unwrap_or(&fallback))?;
+    }
     repair_idle(s, spec, now, t, lane)
 }
 
@@ -3643,7 +3716,10 @@ fn repair_gate_phase(
     parent: String,
     evidence: String,
 ) -> Result<J> {
-    if model::string(&batch_state.batch, "phase").as_deref() == Some("gate_failed") {
+    if matches!(
+        model::string(&batch_state.batch, "phase").as_deref(),
+        Some("gate_failed" | "ci_failed")
+    ) {
         return repair_gate_failed(
             s,
             now,
@@ -3743,6 +3819,10 @@ fn repair_gate_failed(
     parent: String,
     evidence: String,
 ) -> Result<J> {
+    if actions::enabled(&batch_state.lane) {
+        let b = &batch_state.batch;
+        batch_state.batch["ci_repair_source"] = json!({"id":b["id"],"revision":b["revision"],"snapshot":b["snapshot"],"base":b["base"],"ci":b["ci"],"failure_token":b["failure_token"]});
+    }
     batch_state.batch["phase"] = json!("integrated");
     batch_state.batch["integrated"] = json!(candidate_source.head.clone());
     let own = repair_own_commits(&candidate_source.bare, &parent, &candidate_source.head)?;
@@ -3870,7 +3950,22 @@ pub fn repair_finish(
     now: f64,
     checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
 ) -> Result<J> {
+    repair_finish_with_api(s, spec, now, checkpoint, None)
+}
+
+pub fn repair_finish_with_api(
+    s: &mut J,
+    spec: &J,
+    now: f64,
+    checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
+    api: Option<&dyn GitHubApi>,
+) -> Result<J> {
     let (t, lane) = mutable(s, spec)?;
+    let batch = active(&lane, spec)?;
+    if let Some(source) = batch.get("ci_repair_source") {
+        let fallback = GitHub::new(lane.clone());
+        actions::check_repair_source(&t, &lane, &batch, source, api.unwrap_or(&fallback))?;
+    }
     repair_finish_idle(s, spec, now, checkpoint, t, lane)
 }
 
@@ -4023,6 +4118,7 @@ fn repair_finish_done(
     mut batch_state: BatchState,
 ) -> Result<J> {
     model::remove(&mut batch_state.batch, "repair_update");
+    model::remove(&mut batch_state.batch, "ci_repair_source");
     batch_state.lane["active"] = batch_state.batch;
     batch_state.task["lane"] = batch_state.lane;
     batch_state.task = save(s, batch_state.task, now, "batch_repair_ref_updated")?;
@@ -4360,6 +4456,10 @@ fn rebase_apply(mut batch: J, lane: &J, now: f64, base: &str) -> J {
     batch["phase"] = json!("integration_prepared");
     batch["snapshot"] = Value::Null;
     batch["gate"] = Value::Null;
+    if actions::enabled(lane) {
+        model::remove(&mut batch, "ci");
+        model::remove(&mut batch, "ci_repair_source");
+    }
     batch["failure_token"] = Value::Null;
     batch["progress_deadline"] =
         json!(now + model::number(lane, "progress_timeout").unwrap_or(600.0));
@@ -4405,7 +4505,11 @@ fn rebase_store(s: &mut J, now: f64, mut batch_state: BatchState) -> Result<J> {
     block(
         &mut batch_state.task,
         "same frozen members need integration on the new target",
-        "batch-integrate then a new snapshot and trusted gate",
+        if actions::enabled(&batch_state.lane) {
+            "batch-integrate, new snapshot, same-PR update and batch-ci-observe"
+        } else {
+            "batch-integrate then a new snapshot and trusted gate"
+        },
     );
     batch_state.lane["active"] = batch_state.batch;
     batch_state.task["lane"] = batch_state.lane;
@@ -4449,10 +4553,16 @@ fn stall_phase(phase: &str) -> bool {
             | "integrated"
             | "snapshot_frozen"
             | "gate_uncertain"
+            | "ci_pending"
+            | "ci_passed"
+            | "ci_failed"
     )
 }
 
 fn stall_code(phase: &str) -> String {
+    if phase.starts_with("ci_") {
+        return "batch_ci_observation_overdue".to_string();
+    }
     if phase == "gate_uncertain" {
         "batch_operation_unreconciled".to_string()
     } else {
@@ -4471,6 +4581,7 @@ const BATCH_ACTIONS: &[(&str, BatchActionFn)] = &[
     ("batch-snapshot", batch_action_snapshot),
     ("batch-gate-begin", batch_action_gate_begin),
     ("batch-gate-record", batch_action_gate_record),
+    ("batch-ci-observe", batch_action_ci_observe),
     ("batch-reconcile", batch_action_reconcile),
     ("batch-repair", batch_action_repair),
     ("batch-rebase", batch_action_rebase),
@@ -4565,6 +4676,44 @@ fn batch_action_gate_record(
     _checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
 ) -> Result<J> {
     gate_record(s, spec, now, None)
+}
+
+fn batch_action_ci_observe(
+    s: &mut J,
+    spec: &J,
+    now: f64,
+    _checkpoint: &mut dyn FnMut(&mut J) -> Result<()>,
+) -> Result<J> {
+    ci_observe(s, spec, now, None)
+}
+
+pub fn ci_observe(s: &mut J, spec: &J, now: f64, api: Option<&dyn GitHubApi>) -> Result<J> {
+    let (mut t, mut lane) = mutable(s, spec)?;
+    idle(&t)?;
+    let mut batch = active(&lane, spec)?;
+    let fallback = GitHub::new(lane.clone());
+    let api = api.unwrap_or(&fallback);
+    validation::dependencies(s, &lane, &batch, api)?;
+    let observation = actions::observe(&t, &lane, &batch, now, api)?;
+    let phase = match observation["state"].as_str() {
+        Some("success") => "ci_passed",
+        Some("failure") => "ci_failed",
+        _ => "ci_pending",
+    };
+    batch["progress_deadline"] =
+        json!(now + model::number(&lane, "progress_timeout").unwrap_or(600.));
+    batch["ci"] = observation;
+    batch["phase"] = json!(phase);
+    batch["ci_observations"] = json!(model::int(&batch, "ci_observations").unwrap_or(0) + 1);
+    batch["failure_token"] = if phase == "ci_failed" {
+        json!(repair_token(&batch))
+    } else {
+        Value::Null
+    };
+    lane["active"] = batch;
+    t["lane"] = lane;
+    block(&mut t,phase,"inspect exact CI; merge externally only after current success; batch-reconcile confirms landing");
+    save(s, t, now, "batch_ci_observed")
 }
 
 fn batch_action_reconcile(

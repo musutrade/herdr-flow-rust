@@ -1,5 +1,10 @@
 # Architecture and flows
 
+The explicit [GitHub Actions lane policy](actions-batching.md) reuses the bounded
+lane with PR-head and merge-main workflow/job checks. The trusted Gate/App
+requirements below remain specific to Gate mode; modes are never mixed or
+automatically migrated.
+
 This is a maintainability overview of the current source and the explicitly
 separate target mode. Implemented paths are drawn as current behavior. Target
 paths are labeled and require consumer Gate/App deployment evidence and the

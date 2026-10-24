@@ -659,3 +659,6 @@ fn batch_repair_intent_rejects_expired_observation() {
     let event = json!({"outcome": "failed", "evidence": "/tmp/ci/status.json"});
     assert!(pr::repair_intent(&mut t, &action, &event, 200.0).is_err());
 }
+
+#[path = "pr_batch/actions.rs"]
+mod actions;

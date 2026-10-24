@@ -101,6 +101,7 @@ herdr-flow advisor --help
 - [OpenCode 1.19.3 接入与限制（暂不接入 2.0）](references/opencode-v2.md)
 - [V1 基础循环验收与后续边界](references/v1-acceptance.md)
 - [V2 有界合批、整合与恢复](references/batching.md)
+- [现有 GitHub Actions 驱动的有界发布](references/actions-batching.md)
 - [可信门禁客户端接入契约](references/gate-client.md)
 - [V2 消费端开发验证与生产验收边界](references/v2-acceptance.md)
 

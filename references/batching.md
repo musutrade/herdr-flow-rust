@@ -1,8 +1,13 @@
-# V2 bounded batch consumer
+# Bounded batch consumer
+
+The lane supports two explicit quality policies: the Gate mode documented below,
+or [GitHub Actions mode](actions-batching.md). Choose exactly one at lane creation;
+there is no automatic migration or fallback. Both reuse the same active slot,
+accepted pending capacity, claim receipts and publication ledger.
 
 The consumer is implemented here. GateHouse owns quality evaluation and its
 results; the consuming deployment owns the verifier binding, Check publication,
-App credentials and publication workflow. Production use requires V1/runtime
+App credentials and publication workflow. Production Gate-mode use requires V1/runtime
 acceptance and the [consumer deployment evidence](gate-client.md#consumer-deployment-evidence)
 for this repository. Closing an upstream issue does not supply that evidence.
 Offline fixtures establish neither deployment nor publication authorization.

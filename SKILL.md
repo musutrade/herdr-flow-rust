@@ -144,21 +144,27 @@ Connect the observer to a registered CI wait in the wait queue for acknowledged 
 
 On resume, read `status.json`, verify config identity/SHA and freshness, then inspect only relevant failure jobs. Before merging re-query current PR head, applicable gates, audit approval and mergeability. Observer success covers its configured inventory, not every possible external check or release condition. External Checks require pinned App, exact run/head and baseline; follow [batching](references/batching.md) for checks-only observation and [the gate client boundary](references/gate-client.md) for trusted result verification.
 
-## Consume bounded V2 batches
+## Consume bounded batches
 
-Use [batching](references/batching.md) only with its V1/runtime and trusted-gate
-prerequisites satisfied. Keep one lane owner per repository/target, one active
+Use [batching](references/batching.md) with its V1/runtime prerequisites and an
+explicit quality policy: trusted Gate with deployed verifier/App evidence, or
+[GitHub Actions](references/actions-batching.md) with an authorized complete
+PR-head and merge-main workflow/job inventory. Never mix modes or fabricate a
+Gate receipt from CI. Keep one lane owner per repository/target, one active
 batch and one bounded pending list. Persist source-task acceptance before workers
 take another assignment. Freeze members/order/latest main only after the prior
 batch's confirmed landing; integrate each task's own range in the private store,
-then freeze the final snapshot before any full gate execution.
+then freeze the final snapshot. Gate mode validates before publication; CI mode
+publishes that snapshot, registers the exact PR with `pr-reconcile`, then uses
+`batch-ci-observe`. CI success does not merge or release the slot.
 
 Use the existing queue, one-shot command wrapper, exact takeover and writer-release
 mechanisms. Verify trusted results independently of command exit status. Publication
 and reporting use their existing authorized transports; never retry ambiguous
 execution, push or PR creation. Rebuild changed inputs and retain the same PR.
-After applying the merge result, run `batch-reconcile`: it verifies content/App
-and atomically freezes any pending successor. Immediately continue that saved
+After applying the merge result, run `batch-reconcile`: it verifies content and the selected quality policy
+(Gate/App, or current PR-head plus merge-main CI) and atomically freezes any
+pending successor. Immediately continue that saved
 successor under existing authorization, or register the concrete external wait;
 do not stop at ACK or ask the user to say continue. Original unmet acceptance
 remains open even after a batch lands. Keep live deployment and performance

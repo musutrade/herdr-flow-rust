@@ -1,5 +1,10 @@
 # Trusted gate consumer adapter
 
+The explicit [GitHub Actions lane policy](actions-batching.md) reuses the bounded
+lane with PR-head and merge-main workflow/job checks. The trusted Gate/App
+requirements below remain specific to Gate mode; modes are never mixed or
+automatically migrated.
+
 This is a stdio interface for an operator-managed consumer client, not a new
 GateHouse evidence format or a claim about #98's native API. Its deployment can
 provide a thin wrapper over existing machine results/invocations and trusted

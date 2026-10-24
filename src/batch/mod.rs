@@ -1,5 +1,6 @@
 //! V2 bounded batching, isolated integration, gate boundary and validation.
 
+pub(crate) mod actions;
 pub mod gate;
 pub mod git;
 pub mod lane;
