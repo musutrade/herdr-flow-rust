@@ -1,5 +1,11 @@
 # V2 consumer development and deployment boundary
 
+This record describes the original **Gate-mode** consumer and its historical
+evidence. The separate [Actions policy](actions-batching.md) reuses the lane but
+requires an explicit workflow/job inventory instead of Gate verifier/App evidence.
+Neither mode is activated by installing code; offline checks are not live rollout
+or bounded-parallel acceptance.
+
 The consumer implementation extends the V1 loop without changing GateHouse,
 repository rules, remote publication or App credentials. Its CLI and recovery
 contract are in [batching](batching.md); the operator-managed client boundary is
