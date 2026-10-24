@@ -69,6 +69,10 @@ variant；仅有后台原生测试或相同 UID 不够。此次文档修改不�
 
 ### 已验证的可见 OpenCode TUI 路径
 
+停用 watcher 或更换接收会话前，先核对
+[接收端维护边界](receiver-maintenance.md)：`queue stop` 不是维护暂停，现有队列
+没有 rebind 命令；新会话不能直接继承旧队列身份或历史回执。
+
 2026-10-23 在上述新基线上，已有 OpenCode 1.19.4 会话经用户允许、完成交接并
 空闲后，在同一 Herdr pane 续接。受支持的 TUI 参数形状为：
 
