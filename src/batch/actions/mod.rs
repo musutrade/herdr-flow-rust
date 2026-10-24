@@ -50,11 +50,18 @@ pub(crate) fn observe(t: &J, lane: &J, batch: &J, now: f64, api: &dyn GitHubApi)
     snapshot_identity(batch)?;
     let pr = registered(t, lane, batch)?;
     let result = observation::head(lane, batch, &pr, false, api)?;
-    Ok(
+    Ok(membership_proof(
         json!({"kind":"github-actions","policy_digest":lane["ci_policy_digest"],
         "binding":binding(lane,batch),"pr":pr,"observed_at":now,
         "state":result["state"],"workflows":result["workflows"]}),
-    )
+    ))
+}
+
+fn membership_proof(mut value: J) -> J {
+    if value["state"] == "success" {
+        value["pr_membership"] = json!("verified");
+    }
+    value
 }
 
 fn registered(t: &J, lane: &J, batch: &J) -> Result<J> {
@@ -124,7 +131,7 @@ pub(crate) fn landing(t: &J, lane: &J, batch: &J, landing: &J, api: &dyn GitHubA
         "Actions PR changed before landing",
     )?;
     landing_ancestry(batch, landing, api)?;
-    let head = observation::head(lane, batch, &previous["pr"], true, api)?;
+    let head = observation::landing_head(lane, batch, &previous, api)?;
     require(
         head["state"] == "success",
         "merged batch head CI is not successful; retain slot",

@@ -98,6 +98,18 @@ validated snapshot tree. After merge, the mutable PR `base.sha` is **not** compa
 to the old frozen base; the recorded base and landing ancestry are used instead.
 Only then are member landings applied and the pending successor frozen atomically.
 
+Successful strict premerge observations record `batch.ci.pr_membership=verified`.
+At landing only, after the exact PR is confirmed merged, its workflow runs may
+have an empty `pull_requests` array. This is accepted only with that saved marker
+and the same successful workflow/run/attempt and required-job identities. Two
+fresh observations must agree; repository, head, branch and workflow path still
+match the saved binding. Wrong nonempty, missing or malformed membership,
+superseding runs/attempts, changed jobs or revoked success retain the slot.
+Open-PR observation and repair remain strict. Legacy observations without the
+marker retain the previous strict membership check; no marker is inferred or
+backfilled. Merge-main checks and ancestry/tree validation remain required.
+
+
 Merge-main failure/missing checks, revoked head success, tree mismatch or API error
 retain the active slot. There is no automatic post-merge repair, replacement PR,
 rollback or auto-merge. An operator must inspect the existing PR/check evidence.

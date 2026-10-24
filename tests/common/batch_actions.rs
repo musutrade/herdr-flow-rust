@@ -570,3 +570,248 @@ fn failure_waits_for_every_workflow_terminal_decision() {
         "needs_attention"
     );
 }
+
+fn merged_fixture() -> (J, J, J, J, Api) {
+    let (t, lane, mut batch, mut api) = fixture();
+    batch["ci"] = observe(&t, &lane, &batch, 100., &api).unwrap();
+    assert_eq!(batch["ci"]["pr_membership"], "verified");
+    let commit = json!("d".repeat(40));
+    let landed = json!({"commit":commit});
+    api.0.insert(
+        format!(
+            "compare/{}...{}",
+            batch["base"].as_str().unwrap(),
+            commit.as_str().unwrap()
+        ),
+        json!({"status":"ahead","merge_base_commit":{"sha":batch["base"]}}),
+    );
+    let pr = api.0.get_mut("pulls/7").unwrap();
+    pr["state"] = json!("closed");
+    pr["merged"] = json!(true);
+    pr["base"]["sha"] = commit.clone();
+    pr["merge_commit_sha"] = commit.clone();
+    api.0.get_mut("branches/main").unwrap()["commit"]["sha"] = commit.clone();
+    api.0.get_mut("actions/runs/10").unwrap()["pull_requests"] = json!([]);
+    install_run(&mut api, &commit, "push", 20, 1, "success");
+    (t, lane, batch, landed, api)
+}
+
+#[test]
+fn premerge_membership_marker_is_only_written_on_strict_success() {
+    let (t, lane, batch, api) = fixture();
+    assert_eq!(
+        observe(&t, &lane, &batch, 100., &api).unwrap()["pr_membership"],
+        "verified"
+    );
+    for value in [
+        json!([]),
+        json!([{"number":8}]),
+        json!(null),
+        json!("7"),
+        json!([null,{"number":7}]),
+    ] {
+        let mut bad = api.clone();
+        bad.0.get_mut("actions/runs/10").unwrap()["pull_requests"] = value;
+        assert!(observe(&t, &lane, &batch, 100., &bad).is_err());
+    }
+    let mut missing = api.clone();
+    missing
+        .0
+        .get_mut("actions/runs/10")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("pull_requests");
+    assert!(observe(&t, &lane, &batch, 100., &missing).is_err());
+    let mut pending = api;
+    pending.0.get_mut("actions/runs/10").unwrap()["status"] = json!("in_progress");
+    assert!(observe(&t, &lane, &batch, 100., &pending)
+        .unwrap()
+        .get("pr_membership")
+        .is_none());
+}
+
+#[test]
+fn landing_empty_membership_requires_verified_proof_and_legacy_stays_strict() {
+    let (t, lane, batch, landed, api) = merged_fixture();
+    landing(&t, &lane, &batch, &landed, &api).unwrap();
+    for marker in [json!(null), json!(false), json!("unverified")] {
+        let mut legacy = batch.clone();
+        legacy["ci"]["pr_membership"] = marker;
+        assert!(landing(&t, &lane, &legacy, &landed, &api).is_err());
+        let mut bound = api.clone();
+        bound.0.get_mut("actions/runs/10").unwrap()["pull_requests"] = json!([{"number":7}]);
+        landing(&t, &lane, &legacy, &landed, &bound).unwrap();
+    }
+    let mut legacy = batch.clone();
+    legacy["ci"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pr_membership");
+    assert!(landing(&t, &lane, &legacy, &landed, &api).is_err());
+    for value in [
+        json!([{"number":8}]),
+        json!(null),
+        json!({}),
+        json!([null,{"number":7}]),
+    ] {
+        let mut bad = api.clone();
+        bad.0.get_mut("actions/runs/10").unwrap()["pull_requests"] = value;
+        assert!(landing(&t, &lane, &batch, &landed, &bad).is_err());
+    }
+    let mut bad = api.clone();
+    bad.0
+        .get_mut("actions/runs/10")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("pull_requests");
+    assert!(landing(&t, &lane, &batch, &landed, &bad).is_err());
+}
+
+#[test]
+fn landing_rejects_superseded_runs_and_changed_jobs_or_run_binding() {
+    let (t, lane, batch, landed, api) = merged_fixture();
+    for (id, attempt) in [(11, 1), (10, 2)] {
+        let mut bad = api.clone();
+        install_run(
+            &mut bad,
+            &batch["snapshot"]["head"],
+            "pull_request",
+            id,
+            attempt,
+            "success",
+        );
+        bad.0.get_mut(&format!("actions/runs/{id}")).unwrap()["pull_requests"] = json!([]);
+        let err = landing(&t, &lane, &batch, &landed, &bad).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("premerge run/attempt/workflow/jobs changed"),
+            "{err}"
+        );
+    }
+    for (key, value) in [
+        ("id", json!(9001)),
+        ("name", json!("other")),
+        ("conclusion", json!("failure")),
+        ("status", json!("in_progress")),
+    ] {
+        let mut bad = api.clone();
+        bad.0
+            .get_mut("actions/runs/10/attempts/1/jobs?per_page=100&page=1")
+            .unwrap()["jobs"][0][key] = value;
+        assert!(landing(&t, &lane, &batch, &landed, &bad).is_err());
+    }
+    for (path, value) in [
+        ("/head_sha", json!("e".repeat(40))),
+        ("/head_repository/full_name", json!("other/repo")),
+        ("/head_branch", json!("other")),
+        ("/path", json!(".github/workflows/other.yml")),
+        ("/status", json!("in_progress")),
+    ] {
+        let mut bad = api.clone();
+        *bad.0
+            .get_mut("actions/runs/10")
+            .unwrap()
+            .pointer_mut(path)
+            .unwrap() = value;
+        assert!(landing(&t, &lane, &batch, &landed, &bad).is_err(), "{path}");
+    }
+}
+
+#[test]
+fn landing_rejects_incomplete_saved_proof_or_changed_owner_and_pr() {
+    let (t, lane, batch, landed, api) = merged_fixture();
+    for (path, value) in [
+        ("/ci/state", json!("failure")),
+        ("/ci/workflows", json!(null)),
+        ("/ci/workflows", json!([])),
+        ("/ci/workflows/0/state", json!("pending")),
+        ("/ci/workflows/0/jobs", json!([])),
+        ("/ci/workflows/0/attempt", json!(null)),
+        ("/ci/workflows/0/file", json!("other.yml")),
+        ("/ci/workflows/0/event", json!("push")),
+        ("/ci/workflows/0/decision_terminal", json!(false)),
+        ("/ci/policy_digest", json!("other")),
+        ("/ci/binding/head", json!("e".repeat(40))),
+        ("/ci/pr/task", json!("other")),
+        ("/ci/pr/epoch", json!(3)),
+        ("/ci/pr/number", json!(8)),
+        ("/ci/pr/head_ref", json!("other")),
+    ] {
+        let mut bad = batch.clone();
+        *bad.pointer_mut(path).unwrap() = value;
+        assert!(landing(&t, &lane, &bad, &landed, &api).is_err(), "{path}");
+    }
+    for (path, value) in [
+        ("/head/sha", json!("e".repeat(40))),
+        ("/head/ref", json!("other")),
+        ("/base/ref", json!("other")),
+        ("/head/repo/full_name", json!("other/repo")),
+        ("/state", json!("open")),
+        ("/merged", json!(false)),
+    ] {
+        let mut bad = api.clone();
+        *bad.0.get_mut("pulls/7").unwrap().pointer_mut(path).unwrap() = value;
+        assert!(landing(&t, &lane, &batch, &landed, &bad).is_err(), "{path}");
+    }
+    for path in ["/ci/workflows/0/jobs", "/ci/workflows"] {
+        let mut bad = batch.clone();
+        let (parent, key) = path.rsplit_once('/').unwrap();
+        bad.pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(landing(&t, &lane, &bad, &landed, &api).is_err());
+    }
+}
+
+#[test]
+fn landing_revalidates_both_collections_and_merged_pr() {
+    let (t, lane, batch, landed, api) = merged_fixture();
+    for (path, after) in [("pulls/7", 1), ("actions/runs/10", 2)] {
+        let changing = Changing {
+            api: api.clone(),
+            path: path.into(),
+            after,
+            count: Cell::new(0),
+        };
+        assert!(landing(&t, &lane, &batch, &landed, &changing).is_err());
+    }
+    let mut bad = api.clone();
+    bad.0.insert(
+        format!(
+            "actions/workflows/rust.yml/runs?head_sha={}&event=pull_request&per_page=100&page=1",
+            batch["snapshot"]["head"].as_str().unwrap()
+        ),
+        json!({"workflow_runs":[]}),
+    );
+    assert!(landing(&t, &lane, &batch, &landed, &bad).is_err());
+}
+
+struct StatusChanging(Api, Cell<usize>);
+impl GitHubApi for StatusChanging {
+    fn get(&self, path: &str) -> Result<J> {
+        let mut row = self.0.get(path)?;
+        if path == "actions/runs/10" {
+            let n = self.1.get() + 1;
+            self.1.set(n);
+            if n % 2 == 0 {
+                row["status"] = json!("in_progress");
+            }
+        }
+        Ok(row)
+    }
+}
+#[test]
+fn landing_refuses_run_status_change_between_current_reads() {
+    let (t, lane, batch, landed, api) = merged_fixture();
+    let changing = StatusChanging(api, Cell::new(0));
+    let err = landing(&t, &lane, &batch, &landed, &changing).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("run status changed during observation"),
+        "{err}"
+    );
+}

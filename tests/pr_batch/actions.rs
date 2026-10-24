@@ -112,7 +112,21 @@ fn actions_lane_publication_and_landing_retain_slot_until_main_ci() {
         .to_owned();
     let api = run(api, &head, "pull_request", 10, 1, "success");
     let input = spec(&s);
+    let mut empty = Fake {
+        get: api.get.clone(),
+    };
+    empty.get.get_mut("actions/runs/10").unwrap()["pull_requests"] = json!([]);
+    let unchanged = s.clone();
+    assert!(batch::lane::ci_observe(&mut s, &input, 17., Some(&empty)).is_err());
+    assert_eq!(
+        s, unchanged,
+        "OPEN empty refuses without any new observation/marker"
+    );
     batch::lane::ci_observe(&mut s, &input, 17., Some(&api)).unwrap();
+    assert_eq!(
+        s["tasks"]["lane"]["lane"]["active"]["ci"]["pr_membership"],
+        "verified"
+    );
     assert_eq!(s["tasks"]["lane"]["lane"]["active"]["phase"], "ci_passed");
     assert!(s["tasks"]["lane"]["lane"]["active"]["gate"].is_null());
     let first_batch = s["tasks"]["lane"]["lane"]["active"]["id"].clone();
@@ -180,6 +194,8 @@ fn actions_lane_publication_and_landing_retain_slot_until_main_ci() {
             &format!("git/commits/{landing}"),
             json!({"tree":{"sha":tree}}),
         );
+    let mut api = api;
+    api.get.get_mut("actions/runs/10").unwrap()["pull_requests"] = json!([]);
     let api = run(api, &landing, "push", 20, 1, "failure");
     let input = spec(&s);
     let unchanged = s.clone();
@@ -189,6 +205,17 @@ fn actions_lane_publication_and_landing_retain_slot_until_main_ci() {
         "failed main CI must retain exact queue and active slot"
     );
     let api = run(api, &landing, "push", 20, 2, "success");
+    let mut legacy = s.clone();
+    legacy["tasks"]["lane"]["lane"]["active"]["ci"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pr_membership");
+    let unchanged = legacy.clone();
+    assert!(batch::lane::reconcile(&mut legacy, &input, 18.5, Some(&api)).is_err());
+    assert_eq!(
+        legacy, unchanged,
+        "legacy empty membership must retain exact queue/slot"
+    );
     for (path, value) in [
         (
             format!("git/commits/{landing}"),
