@@ -58,7 +58,10 @@ grants no quality approval. Rebuilding uses a new operation; uncertain execution
 is never replayed automatically.
 
 The tests' stdio script is a fixture, not a trusted GateHouse implementation.
-Production adapter compatibility and live deployment remain #98 integration work.
+Production adapter compatibility and live deployment belong to the consuming
+operator. [GateHouse #98](https://github.com/musutrade/GateHouse/issues/98) defines
+the upstream quality-result boundary; its completion does not attest this
+consumer's verifier, App, publisher or isolation.
 
 ### Captured process output budget
 
@@ -217,6 +220,39 @@ format: the operator must control its source and contents before invoking the
 command. Do not initialize a lane from candidate-supplied policy or verifier
 configuration. There is no separate installer or trusted-account provisioning
 service in this repository.
+
+#### Consumer deployment evidence
+
+Before enabling a real lane, the consuming operator records the following
+bindings for that repository. Keep machine paths, runtime identities, raw logs
+and credential material outside the checkout; reference evidence, not secrets.
+This inventory documents the existing contract and adds no installer, service,
+receipt protocol or alternative quality decision.
+
+| Boundary | Required evidence | Insufficient evidence |
+| --- | --- | --- |
+| Verifier installation | Exact argv, executable/dependency identities, protected configuration and compatibility with this consumer interface | An installed `harness-gate` binary or a stdio test fixture |
+| Quality result | Authoritative operation/run, repo/base/head/tree/policy binding, complete coverage and current validity/expiry; uncertain execution has independently checked quiescence | Agent PASS, command exit alone, echoed request or an unrelated historical result |
+| App and reporting | Actual App ID, check name, run/external ID, required-check configuration and restricted publisher/credential ownership | Placeholder IDs, ordinary Actions success or upstream issue closure |
+| Isolation | Candidate write restrictions protecting verifier/configuration/dependencies, queue state and authoritative result source; state the same-UID limitations below | Absolute paths, hashes or same-user directory ownership alone |
+| Live consumption | V1 receiver/result/ACK/application evidence and real normal, repair and interrupted reporting/publication paths with the exact bindings | Native backend or offline fixture results described as Herdr deployment acceptance |
+
+GateHouse evaluates quality and supplies results. The consumer verifies their
+applicability and owns Check reporting, publication rules and batch continuation;
+it must not change the upstream quality decision. Reporting recovery uses the
+existing result and consumer adapter, without automatically re-executing the gate.
+Missing bindings block the affected lane activation; they do not require
+GateHouse to implement PRs, queues or agent scheduling. See
+[V2 acceptance](v2-acceptance.md) for the remaining production prerequisites.
+
+Binary rollout and lane activation are separate transitions. Before introducing
+[schema 3 claims](claim-admission.md#compatibility-and-deployment), inventory all
+queue/guard/result writers, select one compatible binary and account for pending
+operations under the existing locks. A build or merged PR does not switch live
+watchers or old commands saved in agent handoffs. Once claims are persisted, old
+writers cannot return; do not restore stale queue snapshots or replay uncertain
+dispatch. A binary-only rollout supplies neither a live lane nor the deployment
+evidence above. Each transition needs its existing authorization and acceptance.
 
 Batch mutations use `queue::task_action_loaded` → `queue::load_queue` →
 `read_state_json`. That path opens directories by descriptor without following

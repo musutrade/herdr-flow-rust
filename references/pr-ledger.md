@@ -5,8 +5,9 @@ slice. It reuses `queue.json`, the queue lock, exact receiver identity, task sta
 versions, existing CI observer, dispatch intents and writer reservations. It has
 no external write commands and never enables auto-merge, pushes, creates a PR,
 changes rules, or publishes Checks. Those actions need their existing specific
-authorization and an external publisher. GateHouse #98 trusted execution/reporting
-remains separate; [V2 integration/batching](batching.md) reuses this ledger.
+authorization and an external publisher. GateHouse quality evaluation and the
+consumer's trusted result/Check integration remain separate acceptance work;
+[V2 integration/batching](batching.md) reuses this ledger.
 
 Use `herdr-flow queue COMMAND --state-dir /absolute/queue --spec
 /absolute/spec.json`. Every command below requires the current coordinator and

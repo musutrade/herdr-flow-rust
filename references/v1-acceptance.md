@@ -45,7 +45,8 @@ authorization, native arrival or merge acceptance. Private reports, identities,
 raw logs and queue records stay outside the repository. Session rotation alone
 does not invalidate unchanged completed evidence.
 
-Trusted App Checks and GateHouse #98 remain separate acceptance work. V2
+GateHouse quality results and the consumer's trusted App/check deployment remain
+separate acceptance work; see the [deployment evidence](gate-client.md#consumer-deployment-evidence). V2
 integration/batching, automatic OpenCode rotation and production source merge
 are outside this V1 basic-loop delivery. Successful required Actions jobs do not
 attest external checks or grant publication/merge permission.
