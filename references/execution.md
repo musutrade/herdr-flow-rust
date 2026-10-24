@@ -159,6 +159,15 @@ those values are reported as not derivable rather than zero; use command or CI
 evidence when they are needed. Chat urging is likewise not recorded. A
 successful notification is transport state, not proof of application,
 takeover or completion. Keep raw logs, full sessions and private paths outside
-GitHub; retain only the compact report and referenced evidence IDs. See
-[task progress](task-progress.md) for the underlying state and recovery
-contract.
+GitHub. Retain the compact task report and referenced evidence IDs while the
+task is active or unresolved; they must not become a permanent task archive.
+After confirmed delivery, dispose of task-owned records through the supported
+[delivery and cleanup lifecycle](delivery.md). If ownership or cleanup support
+is missing, report the blocker and preserve the affected resources; this text
+does not authorize direct deletion. See [task progress](task-progress.md) for
+the underlying state and recovery contract.
+
+Shared OpenCode transcripts and caches are shared resources outside this task's
+evidence and cleanup authority. Keep them untouched. Separate repository
+development/CI validation evidence remains available while its review is pending;
+that review retention does not make task-owned runtime evidence permanent.
