@@ -492,6 +492,148 @@ fn cli_runs_persisted_delivery_retry_and_no_record_completion() {
     );
     f.clean();
 }
+
+// Protocol acceptance only: no native agent, Herdr session or live queue.
+#[test]
+fn cli_created_environment_finishes_confirmed_delivery_before_fixture_drop() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    let control = root.join("control");
+    let work = root.join("work");
+    let temp = root.join("temp");
+    let target = root.join("customer");
+    let queue = temp.join("queue");
+    let spec = root.join("create.json");
+    util::atomic_write_json(
+        &spec,
+        &json!({"workspace_root":work,"temp_root":temp,
+        "delivery_targets":[{"path":target,"target_type":"formal"}]}),
+    )
+    .unwrap();
+    let sentinels = [
+        "user-file",
+        "shared-queue.json",
+        "shared-session",
+        "shared-cache",
+    ];
+    for name in sentinels {
+        std::fs::write(root.join(name), format!("preserve {name}")).unwrap();
+    }
+    let run = |args: &[&str], expected: i32| {
+        let out = Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(args)
+            .env("HERDR_TASK_ENV_ROOT", &control)
+            .env_remove("HERDR_TASK_ENV_LIMIT")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(expected), "{args:?}: {out:?}");
+        if expected == 0 {
+            serde_json::from_slice::<J>(&out.stdout).unwrap()
+        } else {
+            json!({"error":String::from_utf8_lossy(&out.stderr)})
+        }
+    };
+    assert_eq!(
+        run(
+            &[
+                "task-env",
+                "create",
+                "--task",
+                "job",
+                "--spec",
+                spec.to_str().unwrap()
+            ],
+            0
+        )["state"],
+        "active"
+    );
+    assert!(control.join("envs/job.json").is_file());
+    let source = work.join("A");
+    std::fs::write(&source, "A").unwrap();
+    // Reuse independent approval/authorization fixtures, not a fabricated live verdict.
+    let mut state = accepted(json!({"adapter":"file-sha256",
+        "id":util::pyjson::sha256_hex(b"A"),"location":source}));
+    queue::save(&queue, &mut state).unwrap();
+    util::atomic_write_json(
+        &queue.join("results/review.json"),
+        &json!({"task":"review"}),
+    )
+    .unwrap();
+    let delivery_spec = temp.join("delivery.json");
+    util::atomic_write_json(
+        &delivery_spec,
+        &json!({"adapter":"file","target":target,
+        "authorization":"publish","state_version":state["tasks"]["job"]["state_version"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        run(
+            &[
+                "delivery",
+                "prepare",
+                "--task",
+                "job",
+                "--queue",
+                queue.to_str().unwrap(),
+                "--spec",
+                delivery_spec.to_str().unwrap()
+            ],
+            0
+        )["phase"],
+        "prepared"
+    );
+    let before = std::fs::read(queue.join("queue.json")).unwrap();
+    let refused = run(&["delivery", "finish", "--task", "job"], 2);
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("delivery is not confirmed"));
+    assert!(work.is_dir() && temp.is_dir());
+    assert!(!target.exists());
+    assert_eq!(std::fs::read(queue.join("queue.json")).unwrap(), before);
+    assert_eq!(
+        run(&["delivery", "execute", "--task", "job"], 0)["phase"],
+        "confirmed"
+    );
+    assert_eq!(
+        run(&["delivery", "reconcile", "--task", "job"], 0)["phase"],
+        "confirmed"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"A");
+    assert_eq!(
+        run(&["delivery", "finish", "--task", "job"], 0)["finished"],
+        true
+    );
+    // Assert before TempDir drops: automatic fixture teardown cannot prove cleanup.
+    assert!(root.is_dir());
+    for path in [&work, &temp, &queue] {
+        assert!(!path.exists(), "retained {}", path.display());
+    }
+    for name in ["envs/job.json", "plans/job.json", "locks/job.lock"] {
+        assert!(!control.join(name).exists(), "retained {name}");
+    }
+    let registry: J = util::read_json(&control.join("registry.json")).unwrap();
+    assert_eq!(registry["entries"], json!({}));
+    let status = run(&["task-env", "status", "--task", "job"], 0);
+    assert_eq!(status["state"], "absent");
+    assert_eq!(status["occupied_slots"], 0);
+    assert_eq!(std::fs::read(&target).unwrap(), b"A");
+    for name in sentinels {
+        assert_eq!(
+            std::fs::read_to_string(root.join(name)).unwrap(),
+            format!("preserve {name}")
+        );
+    }
+    assert_eq!(
+        run(&["delivery", "finish", "--task", "job"], 0)["delivery"],
+        "not_attested"
+    );
+}
 #[test]
 fn in_flight_delivery_process_prevents_absence_and_retry() {
     let mut f = Fixture::new(false);
