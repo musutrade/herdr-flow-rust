@@ -21,6 +21,7 @@ const ACTIONS: &[&str] = &[
     "add",
     "signal",
     "status",
+    "cleanup-preflight",
     "metrics",
     "watch",
     "enable",
@@ -405,7 +406,9 @@ fn validate_args(parsed: Args) -> Result<Args> {
 
 impl Args {
     fn action_requires_spec(&self) -> bool {
-        self.action.starts_with("task-") || action_is_pr_or_batch(&self.action)
+        self.action == "cleanup-preflight"
+            || self.action.starts_with("task-")
+            || action_is_pr_or_batch(&self.action)
     }
 }
 
@@ -1190,8 +1193,24 @@ fn run_inner_root(root: &Path, args: &Args) -> Result<Option<i32>> {
 }
 
 fn run_inner(args: &Args) -> Result<Option<i32>> {
+    if args.action == "cleanup-preflight" {
+        return run_cleanup_preflight(args);
+    }
     let root = util::state_dir(&args.state_dir, true)?;
     run_inner_root(&root, args)
+}
+
+fn run_cleanup_preflight(args: &Args) -> Result<Option<i32>> {
+    if args.background || args.once || args.ready_fd.is_some() {
+        return Err(FlowError::usage("cleanup-preflight does not run a watcher"));
+    }
+    let report = super::cleanup_preflight::inspect(&args.state_dir, &read_required_spec(args)?)?;
+    if args.json {
+        print_json(&report)?;
+    } else {
+        println!("{}", super::cleanup_preflight::summary(&report));
+    }
+    Ok(Some(super::cleanup_preflight::exit_code(&report)))
 }
 
 fn cli_error_code(error: FlowError) -> Option<i32> {

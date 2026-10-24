@@ -177,7 +177,7 @@ fn valid_sha(value: &J) -> bool {
     value.as_str().is_some_and(model::is_full_sha)
 }
 
-fn confirmed_landing(pr: &J) -> bool {
+pub(crate) fn confirmed_landing(pr: &J) -> bool {
     landing_identity(pr) && landing_observation(pr) && landing_shape(pr)
 }
 

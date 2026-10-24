@@ -332,3 +332,70 @@ checks; record live arrival and rotation evidence separately while unresolved.
 `tests/lineage.rs`、`tests/acceptance.rs`、`tests/delivery.rs`；设置
 `HERDR_TEST_RELEASE_BIN` 为本 checkout 的 release 二进制绝对路径，可用相同
 回归验证 `panic=abort` 下的退出码与持久化状态。
+
+## Read-only cleanup preflight
+
+`queue cleanup-preflight` observes one existing queue and a recorded linked Git
+worktree. It does not finish a task, remove files, release ownership or authorize
+deletion. It creates no state directory, queue lock or readiness file and requires
+no receiver session. The state directory must already satisfy the secure read
+boundary; an absent or unsafe directory is refused.
+
+```json
+{
+  "queue_id": "exact-queue-id",
+  "task": "exact-task-id",
+  "state_version": 3,
+  "checkout": "/absolute/recorded/linked-worktree"
+}
+```
+
+```bash
+herdr-flow queue cleanup-preflight --state-dir /absolute/queue \
+  --spec /absolute/preflight.json --json
+```
+
+The optional `checkout` selects an exact recorded path; it cannot adopt a path.
+Without it, there must be one unambiguous candidate. Unknown spec fields and stale
+identities are refused. Provenance comes only from `writer.workspace`, a saved
+operation's `intent.workspace`, `pr.checkout`, or an exact lane member checkout.
+`last_release` has no checkout identity. A released independent writer with no
+remaining typed path therefore returns `unknown`; names, age, arbitrary evidence
+files and goal text are never used to infer ownership.
+
+The report separates blockers from historical references. Writers, pending work,
+unfinished operations, blocking findings, unresolved waits/deliveries and active
+or pending lane members block. Cancellation and closed-unmerged PRs do not release
+publication holds. Historical landing requires consistent task/member/candidate
+and PR landing identities. An accepted operation requires its exact applied
+complete result; a complete, applied wait can be historical even with
+`closed=false`. A `claimed_by` successor must resolve its exact receipt chain and
+settled related work before its marker is classified as historical.
+
+An existing unresolved CI observation retains the publication/history hold.
+An absent observation means no recorded CI hold; it supplies no CI acceptance
+evidence. Historical batch PR and landing heads must match the frozen snapshot
+head as well as the member and landing records.
+
+Git checks require a canonical, registered linked worktree root, clean tracked
+and untracked files, no observed Git locks, and a pre-existing durable ref under
+`refs/heads`, `refs/tags` or `refs/archive` containing its exact HEAD. Another
+detached worktree or a reflog alone is insufficient. No archive ref is created;
+retention remains an owner decision, not a permanent archive policy. The main
+checkout, common Git directory, selected queue, recorded receiver/guard and live
+integration/workspace overlaps are protected. Git subprocesses are bounded,
+disable hooks/fsmonitor and optional locks, and do not fetch; partial/promisor
+repositories and uninspected submodules cannot report clear.
+
+Every response has `snapshot=true`, `deletion_authorized=false` and
+`owner_recheck_required=true`. `queue_git_status=clear` (exit 0) describes only the
+implemented local observations. `blocked` or `unknown` exits 1; invalid input or
+failed initial observation exits 2. Reference changes during the final queue
+readback produce `unknown` without retrying. Two matching reads are not a lease.
+
+Process cwd/open descriptors, Herdr workspace ownership, unregistered writers
+and unrecorded shared assets remain explicitly `not_checked`, including in a
+clear report. Before a separately authorized Herdr-native removal without force,
+the owner must recheck those boundaries and current references. This command
+does not inspect or delete shared OpenCode transcripts/cache, stop agents,
+change the queue, or replace the [owned delivery lifecycle](delivery.md).

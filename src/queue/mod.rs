@@ -12,6 +12,7 @@ struct NoticeText<'a> {
     body: &'a str,
 }
 
+pub mod cleanup_preflight;
 pub mod cli;
 pub mod command;
 
