@@ -340,6 +340,7 @@ fn validate_member(
 ) -> Result<()> {
     let mt = member_state(s, member);
     validate_frozen_member(&mt, member)?;
+    progress::claim::held(s, &mt)?;
     validate_member_rest(s, member, batch, api, seen)
 }
 

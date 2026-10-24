@@ -143,6 +143,7 @@ only when the producer is a local command/file path with no session identity.
   "task": "owner/repo#123",
   "wait": "step1",
   "goal": "Complete two accepted steps",
+  "claim": {"version": 1, "kind": "independent", "admission_evidence": "/absolute/admission.json"},
   "apply_timeout_seconds": 600,
   "acceptance": [
     {"id": "first", "description": "First step checked", "required": true},

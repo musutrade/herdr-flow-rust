@@ -44,6 +44,7 @@ fn base_queue() -> J {
 
 fn task_spec() -> J {
     json!({
+        "claim":{"version":1,"kind":"independent","admission_evidence":"/evidence/admission"},
         "task": "task1",
         "wait": "w1",
         "goal": "one bounded step",

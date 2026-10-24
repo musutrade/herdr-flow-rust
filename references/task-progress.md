@@ -53,6 +53,10 @@ or live rotation can be claimed until that receiving session passes its checks.
 
 ## Register the result before starting work
 
+New V1 registrations require explicit [claim admission](claim-admission.md).
+The example below declares independent work; use root/member for lane succession.
+Existing unclassified tasks retain their completion paths without migration.
+
 Existing queues and unlinked waits keep their existing behavior. To manage task
 progress, add `assignment`, full `candidate` SHA and `producer_session` to the
 normal result wait. Guard waits remain independent health dependencies.
@@ -72,6 +76,7 @@ Then use `task-add --spec /absolute/task.json` before result collection:
 ```json
 {
   "task": "owner/repo#123", "wait": "step-one", "goal": "Complete the two accepted steps",
+  "claim": {"version": 1, "kind": "independent", "admission_evidence": "/absolute/admission.json"},
   "apply_timeout_seconds": 600,
   "workspace": "/absolute/checkout", "execution_evidence": "/absolute/initial-assignment.json",
   "acceptance": [

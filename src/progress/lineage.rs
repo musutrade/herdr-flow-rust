@@ -128,11 +128,7 @@ fn migrate(s: &mut J, spec: &J, now: f64) -> Result<J> {
         model::get(spec, "task"),
         model::get(spec, "state_version"),
     )?;
-    ensure(legacy_task(&old), "only legacy tasks can migrate")?;
-    require_unowned(&old, false)?;
-    ensure(!has_lane(&old), "batch lanes cannot migrate")?;
-    ensure(model::get(&old, "pr").is_none(), "PR tasks cannot migrate")?;
-    migration_quiescent(&old)?;
+    migration_allowed(&old)?;
     let name = field(spec, "task")?;
     s["tasks"].as_object_mut().unwrap().remove(&name);
     let mut t = plan(s, spec, now)?;
@@ -140,6 +136,15 @@ fn migrate(s: &mut J, spec: &J, now: f64) -> Result<J> {
     t["epoch"] = old["epoch"].clone();
     t["state_version"] = old["state_version"].clone();
     Ok(save_parent(s, t, now, "migrated"))
+}
+
+fn migration_allowed(old: &J) -> Result<()> {
+    claim::forbid_migration(old)?;
+    ensure(legacy_task(old), "only legacy tasks can migrate")?;
+    require_unowned(old, false)?;
+    ensure(!has_lane(old), "batch lanes cannot migrate")?;
+    ensure(model::get(old, "pr").is_none(), "PR tasks cannot migrate")?;
+    migration_quiescent(old)
 }
 
 fn legacy_task(t: &J) -> bool {
@@ -493,7 +498,7 @@ pub fn advance_session(t: &mut J) {
 pub fn supported_schema(t: &J) -> bool {
     match model::get(t, "schema_version") {
         None => true,
-        Some(value) => matches!(value.as_i64(), Some(1 | 2)),
+        Some(value) => matches!(value.as_i64(), Some(1 | 2 | claim::SCHEMA)),
     }
 }
 

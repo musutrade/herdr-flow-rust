@@ -357,6 +357,7 @@ fn managed_queue(f: &Fixture) -> (PathBuf, util::FileLock, util::FileLock) {
     util::atomic_write_json(
         &spec,
         &json!({"task":"o/r#1","wait":"review","goal":"review",
+        "claim":{"version":1,"kind":"independent","admission_evidence":"/evidence/admission"},
         "acceptance":[{"id":"reviewed","description":"findings checked"}],
         "authorization":[{"id":"review","action":"review","source":"test"}]}),
     )
@@ -560,6 +561,7 @@ fn pinned_opencode_producer_supports_initial_writer_and_collection() {
     progress::register(
         &mut state,
         &json!({"task":"writer","wait":"review","goal":"implement",
+        "claim":{"version":1,"kind":"independent","admission_evidence":"/evidence/admission"},
         "workspace":f.cwd,"writes":true,"execution_evidence":"initial isolated checkout",
         "acceptance":[{"id":"done","description":"implemented"}],
         "authorization":[{"id":"dev","action":"development","source":"user"}]}),

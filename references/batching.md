@@ -76,8 +76,10 @@ source task's `batch_delivery`. It is created by successful `batch-offer` intake
 freezing, integration and landing preserve it. Existing records without this field
 are not retroactively assigned an ID. The ID identifies acceptance of that source
 task; it is not a native turn, a transport receipt, publication approval, or proof
-that the next task was claimed. Cross-task claim enforcement is tracked in #112
-and is not implemented by adding this field. Do not treat a `HANDOFF_ACCEPTED`
+that the next task was claimed. Explicitly admitted V1 tasks use the
+[claim contract](claim-admission.md) and a source `claimed_by` record for one-use
+succession. Legacy receipts do not authorize that path. Deployment and live
+bounded-parallel acceptance remain separate. Do not treat a `HANDOFF_ACCEPTED`
 message as a substitute for this persisted intake record.
 
 ## Freeze members, integrate, freeze snapshot
