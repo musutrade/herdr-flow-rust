@@ -6,6 +6,7 @@
 
 pub mod acceptance;
 pub mod artifact;
+pub mod claim;
 pub mod lineage;
 pub(crate) mod ownership;
 
@@ -183,6 +184,7 @@ pub fn reserve_writer(
         .cloned()
         .unwrap_or_else(|| json!({}));
     require_unowned(&existing, true)?;
+    claim::execution(s, &existing)?;
     let workspace = text(Some(&json!(workspace)), "writer workspace", 1000)?;
     let path = Path::new(&workspace);
     if !path.is_absolute() {
@@ -420,10 +422,22 @@ struct Registration {
 }
 
 pub fn register(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    let mut staged = s.clone();
+    let result = register_staged(&mut staged, spec, now)?;
+    *s = staged;
+    Ok(result)
+}
+
+fn register_staged(s: &mut J, spec: &J, now: f64) -> Result<J> {
     object(spec, "task spec")
         .and_then(|_| prepare_registration_task(s, spec))
         .and_then(|task| load_registration(s, spec, task, now))
         .and_then(|registration| build_registration(spec, registration))
+        .and_then(|mut registration| {
+            lineage::copy_binding(&registration.binding, &mut registration.task_json);
+            claim::admit(s, &mut registration.task_json, spec, now)?;
+            Ok(registration)
+        })
         .and_then(|registration| attach_registration_writer(s, spec, registration))
         .and_then(|registration| finish_registration(s, registration, now))
 }
@@ -657,6 +671,8 @@ fn finish_registration(s: &mut J, mut registration: Registration, now: f64) -> R
         json!(
             if model::get(&registration.task_json, "lineage").is_some() {
                 2
+            } else if registration.task_json.get("claim").is_some() {
+                claim::SCHEMA
             } else {
                 1
             }
@@ -735,6 +751,7 @@ pub fn task(s: &J, name: Option<&J>, version: Option<&J>) -> Result<J> {
         lineage::supported_schema(t),
         "unsupported task schema version",
     )?;
+    claim::validate(s, t)?;
     Ok(t.clone())
 }
 
@@ -871,7 +888,8 @@ fn apply_dispatch(s: &J, t: &mut J, a: &mut J, e: &J, now: f64) -> Result<()> {
 }
 
 fn dispatch_validate(s: &J, t: &J, a: &J, context: &mut DispatchContext) -> Result<()> {
-    require_unowned(t, true)
+    claim::execution(s, t)
+        .and_then(|()| require_unowned(t, true))
         .and_then(|()| ensure_no_active_writer(t))
         .and_then(|()| set_dispatch_opid(context, a))
         .and_then(|()| ensure_operation_unused(s, &context.opid))
@@ -1096,6 +1114,7 @@ fn record_dispatch_operation(t: &mut J, a: &J, now: f64, context: &DispatchConte
 }
 
 fn apply_wait(s: &J, t: &mut J, a: &mut J) -> Result<()> {
+    claim::execution(s, t)?;
     wait_for(s, model::get(a, "wait"), t)
         .and_then(|wait| {
             let wait_id = model::string(&wait, "id").unwrap_or_default();
@@ -1583,6 +1602,7 @@ fn load_begin_operation(task: J, operation: Option<&J>) -> Result<BeginState> {
 }
 
 fn validate_begin(s: &J, state: &BeginState, now: f64) -> Result<()> {
+    claim::execution(s, &state.task)?;
     lineage::ensure_current(s, &state.task)?;
     ensure(
         begin_state_ok(s, &state.task, &state.operation),
@@ -1725,6 +1745,7 @@ fn accept_load(s: &mut J, spec: &J, session: &str, now: f64) -> Result<(J, Strin
     )
     .and_then(|task| lineage::ensure_current(s, &task).map(|()| task))
     .and_then(|task| require_unowned(&task, true).map(|()| task))
+    .and_then(|task| claim::execution(s, &task).map(|()| task))
     .and_then(|task| ensure_takeover(s, &task, spec, session).map(|()| task))
     .and_then(|task| takeover_evidence(spec).map(|evidence| (task, evidence)))
     .and_then(|(task, evidence)| {
@@ -1907,6 +1928,7 @@ fn resume_load(s: &mut J, spec: &J) -> Result<(J, J)> {
     )
     .and_then(|task| lineage::ensure_current(s, &task).map(|()| task))
     .and_then(|task| require_unowned(&task, true).map(|()| task))
+    .and_then(|task| claim::execution(s, &task).map(|()| task))
     .and_then(|task| ensure_recovery_state(s, &task).map(|()| task))
     .and_then(|task| resume_wait(s, spec, &task).map(|wait| (task, wait)))
     .and_then(|(task, wait)| {

@@ -360,6 +360,8 @@ fn batch_offer_freeze_integrate_and_snapshot() {
     assert!(batch::action(&mut s, "batch-offer", &invalid, 11.0, &mut |_s| Ok(())).is_err());
     assert_eq!(s, unchanged, "validation failure must not mint a receipt");
 
+    managed_receipt_freeze(&s, &offer_spec, &repo);
+
     let offered =
         batch::action(&mut s, "batch-offer", &offer_spec, 11.0, &mut |_s| Ok(())).unwrap();
     let receipt = s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"]
@@ -462,6 +464,31 @@ fn batch_offer_freeze_integrate_and_snapshot() {
         snapshotted["lane"]["active"]["members"][0]["receipt_id"],
         receipt
     );
+}
+
+fn managed_receipt_freeze(original: &J, offer: &J, repo: &Repo) {
+    let mut s = original.clone();
+    s["tasks"]["o/r#2"]["schema_version"] = json!(3);
+    s["tasks"]["o/r#2"]["claim"] = json!({"version":1,"kind":"root","lane":"lane","previous":null,"admission_evidence":"/evidence/initial"});
+    batch::action(&mut s, "batch-offer", offer, 11.0, &mut |_| Ok(())).unwrap();
+    let receipt = s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"].clone();
+    s["waits"]["next"] = json!({"id":"next","task":"next","epoch":1,"assignment":"next-a1","candidate":repo.base,"kind":"signal","closed":false,"owner":"developer","condition":"done"});
+    let input = json!({"task":"next","wait":"next","goal":"independent next issue",
+        "claim":{"version":1,"kind":"root","lane":"lane","previous":{"task":"o/r#2","epoch":1,"candidate":repo.head,"receipt_id":receipt},"admission_evidence":"/evidence/next"},
+        "acceptance":[{"id":"done","description":"done"}],"authorization":[{"id":"dev","action":"development","source":"user"}]});
+    herdr_flow::progress::register(&mut s, &input, 11.5).unwrap();
+    let freeze = json!({"task":"lane","state_version":s["tasks"]["lane"]["state_version"]});
+    let api = Fake::new().with("branches/main", json!({"commit":{"sha":repo.base}}));
+    let mut cancelled = s.clone();
+    cancelled["tasks"]["o/r#2"]["control"] = json!("cancelled");
+    assert!(batch::lane::freeze(&mut cancelled, &freeze, 12.0, Some(&api)).is_err());
+    batch::lane::freeze(&mut s, &freeze, 12.0, Some(&api)).unwrap();
+    assert_eq!(s["tasks"]["o/r#2"]["batch_delivery"]["receipt_id"], receipt);
+    assert_eq!(
+        s["tasks"]["o/r#2"]["batch_delivery"]["claimed_by"],
+        json!({"task":"next","epoch":1})
+    );
+    herdr_flow::progress::claim::validate(&s, &s["tasks"]["next"]).unwrap();
 }
 
 #[test]

@@ -40,6 +40,7 @@ fn current_task(queue: &J, wait: &J) -> Result<()> {
     let task = model::dig(queue, &["tasks", &name])
         .ok_or_else(|| FlowError::guard("OpenCode managed task is missing"))?;
     progress::lineage::ensure_current(queue, task)?;
+    progress::claim::validate(queue, task)?;
     ensure(
         progress::same(task, &binding),
         "OpenCode task binding is no longer current",
@@ -71,6 +72,7 @@ pub fn dispatch(root: &Path, spec: &J) -> Result<J> {
 fn prepare_dispatch(state: &J, queue_root: &Path, queue: &J, spec: &J) -> Result<(String, J)> {
     let wait_id = required(spec, "wait")?;
     let wait = current_wait(queue, &wait_id, state)?;
+    progress::claim::execution(queue, &queue["tasks"][wait["task"].as_str().unwrap_or("")])?;
     let binding = progress::binding(&wait)?;
     verify_candidate(state, &binding)?;
     let prompt = util::read_text(Path::new(&required(spec, "prompt_file")?))?;

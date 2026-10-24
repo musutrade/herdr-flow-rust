@@ -273,6 +273,7 @@ struct LaneInit {
 
 pub fn init(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let mut t = ledger::mutable(s, spec)?;
+    progress::claim::lane_owner(s, &t)?;
     init_idle(s, spec, now, &mut t)
 }
 
@@ -943,6 +944,13 @@ fn dependency_merge_base(source: &J, source_head: &str) -> Result<()> {
 }
 
 pub fn offer(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    let mut staged = s.clone();
+    let result = offer_staged(&mut staged, spec, now)?;
+    *s = staged;
+    Ok(result)
+}
+
+fn offer_staged(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let (t, lane) = mutable(s, spec)?;
     offer_idle(s, spec, now, t, lane)
 }
@@ -988,6 +996,7 @@ fn offer_member(s: &mut J, spec: &J, now: f64, t: J, lane: J) -> Result<J> {
 
 fn offer_member_task(s: &mut J, now: f64, t: J, lane: J, m: J) -> Result<J> {
     let mt = progress::task(s, model::get(&m, "task"), model::get(&m, "state_version"))?;
+    progress::claim::offer(s, &t, &mt)?;
     offer_member_event(s, now, t, lane, m, mt)
 }
 
@@ -4647,7 +4656,9 @@ mod audit_tests {
             if let Some(receipt) = receipt {
                 member["receipt_id"] = json!(receipt);
                 delivery["receipt_id"] = json!(receipt);
+                delivery["claimed_by"] = json!({"task":"successor","epoch":1});
             }
+            let consumed = delivery.get("claimed_by").cloned();
             let mut s = json!({"tasks":{"source":{"task":"source","state_version":1,
                 "history":[],"batch_delivery":delivery}}});
             let batch =
@@ -4671,6 +4682,10 @@ mod audit_tests {
             .unwrap();
             s = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
             assert_eq!(s["tasks"]["source"]["batch_delivery"]["phase"], "landed");
+            assert_eq!(
+                s["tasks"]["source"]["batch_delivery"].get("claimed_by"),
+                consumed.as_ref()
+            );
             assert_eq!(
                 s["tasks"]["source"]["batch_delivery"].get("receipt_id"),
                 member.get("receipt_id")

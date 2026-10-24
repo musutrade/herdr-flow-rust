@@ -210,6 +210,7 @@ impl Harness {
 
     fn task_spec(&self) -> J {
         json!({
+            "claim":{"version":1,"kind":"independent","admission_evidence":"/evidence/admission"},
             "task": "o/r#1",
             "wait": "step1",
             "goal": "two accepted steps",

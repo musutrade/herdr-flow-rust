@@ -283,6 +283,7 @@ pub fn mutable(s: &J, spec: &J) -> Result<J> {
         model::get(spec, "state_version"),
     )?;
     progress::require_unowned(&t, false)?;
+    progress::claim::execution(s, &t)?;
     if model::bool_or(s, "stopped", false)
         || model::string(&t, "control").as_deref() != Some("running")
         || model::string(&t, "phase").as_deref() == Some("completed")
