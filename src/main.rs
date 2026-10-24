@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 fn usage() {
     println!(
-        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode native OpenCode sessions and monitoring diagnostics\n  task-runtime task-owned native sessions and collection\n  delivery confirmed customer delivery and final destruction\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
+        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  opencode native OpenCode sessions and monitoring diagnostics\n  task-env preparatory owned environment create/status/recover\n  task-runtime task-owned native sessions and collection\n  delivery confirmed customer delivery and final destruction\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -35,9 +35,9 @@ fn dispatch(command: &str, rest: &[String]) -> i32 {
 
 fn fallback(command: &str, rest: &[String]) -> i32 {
     match command {
-        "delivery" => herdr_flow::delivery::cli::cli(rest),
-        "task-runtime-broker" => broker(rest),
-        "task-runtime" => herdr_flow::task_runtime::cli::cli(rest),
+        "delivery" | "task-runtime-broker" | "task-runtime" | "task-env" => {
+            environment_command(command, rest)
+        }
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -51,6 +51,15 @@ fn fallback(command: &str, rest: &[String]) -> i32 {
             usage();
             2
         }
+    }
+}
+
+fn environment_command(command: &str, rest: &[String]) -> i32 {
+    match command {
+        "delivery" => herdr_flow::delivery::cli::cli(rest),
+        "task-runtime-broker" => broker(rest),
+        "task-runtime" => herdr_flow::task_runtime::cli::cli(rest),
+        _ => herdr_flow::task_env::cli::cli(rest),
     }
 }
 
@@ -79,5 +88,20 @@ mod broker_tests {
             broker(&["--state-dir".into(), dir.path().display().to_string()]),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    #[test]
+    fn preparatory_entry_and_existing_help_routes() {
+        for command in ["delivery", "task-runtime", "task-env"] {
+            assert_eq!(super::fallback(command, &["--help".into()]), 0);
+        }
+        for command in ["help", "--help", "--version"] {
+            assert_eq!(super::fallback(command, &[]), 0);
+        }
+        assert_eq!(super::fallback("unknown", &[]), 2);
+        assert_eq!(super::fallback("task-runtime-broker", &[]), 2);
     }
 }

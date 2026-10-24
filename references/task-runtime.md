@@ -16,6 +16,72 @@ verify their bound session directly; they do not set or impersonate either varia
 
 ## Owned environment and fresh activity
 
+### Preparatory environment entry
+
+`herdr-flow task-env create --task TASK --spec FILE` exposes the existing owned
+environment API. The spec has exactly these required keys (no defaults or unknown
+fields, including in delivery targets):
+
+```json
+{
+  "workspace_root": "/absolute/vacant/workspace",
+  "temp_root": "/absolute/vacant/temp",
+  "delivery_targets": [
+    {"path": "/absolute/external/output", "target_type": "file", "description": "Delivery"}
+  ]
+}
+```
+
+`delivery_targets` may be empty; target `description` is optional and `target_type`
+must contain non-whitespace text. All paths must
+be absolute. Roots must be absent or empty, distinct, non-overlapping, outside the
+control tree, and have existing trusted ancestors. Delivery targets stay outside
+both roots. Creation calls the existing API once, returns identity/state/roots,
+and releases its handle when the command exits; the active registration persists.
+A repeated or concurrent create fails, without adopting existing data or replacing
+an environment. Failed creation can leave interrupted state; there is no automatic
+retry, recovery or destruction.
+
+`herdr-flow task-env status --task TASK` reads a bounded snapshot of the registry,
+environment documents and cleanup plans. It does not restore a handle, take locks,
+create directories or chmod anything, and works while another handle owns the
+task. Missing state remains absent. Symlinks, insecure directories/files,
+malformed/oversized documents, scan errors, inconsistent identities or changed
+readback produce `state=unknown, snapshot=false` (exit 1); valid observations exit 0, command errors
+exit 2. Reads are limited to 1 MiB per document, 8 MiB of decoded JSON per snapshot,
+and 1024 entries per scanned directory. `occupied_slots` is observed additive
+accounting: **envs/*.json count + plans/*.json count**; a task with both documents
+counts twice, matching the existing capacity implementation. Unknown scans report
+null rather than inventing a count. The snapshot is not an ownership check or
+cleanup authorization; subsequent mutation still needs the existing locks and
+validation. Recorded roots must be disjoint from control state and delivery
+targets. Plan roots must belong to the available environment/registry root sets,
+and remaining root removals must belong to the plan. These are lexical document
+consistency checks, not verification of live filesystem ownership.
+
+`herdr-flow task-env recover --task TASK` invokes existing interrupted recovery
+once. Run it from an external supervisor: it can stop owned processes and remove
+disposable roots. **Active with a cleanup plan is destructive recovery**, covering
+the crash window after a plan was saved but before the environment was marked
+destroying. Active without a plan returns `recovered=false`; a live owner blocks
+recovery. Creating, destroying, destroy-failed and plan-only records use existing
+recovery semantics and limits. Missing-task recovery may create empty control
+directories before returning false; only `status` promises no-create inspection.
+There is no raw destroy, adoption, automatic retry or general active-task cleanup
+permission in this CLI.
+
+This is a **preparatory entry**, not an end-to-end Herdr lifecycle recipe. A generic
+active environment with no confirmed delivery still has no executable finish
+path; [delivery finish](delivery.md) requires confirmed delivery and its ownership
+checks. The Herdr worktree/session ownership bridge also remains unresolved:
+creation owns vacant roots, not an existing Herdr checkout or session. Shared
+receivers, queues, OpenCode transcripts and caches are outside this slice. Do not
+create production environments through this entry until the finish/recovery and
+Herdr bridge acceptance is agreed. [Task completion](task-progress.md) alone does
+not authorize removal.
+
+### Runtime integration
+
 `task_runtime` builds on the owned `TaskEnvironment` API from #33. It does not take
 ownership of an existing shared server, user session, user home or global settings.
 The new native path supports Git snapshots; other artifact adapters are rejected
