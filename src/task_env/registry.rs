@@ -138,6 +138,25 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 
 /// Root directory that holds environment state and cleanup plans.
 pub fn state_root() -> Result<PathBuf> {
+    let root = configured_root()?;
+    ensure_private_dir(&root)?;
+    Ok(util::resolve_path(&root))
+}
+
+/// Resolve configuration without inspecting, creating or canonicalizing paths.
+pub(super) fn control_path() -> Result<PathBuf> {
+    let root = configured_root()?;
+    if root.as_os_str().is_empty() {
+        return Err(FlowError::progress("empty task environment control root"));
+    }
+    if root.is_absolute() {
+        Ok(root)
+    } else {
+        Ok(std::env::current_dir()?.join(root))
+    }
+}
+
+fn configured_root() -> Result<PathBuf> {
     let root = match std::env::var_os("HERDR_TASK_ENV_ROOT") {
         Some(root) => PathBuf::from(root),
         None => {
@@ -149,8 +168,7 @@ pub fn state_root() -> Result<PathBuf> {
                 .join("task_environments")
         }
     };
-    ensure_private_dir(&root)?;
-    Ok(util::resolve_path(&root))
+    Ok(root)
 }
 
 fn subdir(name: &str) -> Result<PathBuf> {

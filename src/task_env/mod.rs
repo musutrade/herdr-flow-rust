@@ -9,10 +9,13 @@
 
 mod boundary;
 mod cleanup;
+pub mod cli;
 pub(crate) mod discovery;
 mod env;
 pub(crate) use env::PreparedConfinement;
 mod registry;
+mod status;
+pub use status::status;
 
 pub use boundary::{
     is_delivery, is_within_disposable, paths_overlap, validate_delivery_targets, validate_path,
