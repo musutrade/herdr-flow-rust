@@ -735,6 +735,37 @@ fn diagnose_and_diagnostics_classify_each_phase() {
 }
 
 #[test]
+fn completed_diagnostics_do_not_attest_delivery_or_authorize_cleanup() {
+    let mut queue = base_queue();
+    let mut task = result_task("a1", "completed", json!([]));
+    task["acceptance"]["c1"]["evidence"] = json!("/evidence/acceptance.json");
+    task["completed_at"] = json!(100.0);
+    queue["tasks"] = json!({"task1": task});
+    let before = queue.clone();
+
+    let diagnosis = progress::diagnose(&queue, &queue["tasks"]["task1"], Some(150.0)).unwrap();
+    assert_eq!(diagnosis["classification"], "completed");
+    assert_eq!(diagnosis["phase"], "completed");
+    assert_eq!(
+        diagnosis["reason"],
+        "task acceptance is complete; delivery and resource cleanup are separate outcomes"
+    );
+    let guidance = diagnosis["next_step"].as_str().unwrap();
+    assert!(guidance.contains("through their supported lifecycle"));
+    assert!(guidance.contains("report missing ownership or cleanup support as a blocker"));
+    assert!(guidance.contains("without deleting shared resources based on this status"));
+    assert!(!guidance.contains("retain the completion evidence"));
+    assert!(!guidance.contains("no further task action"));
+
+    let diagnostics = progress::diagnostics(&queue, Some(150.0)).unwrap();
+    assert_eq!(diagnostics["task1"], diagnosis);
+    let summary = herdr_flow::queue::summary(&queue);
+    assert!(summary.contains(diagnosis["reason"].as_str().unwrap()));
+    assert!(summary.contains(guidance));
+    assert_eq!(queue, before);
+}
+
+#[test]
 fn diagnose_reports_pending_result_and_successor_deadlines() {
     let mut queue = base_queue();
     queue["tasks"] = json!({"task1": result_task("a1", "result_pending", json!(["e1"]))});

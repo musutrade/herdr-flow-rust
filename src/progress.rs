@@ -2591,8 +2591,8 @@ fn completed_phase_detail(phase: &str) -> Option<(String, String, String)> {
     }
     Some((
         "completed".to_string(),
-        "all required acceptance is complete".to_string(),
-        "no further task action; retain the completion evidence".to_string(),
+        "task acceptance is complete; delivery and resource cleanup are separate outcomes".to_string(),
+        "verify the agreed delivery and owned-resource cleanup through their supported lifecycle; report missing ownership or cleanup support as a blocker, without deleting shared resources based on this status".to_string(),
     ))
 }
 
