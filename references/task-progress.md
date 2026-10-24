@@ -221,7 +221,13 @@ The task classifications separate states that can look equally idle in a pane:
   model polling is needed.
 - `blocked`: an explicit condition is recorded; recover only through a fresh
   matching wait and `task-resume` with inspected evidence.
-- `paused`, `cancelled`, `completed`, `no_open_next_action` and
+- `completed`: the task's acceptance is complete. This status alone does not
+  attest the agreed delivery or resource cleanup, authorize deletion, or create
+  a permanent evidence archive. Check those separate outcomes through the
+  supported lifecycle. If ownership or cleanup support is missing, report that
+  blocker; keep shared resources untouched. The diagnostic does not reopen the
+  task or change its completion state.
+- `paused`, `cancelled`, `no_open_next_action` and
   `result_pending_without_event` are reported separately rather than treated as
   normal progress.
 
