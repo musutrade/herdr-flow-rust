@@ -93,6 +93,39 @@ observations. Before production use, inventory and switch every queue writer to
 the supporting binary. Do not mix versions or roll back a claim queue to an old
 writer. This is a deployment prerequisite, not a new supervisor or migration.
 
+### Deployment writer-selection checklist
+
+Complete this checklist for the exact queue before admitting claim tasks. A
+version string or a successful build alone does not identify the running code.
+
+- Record the queue ID/path and the chosen executable's absolute path, SHA-256,
+  source commit and build profile. Verify the running watcher executable as well
+  as the file on disk; record its PID and process start identity.
+- Inventory every current and registered future writer: queue/watch lifecycle,
+  coordinator task/PR/batch commands (including observation commands that save
+  queue state), ACK/task-apply/resolve, producer signal/results and queue wrappers.
+  Include scripts, skills, shell/PATH selection and service launch entries.
+- Give every entry the same verified compatible binary selection. Record the
+  coordinator's exact receiver session and each wait's actual producer identity;
+  selecting a binary does not authorize borrowing another agent's session.
+- Quiesce known writers before switching. Preserve pending results and ambiguous
+  submissions, confirm the old watcher exits, then inspect the queue/watch locks.
+  Locks serialize cooperating writers; they do not exclude an old same-user CLI.
+  Use the [receiver maintenance procedure](receiver-maintenance.md) for process
+  pause and snapshots; terminal `queue stop` is not a maintenance switch.
+- Resume only verified entries and check receiver binding, fresh watcher health
+  and readiness. Record any unaccounted writer as a deployment gap. A healthy
+  receiver does not prove that all short-lived or future writers were switched.
+- After claim registration or receipt consumption, never restore an old queue
+  snapshot or select an old writer as a shortcut. A snapshot can lose
+  `claimed_by` and make a consumed receipt appear reusable. Preserve evidence and
+  inspect external effects and current state; there is no automatic semantic
+  rollback or migration contract.
+
+This inventory is an operational constraint, not a product-enforced global
+writer barrier. Keep shared caches, unrelated sessions and host configuration
+outside this task's resource ownership.
+
 This code does not create a live lane, attest consumer Gate/App configuration,
 or establish #112 bounded-parallel production acceptance. Those still require
 authorized rollout and evidence. The coordinator/filesystem trust boundary is
