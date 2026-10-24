@@ -1,9 +1,11 @@
 # V2 bounded batch consumer
 
-The consumer is implemented here. Trusted execution, result validity, Check
-publication and credential isolation belong to GateHouse #98. Production use
-requires V1/runtime acceptance and #98 deployment acceptance in #9. Offline
-fixtures establish neither those prerequisites nor publication authorization.
+The consumer is implemented here. GateHouse owns quality evaluation and its
+results; the consuming deployment owns the verifier binding, Check publication,
+App credentials and publication workflow. Production use requires V1/runtime
+acceptance and the [consumer deployment evidence](gate-client.md#consumer-deployment-evidence)
+for this repository. Closing an upstream issue does not supply that evidence.
+Offline fixtures establish neither deployment nor publication authorization.
 Installing this code changes no rules or Actions workflows.
 
 ## Register a lane and accept tasks
@@ -142,8 +144,9 @@ supersedes earlier success and is independently GET-checked. Wrong run/head/App,
 changed base, revocation, neutral and skipped cannot supply success; absent
 reporting stays pending. Mixed Actions/Checks inventories require both. V1
 `pr-observe` and repair takeover also recheck exact external runs. Other GitHub
-rules remain independent. Recover missing reporting through GateHouse for the
-existing result/PR; do not start a new gate or PR to fix an upload.
+rules remain independent. Recover missing reporting through the deployed consumer
+publisher/App adapter for the existing result/PR; do not start a new gate or PR
+to fix an upload. Reporting failure does not change the saved quality conclusion.
 
 `batch-reconcile` reuses exact PR recovery and merged/landing ancestry checks,
 then requires the expected App/run's current success and landing tree equal to S.

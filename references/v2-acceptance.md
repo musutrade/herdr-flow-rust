@@ -42,8 +42,10 @@ The following remain required before V2 production enablement/issue closure:
 - Confirm the V1/runtime live prerequisites, including safe session takeover, from
   their retained acceptance evidence rather than interpreting unit tests as live
   notification or rotation proof.
-- Connect the #98 deployment's actual authoritative API through the operator-owned
-  client; validate policy/run/base/tree identity, invalidation and quiescence.
+- Bind existing authoritative GateHouse results/current state through the
+  operator-owned consumer client; validate policy/run/base/tree identity,
+  invalidation and quiescence. Record the [consumer deployment evidence](gate-client.md#consumer-deployment-evidence);
+  upstream issue closure or an installed Gate CLI is not deployment acceptance.
 - Exercise real normal, failed/repair and interrupted publication/reporting paths
   with the actual restricted publisher and trusted App, including same-result
   report recovery without duplicate gate execution or PR creation.

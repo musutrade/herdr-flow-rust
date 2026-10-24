@@ -2,8 +2,8 @@
 
 This is a maintainability overview of the current source and the explicitly
 separate target mode. Implemented paths are drawn as current behavior. Target
-paths are labeled and remain gated by GateHouse #98 and the V1/V2 acceptance
-items in Issues #11/#12/#13. OpenCode 1.19.x (baseline 1.19.3) has a native HTTP session adapter
+paths are labeled and require consumer Gate/App deployment evidence and the
+V1/V2 acceptance items in Issues #11/#12/#13. OpenCode 1.19.x (baseline 1.19.3) has a native HTTP session adapter
 and a separate process monitoring helper; automatic rotation remains unsupported.
 Detailed contracts live in
 the linked references; do not copy these diagrams into multiple documents.
@@ -25,8 +25,9 @@ flowchart LR
   subgraph V1["V1 transitional checks"]
     A["GitHub Actions<br/>required and advisory jobs"]
   end
-  subgraph Target["Target mode, gated by GateHouse #98"]
-    H["GateHouse local gate<br/>full checks and cache"]
+  subgraph Target["Target mode, consumer deployment required"]
+    H["GateHouse<br/>quality results and evidence"]
+    V["Consumer verifier and App adapter"]
     K["Trusted GitHub App Check<br/>exact SHA"]
   end
   R["GitHub rules, required checks, merge"]
@@ -41,7 +42,8 @@ flowchart LR
   O -.->|"observe"| A
   O -.->|"observe"| K
   A -.->|"V1 required-job decision"| Q
-  H -->|"verified snapshot"| K
+  H -->|"quality result for snapshot"| V
+  V -->|"validate binding and report"| K
   K -->|"report exact SHA"| R
   R -->|"confirmed merge only"| C
 ```
@@ -177,8 +179,10 @@ flowchart LR
   Merge --> Release["Confirm landing, release slot,<br/>prepare next batch"]
 ```
 
-The target path starts only after [GateHouse #98](https://github.com/musutrade/GateHouse/issues/98)
-and the V1 runtime evidence are accepted. Current V1 uses the existing Actions
+The target path starts only after the [consumer deployment evidence](gate-client.md#consumer-deployment-evidence)
+and V1 runtime evidence are accepted. GateHouse supplies quality results; the
+consumer owns its verifier, App/reporting and publication bindings. Upstream
+issue closure does not activate this path. Current V1 uses the existing Actions
 path and does not claim local-gate or trusted-App integration. See
 [CI monitoring](ci-monitor.md), [V2 batching](batching.md), and
 [V2 acceptance](v2-acceptance.md).
@@ -257,8 +261,8 @@ See [CI monitoring](ci-monitor.md), [wait queue](waiting.md) and
 | CI and external Check observation | `herdr-flow ci`, `src/ci/checks.rs` | #11 external Checks |
 | PR provenance and same-PR repair | `src/pr.rs` | #11 |
 | Read-only task and delivery metrics | `src/metrics.rs`, `src/queue/cli.rs` | #6 |
-| V2 bounded batches | `src/batch/lane.rs`, `src/batch/git.rs`, `src/batch/validation.rs` | #12, GateHouse #98 |
-| Trusted gate client boundary | `src/batch/gate.rs` | GateHouse #98 |
+| V2 bounded batches | `src/batch/lane.rs`, `src/batch/git.rs`, `src/batch/validation.rs` | #12; consumer deployment acceptance |
+| Trusted gate client boundary | `src/batch/gate.rs` | consumer verifier contract and deployment acceptance |
 | Watcher supervision and command wrapper | `src/watch_service.rs`, `src/queue/command.rs` | internal |
 | Shared errors, logging and CRAP gate | `src/error.rs`, `src/logging.rs`, `cargo run -- crap` | CI/local gate |
 
