@@ -19,8 +19,16 @@ error or interruption.
 
 First register an ordinary managed task with its original acceptance,
 authorization, full candidate SHA, and result wait as described in
-[task progress](task-progress.md). `pr-prepare` adds this record **before** any
-external publication:
+[task progress](task-progress.md).
+
+The task must record an authorization whose `action` is `publication`, and
+`pr-begin.authorization` names that entry's key. Development or review/commit
+permission alone does not satisfy the publication gate. For an existing user
+approval omitted during registration, the coordinator may use the narrow
+[task-authorize recovery](task-progress.md#correct-an-omitted-publication-authorization)
+before any publication is sent; the gate and no-replay rules remain unchanged.
+
+`pr-prepare` adds this record **before** any external publication:
 
 ```json
 {

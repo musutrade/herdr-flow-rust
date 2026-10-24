@@ -239,6 +239,47 @@ terminal label. Cross-check these messages against the retained V1/#13 recovery
 evidence when exercising a real interruption; a status line is not a new
 authorization.
 
+## Correct an omitted publication authorization
+
+Register the lane owner's publication authorization before starting a campaign.
+If the user already authorized publication but registration omitted its record,
+the exact coordinator can use `queue task-authorize --state-dir QUEUE --spec SPEC`:
+
+```json
+{
+  "task": "lane-owner", "state_version": 12,
+  "id": "publish", "action": "publication",
+  "source": "Existing user approval and its exact retained evidence reference"
+}
+```
+
+This records existing permission; it cannot grant permission on the user's
+behalf; `source` is a recorded reference, not machine verification of user approval.
+Only `publication` is supported. An explicit `schema_version: 1` or `3` is
+required; missing-version legacy tasks are refused without automatic migration.
+The V1 task must be running
+and blocked, with no writer, pending results or delivery ownership. Accepted
+operations must have matching applied `complete` results. A lane must be at
+`snapshot_frozen`; a PR record must be an unsent create/prepared intent with no
+PR number, observation or landing. V2 tasks, consumed/batch-owned sources,
+uncertain or already sent publications are refused. This is a narrow recovery
+checkpoint, not a generic task editor.
+
+The command uses the existing coordinator/session check, queue lock and atomic
+save. It adds only the named authorization, increments task state_version and
+records the ID/action/source in task history. Existing acceptance, claim,
+receipt, lane, PR, wait and writer data are preserved. IDs are limited to 64
+characters and the map to 64 entries. Different values for an existing ID are
+refused; an identical entry with the current version is a no-op. A stale version
+still fails. After an ambiguous save, inspect state and audit before any next
+action; never resend a publication because its authorization was supplemented.
+
+Then use the new task version and `authorization: "publish"` in the normal
+`pr-begin` spec. All publication checks still apply. Do not edit queue JSON,
+recreate the lane or create another publication task to bypass missing authority.
+Other peers must finish their current task transitions before this correction;
+the command does not replay dispatch, publish, merge or restart watchers.
+
 ## Retention and evidence
 
 Queue state is bounded at 100 managed tasks, 1,000 waits, 10,000 events and 10,000

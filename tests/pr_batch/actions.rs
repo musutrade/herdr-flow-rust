@@ -94,6 +94,100 @@ fn register(s: &mut J, api: &Fake) {
     input["number"] = json!(7);
     pr::reconcile(s, &input, 16., Some(api)).unwrap();
 }
+
+#[test]
+fn omitted_authorization_recovery_allows_exact_frozen_lane_begin_once() {
+    use herdr_flow::queue;
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let tmp = common::tempdir().unwrap();
+    let mut s = snapshot(&repo, &tmp);
+    s["tasks"]["lane"]["schema_version"] = json!(1);
+    s["tasks"]["lane"]["authorization"] =
+        json!({"review":{"action":"verification","source":"user"}});
+    let lane_before = s["tasks"]["lane"]["lane"].clone();
+    let source_before = s["tasks"]["o/r#1"].clone();
+    let guard = tmp.path().join("guard");
+    common::create_dir(&guard).unwrap();
+    util::atomic_write_json(
+        &guard.join("state.json"),
+        &json!({"version":2,
+        "phase":"monitoring","session":"fixture-session","task":"lane",
+        "role":"coordinator","pane":"w1:p1","cwd":repo.root}),
+    )
+    .unwrap();
+    let root = tmp.path().join("queue");
+    let mut q = queue::init(&root, Some(&guard), 30).unwrap();
+    q["tasks"] = s["tasks"].clone();
+    q["events"] = s["events"].clone();
+    queue::save(&root, &mut q).unwrap();
+    let bin = tmp.path().join("bin");
+    common::create_dir(&bin).unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(&gh, "#!/bin/sh\n[ \"$*\" = 'api --hostname github.com --method GET repos/o/r/branches/main' ] || exit 91\nprintf 'GET\\n' >> \"$AUTH_GET_LOG\"\ncat \"$AUTH_RESPONSE\"\n").unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let response = tmp.path().join("response.json");
+    util::atomic_write_json(&response, &json!({"commit":{"sha":repo.base}})).unwrap();
+    let log = tmp.path().join("get.log");
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let input_path = tmp.path().join("spec.json");
+    let run = |action: &str, input: &J| {
+        util::atomic_write_json(&input_path, input).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(["queue", action, "--state-dir"])
+            .arg(&root)
+            .arg("--spec")
+            .arg(&input_path)
+            .env_remove("OPENCODE_SESSION_ID")
+            .env("CODEX_THREAD_ID", "fixture-session")
+            .env("PATH", &path)
+            .env("AUTH_RESPONSE", &response)
+            .env("AUTH_GET_LOG", &log)
+            .output()
+            .unwrap()
+    };
+    let mut input = spec(&s);
+    input["authorization"] = json!("publish");
+    let before = std::fs::read(root.join("queue.json")).unwrap();
+    let failed = run("pr-begin", &input);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("explicit publication authorization"));
+    assert_eq!(std::fs::read(root.join("queue.json")).unwrap(), before);
+    assert!(!log.exists());
+    let authorization = json!({"task":"lane","state_version":input["state_version"],
+        "id":"publish","action":"publication","source":"Existing user approval: fixture reference"});
+    let added = run("task-authorize", &authorization);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let q = queue::load_queue(&root).unwrap();
+    assert_eq!(q["tasks"]["lane"]["lane"], lane_before);
+    assert_eq!(q["tasks"]["o/r#1"], source_before);
+    input["state_version"] = q["tasks"]["lane"]["state_version"].clone();
+    let started = run("pr-begin", &input);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let q = queue::load_queue(&root).unwrap();
+    assert_eq!(q["tasks"]["lane"]["pr"]["publication"]["phase"], "sending");
+    assert_eq!(q["tasks"]["lane"]["lane"], lane_before);
+    assert_eq!(q["tasks"]["o/r#1"], source_before);
+    input["state_version"] = q["tasks"]["lane"]["state_version"].clone();
+    let before = std::fs::read(root.join("queue.json")).unwrap();
+    let failed = run("pr-begin", &input);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("never replay"));
+    assert_eq!(std::fs::read(root.join("queue.json")).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "GET\n");
+}
+
 #[test]
 fn actions_lane_publication_and_landing_retain_slot_until_main_ci() {
     let repo = Repo::new();
