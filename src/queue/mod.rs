@@ -2466,6 +2466,7 @@ type ProgressHandler = fn(&Path, &mut J, &J, Option<&str>, &ReceiverFactory, f64
 
 const PROGRESS_HANDLERS: &[(&str, ProgressHandler)] = &[
     ("task-add", progress_register),
+    ("task-authorize", progress_authorize),
     ("task-lineage", progress_lineage),
     ("task-apply", progress_apply),
     ("task-begin", progress_begin),
@@ -2517,6 +2518,17 @@ fn progress_register(
     now: f64,
 ) -> Result<()> {
     progress::register(s, spec, now).map(|_| ())
+}
+
+fn progress_authorize(
+    _root: &Path,
+    s: &mut J,
+    spec: &J,
+    _session: Option<&str>,
+    _factory: &ReceiverFactory,
+    now: f64,
+) -> Result<()> {
+    progress::authorize::append(s, spec, now).map(|_| ())
 }
 
 fn progress_apply(
