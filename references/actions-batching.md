@@ -44,6 +44,55 @@ and released source tasks. Active CI does not serialize independent development.
 Pending capacity counts accepted members, not developer sessions or reservations.
 CI mode does not add a scheduler, task store or recovery service.
 
+## Example: one active batch and one pending member
+
+For a lane configured with `capacity=1`, use the following sequence. A and B
+are distinct development roots; an output member names the exact committed
+candidate when it differs from its root's input. This is an example contract,
+not a claim that a live campaign has passed.
+
+| Step | Coordinator and producer handoff | Lane state |
+|---|---|---|
+| Finish A | Actual producer signals A's bound wait; coordinator ACKs, applies acceptance and releases its writer. Verify any fixed-output member through its own wait. | No active batch; pending empty |
+| Accept A | `batch-offer` accepts the exact released source and creates its receipt. A successor attempted now is refused for full pending; it consumes no receipt. | Pending A occupies the one slot |
+| Freeze A | `batch-freeze` moves A to active; integrate and freeze its snapshot. | Active A; pending empty |
+| Register B | `task-add` atomically registers B and consumes the exact accepted A source/epoch/candidate/receipt once. | Active A; pending empty; A receipt consumed by B |
+| Develop B | B develops in a disjoint worktree while A remains active. | Active A; development reserves no pending slot |
+| Accept B | B returns its own result; after ACK/application, writer release and fixed-output verification, `batch-offer` accepts B. | Active A; pending B occupies the one slot |
+| Land A | Observe exact PR-head success, explicitly merge, verify merge-main checks and run `batch-reconcile`. | Confirmed landing releases A and atomically freezes B |
+| Continue B | Continue that saved batch through integration, snapshot, publication, observation and landing. | One active B; no third publication |
+
+To check duplicate receipt rejection, attempt another root using A's receipt
+after B registration and before B offer, while pending is empty. After B offer
+at capacity 1, the full-pending check rejects a new successor first; that result
+does not demonstrate the duplicate-receipt check.
+
+Only the registered coordinator mutates task/batch/ACK/application state. A
+producer signals with its own identity. An external publisher uses the existing
+[PR ledger](pr-ledger.md) and reviewed handoff; it must not impersonate the
+receiver or turn terminal admission into task acceptance. An unused wait from
+a rejected registration remains explicit state, not a successful claim.
+
+Before publication, include the queue ID/path, lane task/current version, batch
+ID/revision, frozen head/tree/base, policy digest and complete PR/main workflow
+inventory in the handoff. Name the exact repository, base/head refs, publisher,
+authorization and next owner/trigger/deadline. The `authorization` field in the
+`pr-begin` spec names a key in `task.authorization` whose `action` is
+`publication`; development or
+review/commit authorization alone does not satisfy that check. Do not bypass a
+missing authorization by creating another publication task or editing queue JSON.
+
+After `pr-begin`, publish once with auto-merge disabled and reconcile the actual
+PR before `batch-ci-observe`. Return PR/head and workflow/run/attempt/required-job
+identities, then landing commit and merge-main evidence. All configured checks
+remain required. An uncertain submission is inspected, never resent; a saved
+failure uses the bounded same-PR repair path. Neither CI success nor a publisher
+message frees the slot without the landing checks below.
+
+Record when B work actually occurs and A's contemporaneous batch phase. A
+predrafted B or two idle panes is not parallel-development evidence; A being
+active also does not by itself prove that CI was running during B development.
+
 ## Publication and observation
 
 1. `batch-offer`, `batch-freeze`, `batch-integrate`, `batch-snapshot` keep their
