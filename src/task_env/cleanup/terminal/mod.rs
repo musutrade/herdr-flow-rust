@@ -85,8 +85,7 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
         )?;
         return Ok(());
     }
-    let env = super::super::restore_for_terminal(owner, permit)?;
-    let creation = creation_snapshot(&env)?;
+    let (env, creation) = prepared_environment(owner, permit)?;
     let (environment, entry, roots) = prepare_resources(&env, owner, &associations)?;
     let now = util::now();
     let plan = CleanupState {
@@ -330,6 +329,16 @@ fn release_records(owner: &Owner, plan: &mut CleanupState) -> Result<()> {
     storage::save(plan)
 }
 
+fn prepared_environment(
+    owner: &Owner,
+    permit: &Permit,
+) -> Result<(crate::task_env::TaskEnvironment, CreationIntent)> {
+    let mut env = super::super::restore_for_terminal(owner, permit)?;
+    crate::task_env::instance::allocation::settle_terminal(&mut env, owner, permit)?;
+    let creation = creation_snapshot(&env)?;
+    Ok((env, creation))
+}
+
 fn save_prepared(owner: &Owner, plan: &CleanupState) -> Result<()> {
     let dir = registry::plan_dir()?;
     require(
@@ -390,7 +399,9 @@ mod tests {
                 .permissions(fs::Permissions::from_mode(0o700))
                 .tempdir()
                 .unwrap();
-            let root_guard = crate::task_env::test_env_root(&temp.path().join("control"));
+            let root_guard = crate::task_env::test_env_root(
+                &temp.path().join("queue/queue.json/task-environments"),
+            );
             let old = [
                 "CODEX_THREAD_ID",
                 task_env::MARKER_ENV,
@@ -1113,13 +1124,40 @@ read -r ignored < "$REMOVAL_FIXTURE_FIFO"
             epoch: 1,
             instance_id: String::new(),
         };
+        let _queue = queue::locked(&f.queue, false).unwrap();
+        let request = task_env::instance::allocation::control_request(&f.queue, &create).unwrap();
+        state["lifecycle"]["control_bootstrap"] = json!({"reservation":request,"ready":null});
+        // This fixture performs the same narrow bootstrap transaction as queue/control.
+        state["authority_version"] = json!(state["authority_version"].as_u64().unwrap() + 1);
+        util::atomic_write_json(&f.queue.join("queue.json"), &state).unwrap();
+        let ready = task_env::instance::allocation::initialize_control(&request).unwrap();
+        state["lifecycle"]["control_bootstrap"]["ready"] = ready;
+        state["authority_version"] = json!(state["authority_version"].as_u64().unwrap() + 1);
+        util::atomic_write_json(&f.queue.join("queue.json"), &state).unwrap();
         let permit = std::sync::Arc::new(lifecycle::acquire(&prospective, true).unwrap());
-        let env = task_env::instance::begin_isolated(&binding, &create, &f.queue, permit).unwrap();
+        let mut env =
+            task_env::instance::prepare_isolated(&binding, &create, &f.queue, permit).unwrap();
         let owner = task_env::isolation::owner(&env).unwrap();
-        state["tasks"]["task"]["environment"] = json!({"queue_id":binding.queue_id,
-            "task_id":"task","epoch":1,"instance_id":env.instance_id,"phase":"creating",
-            "state_file":env.state_file(),"checkout":env.workspace_root.join("checkout")});
-        f.save(&mut state);
+        crate::progress::environment::checkpoint(
+            &mut state,
+            &binding,
+            &env,
+            "creating",
+            util::now(),
+        )
+        .unwrap();
+        queue::save(&f.queue, &mut state).unwrap();
+        task_env::instance::initialize_prepared(&mut env).unwrap();
+        crate::progress::environment::checkpoint(
+            &mut state,
+            &binding,
+            &env,
+            "creating",
+            util::now(),
+        )
+        .unwrap();
+        queue::save(&f.queue, &mut state).unwrap();
+        drop(_queue);
         let intent = env.creation.as_ref().unwrap().clone();
         // No checkout or Git registration was ever created. Verify the optional
         // pre-add snapshot branch and refuse an unexpected Git pointer as well.

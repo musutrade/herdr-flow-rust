@@ -15,6 +15,7 @@ struct NoticeText<'a> {
 pub mod cleanup_preflight;
 pub mod cli;
 pub mod command;
+mod control;
 pub mod finalization;
 pub mod isolation;
 
@@ -2936,15 +2937,32 @@ fn task_environment(root: &Path, s: &mut J, spec: &J, now: f64) -> Result<()> {
     let lease = isolation::creation_permit(root, s, spec, &binding)?;
     let mut env = environment_handle(root, s, spec, &binding, lease)?;
     checkpoint_environment(root, s, &binding, &env, now)?;
+    initialize_environment(root, s, &binding, &mut env)?;
     instance::materialize_instance(&mut env)?;
     instance::verify_instance(&env, &binding, &env.instance_id)?;
     progress::environment::checkpoint(s, &binding, &env, "active", util::now())?;
     save(root, s)
 }
 
+fn initialize_environment(
+    root: &Path,
+    s: &mut J,
+    binding: &crate::task_env::instance::InstanceBinding,
+    env: &mut crate::task_env::TaskEnvironment,
+) -> Result<()> {
+    if crate::task_env::isolation::owner(env).is_none() {
+        return Ok(());
+    }
+    if !s["tasks"][&binding.task_id]["environment"]["bootstrap"].is_null() {
+        return Ok(());
+    }
+    crate::task_env::instance::initialize_prepared(env)?;
+    checkpoint_environment(root, s, binding, env, util::now())
+}
+
 fn environment_handle(
     root: &Path,
-    s: &J,
+    s: &mut J,
     spec: &J,
     binding: &crate::task_env::instance::InstanceBinding,
     lease: Option<std::sync::Arc<crate::lifecycle::Permit>>,
@@ -2960,7 +2978,7 @@ fn environment_handle(
 
 fn begin_task_environment(
     root: &Path,
-    s: &J,
+    s: &mut J,
     spec: &J,
     binding: &crate::task_env::instance::InstanceBinding,
     lease: Option<std::sync::Arc<crate::lifecycle::Permit>>,
@@ -2974,7 +2992,8 @@ fn begin_task_environment(
     require_environment_candidate(&s["tasks"][&binding.task_id], &creation.commit)?;
     if let Some(lease) = lease {
         isolation::git_owner_candidate(&s["tasks"][&binding.task_id], &creation.commit)?;
-        return crate::task_env::instance::begin_isolated(binding, &creation, root, lease);
+        control::ensure(root, s, &creation)?;
+        return crate::task_env::instance::prepare_isolated(binding, &creation, root, lease);
     }
     crate::task_env::instance::begin_instance(binding, &creation)
 }

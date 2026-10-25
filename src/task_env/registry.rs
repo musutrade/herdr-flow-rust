@@ -138,9 +138,22 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 
 /// Root directory that holds environment state and cleanup plans.
 pub fn state_root() -> Result<PathBuf> {
-    let root = configured_root()?;
+    let root = control_path()?;
+    if let Some(queue) = managed_queue(&root) {
+        super::instance::allocation::verify_control_current(&queue)?;
+        return Ok(root);
+    }
     ensure_private_dir(&root)?;
     Ok(util::resolve_path(&root))
+}
+
+/// A fixed queue-owned control path never falls back to lazy legacy creation,
+/// even when its directory, marker or queue binding has disappeared.
+fn managed_queue(root: &Path) -> Option<PathBuf> {
+    let parent = root.parent()?;
+    (root.file_name()? == "task-environments" && parent.file_name()? == "queue.json")
+        .then(|| parent.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 /// Resolve configuration without inspecting, creating or canonicalizing paths.
@@ -175,6 +188,10 @@ fn subdir(name: &str) -> Result<PathBuf> {
     let root = state_root()?;
     let base = super::isolation::data_root(&root)?;
     let dir = base.join(name);
+    if managed_queue(&root).is_some() {
+        util::fs::secure::directory(&dir, false)?;
+        return Ok(dir);
+    }
     ensure_private_dir(&dir)?;
     if base != root && name != "locks" {
         crate::util::protected::namespace(&dir)?;

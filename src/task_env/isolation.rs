@@ -1,10 +1,9 @@
 //! Fresh control namespace and local operation permits for lifecycle instances.
-use super::{registry, TaskEnvironment};
+use super::TaskEnvironment;
 use crate::{
     lifecycle::{Owner, Permit},
     util, FlowError, Result,
 };
-use serde_json::json;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -24,36 +23,6 @@ pub(super) fn data_root(root: &Path) -> Result<PathBuf> {
         }
         Ok(root.to_path_buf())
     }
-}
-pub(super) fn enable(queue: &Path, id: &str) -> Result<()> {
-    let root = registry::state_root()?;
-    let _lock = registry::lock_registry()?;
-    let doc = root.join("registry.json");
-    initialize_control(&root, &doc, queue, id)?;
-    let binding = util::read_state_json(&doc, "queue-binding.json")?;
-    if binding != json!({"queue_root":queue,"queue_id":id}) {
-        return Err(FlowError::guard(
-            "environment registry belongs to another queue",
-        ));
-    }
-    Ok(())
-}
-fn initialize_control(root: &Path, doc: &Path, queue: &Path, id: &str) -> Result<()> {
-    if !util::protected::is_document(doc)? {
-        if std::fs::read_dir(root)?.any(|e| e.map_or(true, |e| e.file_name() != "registry.lock")) {
-            return Err(FlowError::guard(
-                "isolated environment control must be empty; no migration",
-            ));
-        }
-        util::protected::create(doc)?;
-        util::protected::namespace(doc)?;
-        util::atomic_write_json(doc, &json!({"entries":{}}))?;
-        util::atomic_write_json(
-            &doc.join("queue-binding.json"),
-            &json!({"queue_root":queue,"queue_id":id}),
-        )?;
-    }
-    Ok(())
 }
 
 pub fn owner(env: &TaskEnvironment) -> Option<Owner> {
@@ -122,7 +91,7 @@ pub fn restore_for_terminal(owner: &Owner, permit: &Permit) -> Result<TaskEnviro
             "terminal restore requires exact exclusive permit",
         ));
     }
-    let env = super::restore_environment(&owner.task_id)?;
+    let env = super::instance::allocation::restore(owner, permit)?;
     if self::owner(&env).as_ref() != Some(owner) {
         return Err(FlowError::guard("terminal environment owner changed"));
     }

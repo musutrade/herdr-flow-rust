@@ -106,17 +106,69 @@ pub fn checkpoint(
     now: f64,
 ) -> Result<()> {
     mapping(s, binding, env)?;
+    let previous = s["tasks"][&binding.task_id]["environment"].clone();
+    let mut record = json!({"queue_id":binding.queue_id,"task_id":binding.task_id,
+        "epoch":binding.epoch,"instance_id":env.instance_id,"state_file":env.state_file(),
+        "checkout":env.workspace_root.join("checkout"),"phase":phase});
+    checkpoint_seed(&mut record, &previous, env, phase)?;
     let t = &mut s["tasks"][&binding.task_id];
     let version = t["state_version"]
         .as_u64()
         .and_then(|n| n.checked_add(1))
         .ok_or_else(|| super::progress_error("invalid task state_version"))?;
-    t["environment"] = json!({"queue_id":binding.queue_id,"task_id":binding.task_id,
-        "epoch":binding.epoch,"instance_id":env.instance_id,"state_file":env.state_file(),
-        "checkout":env.workspace_root.join("checkout"),"phase":phase});
+    t["environment"] = record;
     t["state_version"] = json!(version);
     t["updated_at"] = json!(now);
     Ok(())
+}
+
+fn checkpoint_seed(record: &mut J, previous: &J, env: &TaskEnvironment, phase: &str) -> Result<()> {
+    if crate::task_env::isolation::owner(env).is_none() {
+        return Ok(());
+    }
+    let image = serde_json::to_value(env)?;
+    let seed = previous
+        .get("creation_seed")
+        .filter(|value| !value.is_null());
+    record["creation_seed"] = match seed {
+        Some(seed) => seed.clone(),
+        None => initial_seed(previous, &image, phase)?,
+    };
+    checkpoint_envelope(record, previous, &image, phase)
+}
+
+fn checkpoint_envelope(record: &mut J, previous: &J, image: &J, phase: &str) -> Result<()> {
+    let envelope = image["creation"]["allocation"]["envelope"].clone();
+    ensure(
+        previous["bootstrap"].is_null() || previous["bootstrap"] == envelope,
+        "environment bootstrap identity changed",
+    )?;
+    ensure(
+        phase != "active" || !envelope.is_null(),
+        "active environment has no bootstrap identity",
+    )?;
+    record["bootstrap"] = envelope;
+    Ok(())
+}
+
+fn initial_seed(previous: &J, image: &J, phase: &str) -> Result<J> {
+    ensure(
+        previous.is_null(),
+        "isolated environment lost its creation seed",
+    )?;
+    ensure(
+        phase == "creating",
+        "creation seed requires creating checkpoint",
+    )?;
+    ensure(
+        !image["creation"]["allocation"].is_null(),
+        "creation seed has no allocation reservation",
+    )?;
+    ensure(
+        image["creation"]["allocation"]["envelope"].is_null(),
+        "creation seed must precede envelope creation",
+    )?;
+    Ok(image.clone())
 }
 
 /// Local tuple check for instance-owned native creation/recovery, not a closing barrier.

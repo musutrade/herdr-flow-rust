@@ -87,6 +87,7 @@ pub(super) fn intent(binding: &InstanceBinding, spec: &CreateSpec) -> Result<Cre
     )?;
     validate_new_roots(spec, &common_dir)?;
     Ok(CreationIntent {
+        allocation: None,
         binding: binding.clone(),
         process_boundary: Some(super::ProcessBoundary::capture()?),
         lifecycle_queue: None,

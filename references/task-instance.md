@@ -1,13 +1,14 @@
-# Queue-bound task creation (PR1)
+# Queue-bound task creation and isolated allocation
 
 This is the first slice of [Issue #130](https://github.com/musutrade/herdr-flow-rust/issues/130).
 A task is the lifecycle unit: its eventual final success **or** final failure
 must trigger unified teardown. An intermediate command, test or CI failure is
 not final failure. This slice establishes creation ownership; it does not yet
 connect terminal outcomes, isolate all old writers or enable automatic teardown.
-The opt-in [PR2 lifecycle barrier](task-lifecycle.md) is a separate fresh authority
-mode; PR3/PR4 remain required before production teardown. These creation tests
-are not deployment promises.
+The opt-in [lifecycle barrier and finalizer](task-lifecycle.md) use a separate
+fresh authority mode. The allocation protocol below applies only to fresh
+format-3 isolated instances; legacy PR1 behavior is unchanged. These creation
+tests are not deployment promises.
 
 ## One authority and existing machinery
 
@@ -68,18 +69,79 @@ The existing `task-env create` entry does not silently upgrade them.
 
 ## Checkpoints and recovery
 
-The lock order is queue → nonblocking task-environment lock → registry. Library
-callers of `queue::task_action` retain the existing queue-lock requirement.
-Creation uses existing atomic document saves, not a new database or scheduler:
+Isolated creation takes the queue lock, then nonblocking prospective lifecycle
+EX, the existing nonblocking environment lock and the registry lock. Library callers of
+`queue::task_action` retain its queue-lock requirement; the high-level entry owns
+that transaction. No model or Herdr process starts during allocation.
 
-1. Persist the immutable environment intent and reserve its roots/slot.
-2. Save the queue mapping as `creating` before any Git work.
-3. Create roots and checkout, persisting each object identity separately.
-4. Save `git_pending`, add the detached worktree without checkout, then record
-   its exact Git identities. A successful add with a lost response is inspected,
-   not blindly repeated or replaced.
-5. Populate only missing files, validate the clean initial checkout, then save
-   the environment as `active` and checkpoint the queue as `active`.
+### Fresh isolated allocation protocol
+
+The trust root is an **already successfully initialized protected queue authority**.
+This protocol does not repair an interrupted first `queue init-isolated`. Explicitly
+configure `HERDR_TASK_ENV_ROOT` as `QUEUE/queue.json/task-environments`; an external
+first control directory is unsupported. The fixed `queue.json/task-environments`
+shape is reserved for managed control; a legacy directory using that shape is
+also refused. No existing registry or previous authority
+format is adopted or migrated, and configuration is never silently redirected.
+
+1. Before any task directory is created, check that each requested target is absent
+   and its existing trusted parent can receive an atomic move from this allocator.
+   Compare device and mount IDs as well as the mount namespace. The first fixed
+   `task-environments` child must be absent, including when an unknown empty
+   directory is already there.
+2. Save `lifecycle.control_bootstrap.reservation` in the existing queue authority:
+   queue identity, the authority parent inode/mount and its fixed child name. Only
+   then initialize that child, registry and env/plan/lock namespaces. This durable
+   parent reservation owns the entire internal bootstrap subtree before its first
+   `mkdirat`; it does not rely on a marker written afterwards. Sync the created
+   directories and parents, then checkpoint their exact identities as `ready` in
+   the queue. A missing/replaced ready control is an error, never a reinitialization.
+3. Generate one instance and immutable `environment.creation_seed` in memory,
+   including Owner, initial environment image, managed envs parent inode/mount,
+   fixed per-task document slot and target-parent proofs. Save this seed in the
+   queue as `creating` **before** creating its control document or task lock.
+   Initialize only this reserved document slot. Sync its exact initial image and
+   envelope; checkpoint `environment.bootstrap` with the envelope inode/mount.
+   Partial initial bytes must be an exact prefix of that image. I/O errors are
+   errors. Once bootstrap is known, the seed cannot recreate a missing or replaced
+   document, including after the instance becomes active.
+4. For workspace, temporary root and checkout separately, persist a fixed-slot
+   transfer intent inside the task envelope. `mkdirat` the empty private slot,
+   sync slot and envelope, then persist the slot inode. Use descriptor-anchored
+   `renameat2(RENAME_NOREPLACE)` to its absent target. Sync **both** source and
+   target parents, recheck parent/target identities, then persist the published
+   root identity and clear the transfer record. A successful syscall alone is
+   not the publication checkpoint.
+5. Save `git_pending`, add the detached worktree without checkout, then record
+   its exact Git identities. Inspect a successful add with a lost response instead
+   of repeating it. Populate only missing files, validate the initial checkout,
+   and save active environment and queue checkpoints.
+
+An interrupted transfer resumes only when the expected inode is still in its slot
+and the target is absent, or the slot is absent and that inode is at the target.
+Both present, replacement, symlink, mount change or unexplained disappearance
+refuse recovery. Terminal failure uses the same allocation intent: discard an
+unpublished owned empty slot, or finish the known handoff's two-parent sync and
+identity check before freezing cleanup. It never materializes business roots just
+to delete them. Allocation scratch and the per-task control envelope disappear
+through the existing finalizer, with the task's other temporary registrations.
+The shared control skeleton remains queue infrastructure, not a task evidence archive.
+
+Each **individual transfer** requires one mount. This does not require every
+project or queue on one disk: each queue can use a managed allocator on its own
+mount. This first implementation rejects a request when its targets cannot use
+that allocator, before business resources are created. Even equal devices do not
+prove equal mounts. `EXDEV`, `EOPNOTSUPP` or `ENOSYS` never trigger copy/delete or
+direct-target-mkdir fallback; the original intent remains recoverable for cleanup.
+Existing cross-mount cleanup protections remain in force.
+
+The reserved private namespace grants ownership of its internal allocation
+subtree. It does not claim to distinguish arbitrary same-UID replacement of an
+as-yet-unfingerprinted empty slot from the original empty slot: those histories
+have no distinguishable persistent identity. Unknown **user targets** never gain
+ownership from a path, random slot name, marker or xattr. Known control and slot
+identities must match exactly. This is a supported-writer protocol, not a general
+sandbox against a same-UID actor modifying the authority itself.
 
 An external-command failure or uncertain save retains the intent. Use the
 current task version and exact observed instance to resume:
@@ -95,25 +157,27 @@ current task version and exact observed instance to resume:
 }
 ```
 
-Resume cannot change the source, roots or commit. It can complete an intent
-whose first queue save failed, reconcile the same successful Git add, or finish
+Resume cannot change the source, roots or commit. In isolated mode it requires
+the exact durable queue seed; no instance is created before that checkpoint.
+It can complete its bootstrap, reconcile the same successful Git add, or finish
 the active queue checkpoint after a lost reply. Repeated create is refused.
 Already-active verification permits subsequent task commits while requiring the
 same directory/Git objects. Replacement roots, symlinks, foreign Git links,
 changed queue mappings or durable instance documents fail closed.
 
-There remains a precise uncertainty window between creating a directory and
-persisting its inode. If a directory exists without a recorded identity, PR1
-retains it and reports an unresolved creation; it neither adopts nor deletes it.
-Likewise, partial Git administration that cannot be matched is retained. These
-are explicit recovery failures, not proof of release and not requests for a user
-to approve deletion. The PR4 combinations in [task lifecycle](task-lifecycle.md)
-cover recorded identities and actual Git reply loss; they do not close the
-mkdir-before-inode-checkpoint window. Issue #130's requirement for recovery at
-every creation boundary therefore remains incomplete, even when these fixtures
-and their CI pass. This is not deployment or total lifecycle acceptance.
-Private-directory checks and exact identities do not constitute global exclusion
-of arbitrary same-UID writers; the all-writer barrier is PR2.
+Legacy PR1 instances still have a mkdir-before-inode uncertainty window and
+remain outside this fresh protocol. They are never migrated or retroactively
+claimed. Partial Git administration that cannot be matched is also retained as
+an explicit recovery error, not proof of release or an invitation for manual
+approval to delete it.
+
+The isolated allocation fixtures kill a real supervisor at control bootstrap,
+initial payload writes, slot creation, inode persistence and transfer/sync
+boundaries. They resume the same instance or commit final failure, then assert
+root/Git/control/registry/plan/gate cleanup **before** fixture destruction.
+Replacement and separate-mount refusals preserve foreign objects. These establish
+process-crash behavior; filesystem cache loss, power failure, actual Agent/Herdr
+integration and the full acceptance campaign remain separate unverified layers.
 
 ## Boundaries and retention
 
@@ -125,8 +189,9 @@ it does not build another runtime or depend on upstream Herdr changes.
 New queue-bound instances cannot use legacy destroy/recover as an accidental
 finalizer. `task-env status` reports `queue_instance_resume_only`; no final
 outcome is invented. Legacy confirmed-delivery behavior is unchanged. These
-local refusals are **not** an old-binary writer barrier: do not deploy this slice
-or create production instances before the subsequent reviewed lifecycle slices.
+legacy local refusals alone are **not** an old-binary writer barrier. Fresh
+isolated mode uses the protected authority described in [task lifecycle](task-lifecycle.md);
+production deployment and complete real-task acceptance remain separate.
 No existing production workspace is adopted or deleted.
 
 Creation journals and queue associations are task-temporary recovery data, not
@@ -136,5 +201,5 @@ targets may survive the task. See [task progress](task-progress.md),
 [task runtime](task-runtime.md) and [delivery](delivery.md).
 
 Tests use isolated Git repositories, fixture queues and a non-model child
-process. They prove those local boundaries, not real Agent/Herdr integration,
-terminal shutdown, final-outcome teardown or the 20-task acceptance campaign.
+process. They prove those local boundaries and fixture final-outcome teardown, not real
+Agent/Herdr integration, real terminal shutdown or the 20-task acceptance campaign.

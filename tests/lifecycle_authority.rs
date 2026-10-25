@@ -1,5 +1,5 @@
 //! Instance admission and crash checkpoints over isolated Git/queue fixtures.
-use herdr_flow::{guard, lifecycle, model::J, queue, task_env, task_runtime, util};
+use herdr_flow::{guard, lifecycle, model::J, progress, queue, task_env, task_runtime, util};
 use serde_json::json;
 use std::{
     fs,
@@ -29,7 +29,10 @@ impl Fixture {
             .tempdir()
             .unwrap();
         let old_root = std::env::var_os("HERDR_TASK_ENV_ROOT");
-        std::env::set_var("HERDR_TASK_ENV_ROOT", temp.path().join("control"));
+        std::env::set_var(
+            "HERDR_TASK_ENV_ROOT",
+            temp.path().join("queue/queue.json/task-environments"),
+        );
         let repo = temp.path().join("repo");
         fs::create_dir(&repo).unwrap();
         fs::set_permissions(&repo, fs::Permissions::from_mode(0o700)).unwrap();
@@ -96,6 +99,85 @@ impl Fixture {
             Some(SESSION),
             &factory,
         )
+    }
+
+    fn control_ready(&self) {
+        let mut s = self.state();
+        s["tasks"]["bootstrap-helper"] = json!({"task":"bootstrap-helper","epoch":1,"state_version":1,
+            "candidate":self.commit,"phase":"waiting","control":"running","writer":null,"pending":[],"operations":{}});
+        {
+            let _queue = queue::locked(&self.queue, false).unwrap();
+            queue::save(&self.queue, &mut s).unwrap();
+        }
+        self.call(&json!({"action":"create","task":"bootstrap-helper","queue_id":s["id"],"epoch":1,"state_version":1,
+            "environment":{"workspace_root":self.temp.path().join("bootstrap-work"),"temp_root":self.temp.path().join("bootstrap-temp"),
+            "delivery_targets":[],"repository":self.temp.path().join("repo"),"commit":self.commit}})).unwrap();
+        let s = self.state();
+        let owner = lifecycle::task_owner(&s, "bootstrap-helper")
+            .unwrap()
+            .unwrap();
+        queue::finalization::task_action(&self.queue, "task-finalize", &json!({"task":owner.task_id,"queue_id":owner.queue_id,
+            "epoch":owner.epoch,"instance_id":owner.instance_id,"state_version":s["tasks"]["bootstrap-helper"]["state_version"],
+            "outcome":"failure","reason":"bootstrap fixture complete"}), Some(SESSION), &|_| panic!("no model")).unwrap();
+        assert!(self.state()["tasks"]["bootstrap-helper"].is_null());
+        assert!(!self.temp.path().join("bootstrap-work").exists());
+        assert!(!self.temp.path().join("bootstrap-temp").exists());
+        assert!(!task_env::is_registered("bootstrap-helper").unwrap());
+        assert!(!task_env::environment_state_path("bootstrap-helper")
+            .unwrap()
+            .exists());
+        assert!(!task_env::cleanup_state_path("bootstrap-helper")
+            .unwrap()
+            .exists());
+        assert!(!queue::artifacts(&self.queue)
+            .unwrap()
+            .join("gates/bootstrap-helper.lock")
+            .exists());
+        assert!(!git(
+            &self.temp.path().join("repo"),
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains("bootstrap-work/checkout"));
+    }
+
+    fn seed(&self) -> task_env::TaskEnvironment {
+        self.control_ready();
+        let mut s = self.state();
+        let binding = task_env::instance::InstanceBinding {
+            queue_id: s["id"].as_str().unwrap().into(),
+            task_id: "task".into(),
+            epoch: 1,
+        };
+        let owner = lifecycle::Owner {
+            queue_root: self.queue.clone(),
+            queue_id: binding.queue_id.clone(),
+            task_id: "task".into(),
+            epoch: 1,
+            instance_id: String::new(),
+        };
+        let _queue = queue::locked(&self.queue, false).unwrap();
+        let lease = std::sync::Arc::new(lifecycle::acquire(&owner, true).unwrap());
+        let env = task_env::instance::prepare_isolated(
+            &binding,
+            &serde_json::from_value(self.create_spec()["environment"].clone()).unwrap(),
+            &self.queue,
+            lease,
+        )
+        .unwrap();
+        assert!(!env.state_file().exists());
+        progress::environment::checkpoint(&mut s, &binding, &env, "creating", util::now()).unwrap();
+        queue::save(&self.queue, &mut s).unwrap();
+        env
+    }
+
+    fn initialize_seed(&self, env: &mut task_env::TaskEnvironment) {
+        let _queue = queue::locked(&self.queue, false).unwrap();
+        task_env::instance::initialize_prepared(env).unwrap();
+        let binding = env.creation.as_ref().unwrap().binding.clone();
+        let mut s = self.state();
+        progress::environment::checkpoint(&mut s, &binding, env, "creating", util::now()).unwrap();
+        queue::save(&self.queue, &mut s).unwrap();
+        assert!(!s["tasks"]["task"]["environment"]["bootstrap"].is_null());
     }
 }
 
@@ -294,27 +376,8 @@ fn missing_authority_is_not_recreated_by_acquire_or_stale_handle() {
 #[test]
 fn failed_creation_can_record_terminal_without_adopting_unknown_directory() {
     let f = Fixture::new();
-    let spec = f.create_spec();
-    let state = f.state();
-    let binding = task_env::instance::InstanceBinding {
-        queue_id: state["id"].as_str().unwrap().into(),
-        task_id: "task".into(),
-        epoch: 1,
-    };
-    let create = serde_json::from_value(spec["environment"].clone()).unwrap();
-    let owner = lifecycle::Owner {
-        queue_root: f.queue.clone(),
-        queue_id: binding.queue_id.clone(),
-        task_id: "task".into(),
-        epoch: 1,
-        instance_id: String::new(),
-    };
-    let permit = std::sync::Arc::new(lifecycle::acquire(&owner, true).unwrap());
-    let mut env = task_env::instance::begin_isolated(&binding, &create, &f.queue, permit).unwrap();
-    let mut state = f.state();
-    state["tasks"]["task"]["environment"] = json!({"queue_id":binding.queue_id,"task_id":"task","epoch":1,"instance_id":env.instance_id,
-        "phase":"creating","state_file":env.state_file(),"checkout":env.workspace_root.join("checkout")});
-    queue::save(&f.queue, &mut state).unwrap();
+    let mut env = f.seed();
+    f.initialize_seed(&mut env);
     fs::create_dir(&env.workspace_root).unwrap();
     assert!(task_env::instance::materialize_instance(&mut env).is_err());
     drop(env);
@@ -439,33 +502,23 @@ fn independent_ci_watcher_cannot_be_mistaken_for_managed_observer() {
 }
 
 #[test]
-fn isolated_resume_recovers_exact_intent_before_queue_checkpoint_and_ready() {
+fn isolated_resume_recovers_exact_seed_before_envdoc_and_ready() {
     let f = Fixture::new();
-    let spec = f.create_spec();
-    let binding = task_env::instance::InstanceBinding {
-        queue_id: f.state()["id"].as_str().unwrap().to_string(),
-        task_id: "task".into(),
-        epoch: 1,
-    };
-    let prospective = lifecycle::Owner {
-        queue_root: f.queue.clone(),
-        queue_id: binding.queue_id.clone(),
-        task_id: "task".into(),
-        epoch: 1,
-        instance_id: String::new(),
-    };
-    let lease = std::sync::Arc::new(lifecycle::acquire(&prospective, true).unwrap());
-    let env = task_env::instance::begin_isolated(
-        &binding,
-        &serde_json::from_value(spec["environment"].clone()).unwrap(),
-        &f.queue,
-        lease,
-    )
-    .unwrap();
+    let env = f.seed();
+    let binding = env.creation.as_ref().unwrap().binding.clone();
     let id = env.instance_id.clone();
+    assert!(!env.state_file().exists());
+    assert_eq!(
+        f.state()["tasks"]["task"]["environment"]["creation_seed"],
+        json!(env)
+    );
+    assert!(f.state()["tasks"]["task"]["environment"]["bootstrap"].is_null());
     drop(env);
-    assert!(f.state()["tasks"]["task"]["environment"].is_null());
-    assert!(f.call(&spec).is_err());
+    let error = f.call(&f.create_spec()).unwrap_err();
+    assert!(
+        error.to_string().contains("environment already bound"),
+        "{error}"
+    );
     let resume = json!({"action":"resume","task":"task","queue_id":binding.queue_id,"epoch":1,
         "instance_id":id,"state_version":f.state()["tasks"]["task"]["state_version"]});
     let active = f.call(&resume).unwrap();

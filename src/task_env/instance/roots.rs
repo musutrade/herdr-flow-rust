@@ -42,6 +42,9 @@ fn recorded(path: &Path, expected: Option<RootIdentity>) -> Result<()> {
 }
 
 pub(super) fn verify_recorded(env: &TaskEnvironment) -> Result<()> {
+    if intent(env)?.allocation.is_some() {
+        return super::allocation::verify_recorded(env);
+    }
     for (path, expected) in env.roots() {
         recorded(&path, expected)?;
     }
@@ -60,6 +63,9 @@ fn create(path: &Path) -> Result<RootIdentity> {
 }
 
 pub(super) fn materialize(env: &mut TaskEnvironment) -> Result<()> {
+    if intent(env)?.allocation.is_some() {
+        return super::allocation::materialize(env);
+    }
     verify_recorded(env)?;
     workspace(env)?;
     temporary(env)?;

@@ -42,7 +42,10 @@ impl Fixture {
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
         .collect();
-        std::env::set_var("HERDR_TASK_ENV_ROOT", temp.path().join("control"));
+        std::env::set_var(
+            "HERDR_TASK_ENV_ROOT",
+            temp.path().join("queue/queue.json/task-environments"),
+        );
         std::env::set_var("CODEX_THREAD_ID", SESSION);
         let repo = temp.path().join("repo");
         private(&repo);

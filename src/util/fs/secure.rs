@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{FlowError, Result};
 
-pub(in crate::util) fn directory(path: &Path, create: bool) -> Result<File> {
+pub(crate) fn directory(path: &Path, create: bool) -> Result<File> {
     let path = std::env::current_dir()?.join(path);
     let mut directory = File::open("/")?;
     for component in path.components() {

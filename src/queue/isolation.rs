@@ -215,6 +215,17 @@ fn validate_task_save(old: &J, next: &J) -> Result<()> {
     }
     let a = &old["environment"];
     let b = &next["environment"];
+    validate_environment_identity(a, b)?;
+    validate_bootstrap_checkpoint(a, b)?;
+    if old["epoch"] != next["epoch"]
+        || old["lineage"]["requirement"] != next["lineage"]["requirement"]
+    {
+        return Err(queue_error("bound lifecycle ownership cannot be replaced"));
+    }
+    Ok(())
+}
+
+fn validate_environment_identity(a: &J, b: &J) -> Result<()> {
     for key in [
         "queue_id",
         "task_id",
@@ -222,6 +233,7 @@ fn validate_task_save(old: &J, next: &J) -> Result<()> {
         "instance_id",
         "state_file",
         "checkout",
+        "creation_seed",
     ] {
         if a[key] != b[key] {
             return Err(queue_error(
@@ -229,10 +241,31 @@ fn validate_task_save(old: &J, next: &J) -> Result<()> {
             ));
         }
     }
-    if old["epoch"] != next["epoch"]
-        || old["lineage"]["requirement"] != next["lineage"]["requirement"]
-    {
-        return Err(queue_error("bound lifecycle ownership cannot be replaced"));
+    Ok(())
+}
+
+fn validate_bootstrap_checkpoint(a: &J, b: &J) -> Result<()> {
+    if !a["bootstrap"].is_null() {
+        if a["bootstrap"] != b["bootstrap"] {
+            return Err(queue_error(
+                "initialized environment bootstrap cannot be replaced or removed",
+            ));
+        }
+        return Ok(());
+    }
+    if b["bootstrap"].is_null() {
+        return Ok(());
+    }
+    let mut allocation = a["creation_seed"]["creation"]["allocation"].clone();
+    if !allocation.is_object() {
+        return Err(queue_error("environment bootstrap has no allocation seed"));
+    }
+    allocation["envelope"] = b["bootstrap"].clone();
+    let _: crate::task_env::instance::allocation::Allocation = serde_json::from_value(allocation)?;
+    if b["bootstrap"]["path"] != b["state_file"] {
+        return Err(queue_error(
+            "environment bootstrap path differs from its reserved document",
+        ));
     }
     Ok(())
 }
