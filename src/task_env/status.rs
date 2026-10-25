@@ -109,10 +109,24 @@ fn validate_keys(snapshot: &read::Snapshot) -> Result<()> {
 fn validate_env(root: &Path, task: &str, value: &Value, registry: &Registry) -> Result<()> {
     let env: TaskEnvironment = serde_json::from_value(value.clone())?;
     validate_environment_identity(root, task, &env)?;
+    validate_creation(&env)?;
     let roots = vec![env.workspace_root.clone(), env.temp_root.clone()];
     boundary::roots(root, &roots)?;
     boundary::targets(&roots, &env.delivery_targets)?;
     validate_environment_binding(task, &env, registry)
+}
+
+fn validate_creation(env: &TaskEnvironment) -> Result<()> {
+    if let Some(intent) = &env.creation {
+        require(
+            intent.binding.task_id == env.task_id
+                && intent.binding.epoch > 0
+                && !intent.binding.queue_id.is_empty()
+                && intent.checkout == env.workspace_root.join("checkout"),
+            "invalid instance creation binding",
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_environment_identity(root: &Path, task: &str, env: &TaskEnvironment) -> Result<()> {
@@ -217,7 +231,8 @@ fn describe(task: &str, snapshot: &read::Snapshot, registry: &Registry) -> Resul
         json!({"state":state,"instance_id":env.or(plan).map(|v| &v["instance_id"]),
         "registered":registry.contains(task),"registry":if snapshot.registry.is_some(){"present"}else{"absent"},
         "environment":env,"plan":plan,"interrupted":interrupted,
-        "recovery":if interrupted {"would_destroy"} else {"no_op"},
+        "recovery":if env.is_some_and(|v| v["creation"].is_object()) {"queue_instance_resume_only"}
+            else if interrupted {"would_destroy"} else {"no_op"},
         "occupied_slots":snapshot.envs.len()+snapshot.plans.len(),"errors":[]}),
     )
 }

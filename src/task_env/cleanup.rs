@@ -247,11 +247,13 @@ fn plan_exists(task_id: &str) -> bool {
 /// Already exited signal targets are idempotently complete. This function may
 /// stop/kill owned processes before a later cleanup error; it is not a rollback.
 pub fn destroy(env: &TaskEnvironment) -> Result<()> {
+    reject_queue_instance(env)?;
     registry::validate_task_id(&env.task_id)?;
     let transient_lock = acquire_destroy_lock(env)?;
     let state_file = registry::environment_state_path(&env.task_id)?;
     let mut document = load_document(&state_file)?;
     ensure_document_instance(&document, &env.instance_id)?;
+    reject_queue_document(&document)?;
     let Some(mut state) = load_or_build_plan(env, &document)? else {
         registry::finish_cleanup(&env.task_id)?;
         env.release_ownership();
@@ -264,6 +266,22 @@ pub fn destroy(env: &TaskEnvironment) -> Result<()> {
     drop(transient_lock);
     result
 }
+fn reject_queue_document(document: &Option<TaskEnvironment>) -> Result<()> {
+    if let Some(doc) = document {
+        reject_queue_instance(doc)?;
+    }
+    Ok(())
+}
+
+fn reject_queue_instance(env: &TaskEnvironment) -> Result<()> {
+    if env.creation.is_some() {
+        return Err(FlowError::progress(
+            "queue-bound instance final cleanup is not enabled",
+        ));
+    }
+    Ok(())
+}
+
 fn destroy_plan(
     env: &TaskEnvironment,
     document: &mut Option<TaskEnvironment>,
@@ -378,6 +396,8 @@ fn resume_cleanup(task_id: &str, require_delivery: bool) -> Result<()> {
         ))
     })?;
 
+    let document = load_document(&registry::environment_state_path(task_id)?)?;
+    reject_queue_document(&document)?;
     let mut state = load_plan(task_id)?;
     validate_retry(&state, require_delivery)?;
     resume_plan(task_id, &mut state)

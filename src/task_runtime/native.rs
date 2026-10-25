@@ -69,19 +69,31 @@ pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
 fn creation_journal(env: &TaskEnvironment, runtime: &J, q: &J, spec: &J) -> Result<J> {
     let wait_id = required(spec, "wait")?;
     let wait = &q["waits"][&wait_id];
+    let input = creation_input(env, runtime, q, wait, spec)?;
+    let digest = util::pyjson::sha256_hex(serde_json::to_string(&input)?.as_bytes());
+    let mut journal = json!({"phase":"creating","instance":env.instance_id,"runtime":runtime,
+        "queue_dir":spec["queue_dir"],"queue_id":q["id"],"wait":wait_id,"packet":input,"packet_sha256":digest});
+    if let Some(owner) = crate::task_env::instance::owner(env) {
+        journal["owner"] = owner;
+    }
+    Ok(journal)
+}
+
+fn creation_input(env: &TaskEnvironment, runtime: &J, q: &J, wait: &J, spec: &J) -> Result<J> {
     ensure(
         identity::producer(wait)?.is_none(),
         "fresh activity already has a producer",
     )?;
     let input = make_packet(q, wait, spec)?;
-    verify_snapshot(runtime, &input["binding"])?;
-    verify_acceptance_workspace(q, runtime, &input["binding"])?;
-    fresh_report_path(runtime, &input["binding"])?;
-    let digest = util::pyjson::sha256_hex(serde_json::to_string(&input)?.as_bytes());
-    Ok(
-        json!({"phase":"creating","instance":env.instance_id,"runtime":runtime,
-        "queue_dir":spec["queue_dir"],"queue_id":q["id"],"wait":wait_id,"packet":input,"packet_sha256":digest}),
-    )
+    validate_creation_input(env, runtime, q, &input["binding"])?;
+    Ok(input)
+}
+
+fn validate_creation_input(env: &TaskEnvironment, runtime: &J, q: &J, binding: &J) -> Result<()> {
+    progress::environment::runtime_owner(q, env, binding)?;
+    verify_snapshot(runtime, binding)?;
+    verify_acceptance_workspace(q, runtime, binding)?;
+    fresh_report_path(runtime, binding)
 }
 
 fn finish_creation(root: &Path, q: &mut J, mut journal: J) -> Result<J> {
@@ -316,6 +328,7 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
+    super::verify_owner_record(env, &journal)?;
     let mut state = recovered_state(root, &journal)?;
     recover_binding(env, root, &journal, &mut state)?;
     Ok(state)
@@ -326,6 +339,7 @@ fn recover_binding(env: &TaskEnvironment, root: &Path, journal: &J, state: &mut 
     crate::task_env::validate_path(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let mut q = queue::load_queue(&queue_root)?;
+    progress::environment::runtime_owner(&q, env, &journal["packet"]["binding"])?;
     verify_queue(&q, journal, state)?;
     bind_created(root, &mut q, journal, state)?;
     refresh_observed_version(root, state)
@@ -368,6 +382,7 @@ fn verify_native(root: &Path, state: &J) -> Result<()> {
 
 fn verify_queue(q: &J, journal: &J, state: &J) -> Result<()> {
     verify_state(journal, state)?;
+    verify_queue_owner(q, journal)?;
     let wait = queue_wait(q, journal)?;
     let task = &q["tasks"][wait["task"].as_str().unwrap_or_default()];
     progress::lineage::ensure_current(q, task)?;
@@ -376,6 +391,52 @@ fn verify_queue(q: &J, journal: &J, state: &J) -> Result<()> {
         "activity is not running",
     )?;
     verify_producer(wait, state)
+}
+
+fn verify_queue_owner(q: &J, journal: &J) -> Result<()> {
+    let owner = &journal["owner"];
+    ensure(
+        owner == &journal["runtime"]["owner"],
+        "native runtime owner tuple changed",
+    )?;
+    if owner.is_null() {
+        return Ok(());
+    }
+    verify_bound_queue_owner(q, journal, owner)
+}
+
+fn verify_bound_queue_owner(q: &J, journal: &J, owner: &J) -> Result<()> {
+    let binding = &owner["binding"];
+    let name = required(binding, "task_id")?;
+    let task = &q["tasks"][&name];
+    let mapping = &task["environment"];
+    let activity = &journal["packet"]["binding"];
+    ensure(
+        current_owner_task(q, task, binding, &name)
+            && current_owner_mapping(mapping, owner)
+            && owner_activity(activity, &name),
+        "native runtime owner is no longer the current task instance",
+    )
+}
+
+fn current_owner_task(q: &J, task: &J, binding: &J, name: &str) -> bool {
+    q["id"] == binding["queue_id"] && task["task"] == name && task["epoch"] == binding["epoch"]
+}
+
+fn current_owner_mapping(mapping: &J, owner: &J) -> bool {
+    mapping_binding(mapping, &owner["binding"])
+        && mapping["instance_id"] == owner["instance_id"]
+        && mapping["phase"] == "active"
+}
+
+fn mapping_binding(mapping: &J, binding: &J) -> bool {
+    mapping["queue_id"] == binding["queue_id"]
+        && mapping["task_id"] == binding["task_id"]
+        && mapping["epoch"] == binding["epoch"]
+}
+
+fn owner_activity(activity: &J, name: &str) -> bool {
+    activity["task"] == name || activity["lineage"]["requirement"] == name
 }
 fn verify_state(journal: &J, state: &J) -> Result<()> {
     ensure(
@@ -442,16 +503,31 @@ fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
 pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let (journal, state) = dispatch_state(root)?;
-    let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
-    let prompt = dispatch_packet(&queue_root, &journal, &state)?;
+    super::verify_owner_record(env, &journal)?;
+    dispatch_record(root, &journal, &state)
+}
+
+fn dispatch_record(root: &Path, journal: &J, state: &J) -> Result<J> {
+    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
+    let prompt = dispatch_packet(&queue_root, journal, state)?;
     if state["adapter"] == "opencode" {
-        return dispatch_opencode(root, &journal, &state);
+        return dispatch_opencode(root, journal, state);
     }
-    let _queue_lock = queue::locked(&queue_root, false)?;
-    let q = queue::load_queue(&queue_root)?;
-    verify_queue(&q, &journal, &state)?;
-    ensure_receiver(&queue_root, &q)?;
-    dispatch_codex(root, &state, &journal, &prompt)
+    dispatch_codex_in_queue(root, &queue_root, journal, state, &prompt)
+}
+
+fn dispatch_codex_in_queue(
+    root: &Path,
+    queue_root: &Path,
+    journal: &J,
+    state: &J,
+    prompt: &str,
+) -> Result<J> {
+    let _queue_lock = queue::locked(queue_root, false)?;
+    let q = queue::load_queue(queue_root)?;
+    verify_queue(&q, journal, state)?;
+    ensure_receiver(queue_root, &q)?;
+    dispatch_codex(root, state, journal, prompt)
 }
 fn dispatch_state(root: &Path) -> Result<(J, J)> {
     let journal = util::read_state_json(root, "creation.json")?;
@@ -548,6 +624,8 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
 
 pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
+    let creation = util::read_state_json(root, "creation.json")?;
+    super::verify_owner_record(env, &creation)?;
     let state = util::read_state_json(root, "state.json")?;
     if state["adapter"] == "opencode" {
         let creation = util::read_state_json(root, "creation.json")?;
@@ -745,6 +823,74 @@ fn healthy_opencode(api: &dyn Api) -> Result<J> {
 
 #[cfg(test)]
 mod tests {
+    fn bound_owner_fixture() -> (super::J, super::J) {
+        let binding = serde_json::json!({"queue_id":"queue","task_id":"task","epoch":7});
+        let owner = serde_json::json!({"binding":binding,"instance_id":"instance"});
+        let queue = serde_json::json!({"id":"queue","tasks":{"task":{"task":"task","epoch":7,
+            "environment":{"queue_id":"queue","task_id":"task","epoch":7,
+                "instance_id":"instance","phase":"active"}}}});
+        let journal = serde_json::json!({"owner":owner,"runtime":{"owner":owner},
+            "packet":{"binding":{"task":"task"}}});
+        (queue, journal)
+    }
+
+    #[test]
+    fn queue_owner_accepts_direct_activity_lineage_and_legacy() {
+        let (q, mut journal) = bound_owner_fixture();
+        super::verify_queue_owner(&q, &journal).unwrap();
+        journal["packet"]["binding"] =
+            serde_json::json!({"task":"review","lineage":{"requirement":"task"}});
+        super::verify_queue_owner(&q, &journal).unwrap();
+        super::verify_queue_owner(&q, &serde_json::json!({})).unwrap();
+    }
+
+    #[test]
+    fn queue_owner_rejects_stale_queue_task_and_mapping() {
+        let (q, journal) = bound_owner_fixture();
+        let mut changed = q.clone();
+        changed["id"] = serde_json::json!("foreign");
+        assert!(super::verify_queue_owner(&changed, &journal).is_err());
+        for (key, value) in [
+            ("task", serde_json::json!("foreign")),
+            ("epoch", serde_json::json!(8)),
+        ] {
+            let mut changed = q.clone();
+            changed["tasks"]["task"][key] = value;
+            assert!(
+                super::verify_queue_owner(&changed, &journal).is_err(),
+                "accepted task {key}"
+            );
+        }
+        for (key, value) in [
+            ("queue_id", serde_json::json!("foreign")),
+            ("task_id", serde_json::json!("foreign")),
+            ("epoch", serde_json::json!(8)),
+            ("instance_id", serde_json::json!("replacement")),
+            ("phase", serde_json::json!("creating")),
+        ] {
+            let mut changed = q.clone();
+            changed["tasks"]["task"]["environment"][key] = value;
+            assert!(
+                super::verify_queue_owner(&changed, &journal).is_err(),
+                "accepted mapping {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_owner_rejects_journal_replacement_and_foreign_activity() {
+        let (q, journal) = bound_owner_fixture();
+        let mut changed = journal.clone();
+        changed["owner"]["instance_id"] = serde_json::json!("replacement");
+        assert!(super::verify_queue_owner(&q, &changed).is_err());
+        let mut changed = journal.clone();
+        changed["owner"]["binding"]["task_id"] = serde_json::Value::Null;
+        changed["runtime"]["owner"] = changed["owner"].clone();
+        assert!(super::verify_queue_owner(&q, &changed).is_err());
+        let mut changed = journal;
+        changed["packet"]["binding"] = serde_json::json!({"task":"foreign"});
+        assert!(super::verify_queue_owner(&q, &changed).is_err());
+    }
     #[test]
     fn dispatch_retries_only_before_the_submission_journal() {
         use crate::error::ErrorKind;

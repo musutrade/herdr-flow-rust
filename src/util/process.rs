@@ -30,6 +30,10 @@ pub struct CommandOptions {
     pub clear_env: bool,
     /// Remove inherited GIT_* variables before applying explicit env entries.
     pub remove_git_env: bool,
+    /// Optional child-only creation mask; does not alter the supervisor.
+    pub creation_mask: Option<u32>,
+    /// Kill the direct child if its spawning supervisor dies (Linux).
+    pub kill_on_parent_death: bool,
     pub stdin: Option<Vec<u8>>,
     /// Execute this already-open file instead of resolving `argv[0]` again.
     pub executable_file: Option<std::sync::Arc<File>>,
@@ -48,6 +52,8 @@ impl Default for CommandOptions {
             env: BTreeMap::new(),
             clear_env: false,
             remove_git_env: false,
+            creation_mask: None,
+            kill_on_parent_death: false,
             stdin: None,
             executable_file: None,
             inherited_files: Vec::new(),
@@ -119,11 +125,40 @@ fn build_command(argv: &[String], options: &CommandOptions) -> Command {
     apply_cwd(&mut command, options.cwd.as_deref());
     apply_env(&mut command, options);
     apply_stdin(&mut command, options.stdin.is_some());
+    child_creation_policy(&mut command, options);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
     command
+}
+
+fn child_creation_policy(command: &mut Command, options: &CommandOptions) {
+    if let Some(mask) = options.creation_mask {
+        // SAFETY: umask is a scalar syscall in the forked child only.
+        unsafe {
+            command.pre_exec(move || {
+                libc::umask(mask);
+                Ok(())
+            });
+        }
+    }
+    if options.kill_on_parent_death {
+        let parent = std::process::id() as i32;
+        // SAFETY: child-only scalar syscalls; capture parent before fork and
+        // reject death/reparenting that raced setting PDEATHSIG.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
 fn executable_command(program: &str, options: &CommandOptions) -> Command {

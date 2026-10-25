@@ -29,6 +29,7 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
 /// credentials, plugins and remote server addresses are intentionally not copied.
 /// Callers may provision explicit configuration inside the returned private root.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
+    verify_instance_owner(env)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "runtime requires an owned active environment",
@@ -56,6 +57,7 @@ fn validate_assignment(assignment: &str) -> Result<()> {
 }
 
 pub fn command(env: &TaskEnvironment, root: &Path, binary: &Path) -> Result<Command> {
+    verify_instance_owner(env)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "runtime environment is not active/owned",
@@ -78,6 +80,12 @@ fn configure_environment(
         .env_clear()
         .env("PATH", path)
         .env(crate::task_env::MARKER_ENV, &env.instance_id);
+    if let Some(creation) = &env.creation {
+        command
+            .env("HERDR_TASK_ID", &creation.binding.task_id)
+            .env("HERDR_TASK_EPOCH", creation.binding.epoch.to_string())
+            .env("HERDR_TASK_QUEUE", &creation.binding.queue_id);
+    }
     for (key, dir) in [
         ("HOME", "home"),
         ("XDG_CONFIG_HOME", "config"),
@@ -129,6 +137,9 @@ pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child>
     )?;
     let mut cmd = launch_command(env, root, spec)?;
     let mut record = spec.clone();
+    if let Some(owner) = crate::task_env::instance::owner(env) {
+        record["owner"] = owner;
+    }
     record["instance"] = json!(env.instance_id);
     record["phase"] = json!("starting");
     record["root"] = json!(root);
@@ -165,12 +176,33 @@ fn spawn_logged(root: &Path, cmd: &mut Command) -> Result<Child> {
 }
 
 fn launch_command(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<Command> {
+    verify_instance_owner(env)?;
     let binary = PathBuf::from(required(spec, "binary")?);
     let cwd = PathBuf::from(required(spec, "cwd")?);
-    crate::task_env::validate_path(env, &cwd)?;
-    ensure(cwd.is_dir(), "runtime cwd is missing")?;
-    let mut cmd = server_command(env, root, &cwd, &binary, spec)?;
-    confine_server(&mut cmd, root, &cwd, spec)?;
+    validate_launch_cwd(env, &cwd)?;
+    configured_server_command(env, root, &cwd, &binary, spec)
+}
+
+fn validate_launch_cwd(env: &TaskEnvironment, cwd: &Path) -> Result<()> {
+    if env.creation.is_some() {
+        ensure(
+            cwd == env.workspace_root.join("checkout"),
+            "instance runtime cwd must be its registered checkout",
+        )?;
+    }
+    crate::task_env::validate_path(env, cwd)?;
+    ensure(cwd.is_dir(), "runtime cwd is missing")
+}
+
+fn configured_server_command(
+    env: &TaskEnvironment,
+    root: &Path,
+    cwd: &Path,
+    binary: &Path,
+    spec: &J,
+) -> Result<Command> {
+    let mut cmd = server_command(env, root, cwd, binary, spec)?;
+    confine_server(&mut cmd, root, cwd, spec)?;
     let adapter = required(spec, "adapter")?;
     configure_server(&mut cmd, root, spec, &adapter)?;
     cmd.current_dir(cwd);
@@ -293,6 +325,7 @@ pub(crate) fn verify_bounded(env: &TaskEnvironment, root: &Path, limit: usize) -
 }
 
 fn verify_environment(env: &TaskEnvironment, root: &Path) -> Result<()> {
+    verify_instance_owner(env)?;
     crate::task_env::validate_path(env, root)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
@@ -301,6 +334,7 @@ fn verify_environment(env: &TaskEnvironment, root: &Path) -> Result<()> {
 }
 
 fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
+    verify_owner_record(env, record)?;
     ensure(
         record["instance"] == env.instance_id && record["root"] == json!(root),
         "runtime belongs to another environment",
@@ -313,6 +347,21 @@ fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Re
     ensure(
         record["start_time"] == json!(crate::task_env::process_start_time(pid)),
         "runtime process identity changed",
+    )
+}
+
+fn verify_instance_owner(env: &TaskEnvironment) -> Result<()> {
+    if let Some(creation) = &env.creation {
+        crate::task_env::instance::verify_instance(env, &creation.binding, &env.instance_id)?;
+    }
+    Ok(())
+}
+
+fn verify_owner_record(env: &TaskEnvironment, record: &J) -> Result<()> {
+    ensure(
+        record.get("owner").filter(|v| !v.is_null()).cloned()
+            == crate::task_env::instance::owner(env),
+        "runtime owner queue/task/epoch/instance changed",
     )
 }
 
