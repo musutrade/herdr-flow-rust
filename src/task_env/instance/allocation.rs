@@ -387,6 +387,326 @@ mod tests {
         panic!("requested checkpoint was not reached");
     }
 
+    fn competing_spec(f: &Fixture) -> J {
+        let _lock = queue::locked(&f.queue, false).unwrap();
+        let mut state = f.state();
+        state["tasks"]["competitor"] = json!({"task":"competitor","epoch":1,
+            "state_version":1,"candidate":state["tasks"]["task"]["candidate"],
+            "phase":"waiting","control":"running","writer":null,"pending":[],"operations":{}});
+        queue::save(&f.queue, &mut state).unwrap();
+        let mut spec = f.create_spec();
+        spec["task"] = json!("competitor");
+        spec["state_version"] = json!(1);
+        spec
+    }
+
+    fn finish_competitor(f: &Fixture) {
+        let state = f.state();
+        let owner = lifecycle::task_owner(&state, "competitor")
+            .unwrap()
+            .unwrap();
+        f.call(
+            "task-finalize",
+            &json!({"task":"competitor","queue_id":owner.queue_id,
+            "epoch":owner.epoch,"instance_id":owner.instance_id,
+            "state_version":state["tasks"]["competitor"]["state_version"],
+            "outcome":"failure","reason":"fixture successor cleanup"}),
+        )
+        .unwrap();
+        assert!(f.state()["tasks"]["competitor"].is_null());
+        assert!(!task_env::is_registered("competitor").unwrap());
+        let control = f.queue.join("queue.json/task-environments/registry.json");
+        for path in [
+            "envs/competitor.json",
+            "plans/competitor.json",
+            "locks/competitor.lock",
+        ] {
+            assert!(!control.join(path).exists(), "{path}");
+        }
+        assert!(!queue::artifacts(&f.queue)
+            .unwrap()
+            .join("gates/competitor.lock")
+            .exists());
+        f.clean();
+    }
+
+    #[test]
+    fn seed_saved_process_death_reserves_roots_until_owner_removal() {
+        let f = Fixture::new();
+        f.interrupt("seed-saved");
+        let owner = f.owner();
+        assert!(!task_env::is_registered("task").unwrap());
+        assert!(!task_env::environment_state_path("task").unwrap().exists());
+        assert!(!f.temp.path().join("workspace").exists());
+        assert!(!f.temp.path().join("scratch").exists());
+        let spec = competing_spec(&f);
+        let before = f.state();
+        let rejected = f.call("task-environment", &spec);
+        assert!(
+            rejected.is_err(),
+            "competitor acquired A's durable seed reservation"
+        );
+        assert!(rejected
+            .unwrap_err()
+            .to_string()
+            .contains("reserved by another creation seed"));
+        assert_eq!(f.state(), before);
+        assert_eq!(f.owner(), owner);
+        assert!(!task_env::is_registered("competitor").unwrap());
+        assert!(!task_env::environment_state_path("competitor")
+            .unwrap()
+            .exists());
+        f.finish();
+        // Deleting the completed owner row releases its reservation; no tombstone.
+        f.call("task-environment", &spec).unwrap();
+        finish_competitor(&f);
+    }
+
+    // Pure checkpoint probes intentionally bypass filesystem preflight: a child
+    // of an unmaterialized root would otherwise fail earlier for missing parent.
+    fn memory_candidate(f: &Fixture, name: &str) -> (J, task_env::TaskEnvironment) {
+        let mut state = f.state();
+        let mut env: task_env::TaskEnvironment =
+            serde_json::from_value(state["tasks"]["task"]["environment"]["creation_seed"].clone())
+                .unwrap();
+        env.task_id = name.into();
+        env.instance_id = util::uuid_hex();
+        env.workspace_root = f.temp.path().join(format!("{name}-work"));
+        env.temp_root = f.temp.path().join(format!("{name}-tmp"));
+        env.state_file.set_file_name(format!("{name}.json"));
+        let intent = env.creation.as_mut().unwrap();
+        intent.binding.task_id = name.into();
+        intent.checkout = env.workspace_root.join("checkout");
+        let mut task = state["tasks"]["task"].clone();
+        task.as_object_mut().unwrap().remove("environment");
+        task["task"] = json!(name);
+        task["state_version"] = json!(1);
+        state["tasks"][name] = task;
+        (state, env)
+    }
+    fn memory_checkpoint(state: &mut J, env: &task_env::TaskEnvironment) -> crate::Result<()> {
+        crate::progress::environment::checkpoint(
+            state,
+            &env.creation.as_ref().unwrap().binding,
+            env,
+            "creating",
+            util::now(),
+        )
+    }
+    fn assert_seed_conflict(mut state: J, env: &task_env::TaskEnvironment) {
+        let before = state.clone();
+        let error = memory_checkpoint(&mut state, env).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reserved by another creation seed"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn seed_reservations_reject_both_root_roles_and_component_ancestors() {
+        let f = Fixture::new();
+        f.interrupt("seed-saved");
+        for reserved in [
+            f.temp.path().join("workspace"),
+            f.temp.path().join("scratch"),
+        ] {
+            for target in [
+                reserved.clone(),
+                reserved.join("child"),
+                reserved.parent().unwrap().to_path_buf(),
+            ] {
+                let (state, mut env) = memory_candidate(&f, "candidate");
+                env.workspace_root = target.clone();
+                assert_seed_conflict(state, &env);
+                let (state, mut env) = memory_candidate(&f, "candidate");
+                env.temp_root = target;
+                assert_seed_conflict(state, &env);
+            }
+        }
+        let (mut state, mut env) = memory_candidate(&f, "candidate");
+        env.workspace_root = f.temp.path().join("workspace2");
+        env.temp_root = f.temp.path().join("scratch2");
+        memory_checkpoint(&mut state, &env).unwrap();
+        f.finish();
+    }
+
+    #[test]
+    fn seed_reservations_do_not_expire_from_terminal_or_cleanup_status() {
+        let f = Fixture::new();
+        f.interrupt("seed-saved");
+        for status in ["pending", "associations_removed", "released", "completed"] {
+            let (mut state, mut env) = memory_candidate(&f, "candidate");
+            state["tasks"]["task"]["final_outcome"] = json!("failure");
+            state["tasks"]["task"]["phase"] = json!("finalizing");
+            state["tasks"]["task"]["cleanup_obligation"]["status"] = json!(status);
+            env.temp_root = f.temp.path().join("workspace");
+            assert_seed_conflict(state, &env);
+        }
+        f.resume().unwrap(); // Existing seed checkpoints never conflict with self.
+        f.finish();
+    }
+
+    #[test]
+    fn seed_reservations_reject_malformed_or_foreign_bindings_without_checkpoint() {
+        let f = Fixture::new();
+        f.interrupt("seed-saved");
+        for (path, value) in [
+            ("/environment/creation_seed", J::Null),
+            ("/environment/creation_seed", json!({})),
+            ("/environment/creation_seed/workspace_root", json!("")),
+            ("/environment/creation_seed/temp_root", json!("relative")),
+            (
+                "/environment/creation_seed/creation/binding/queue_id",
+                json!("foreign"),
+            ),
+            (
+                "/environment/creation_seed/creation/binding/task_id",
+                json!("foreign"),
+            ),
+            (
+                "/environment/creation_seed/creation/binding/epoch",
+                json!(2),
+            ),
+            ("/environment/creation_seed/instance_id", json!("foreign")),
+            (
+                "/environment/creation_seed/creation/lifecycle_queue",
+                json!("/foreign"),
+            ),
+            ("/environment/creation_seed/state_file", json!("/foreign")),
+            ("/environment/epoch", json!(2)),
+            ("/environment/instance_id", json!("foreign")),
+            ("/task", json!("foreign")),
+            ("/epoch", json!(2)),
+        ] {
+            let (mut state, env) = memory_candidate(&f, "candidate");
+            *state["tasks"]["task"].pointer_mut(path).unwrap() = value;
+            let before = state.clone();
+            assert!(memory_checkpoint(&mut state, &env).is_err(), "{path}");
+            assert_eq!(state, before, "{path}");
+        }
+        f.finish();
+    }
+
+    fn raw_candidate_record(f: &Fixture, name: &str, shared: bool) -> J {
+        let (mut state, mut env) = memory_candidate(f, name);
+        if shared {
+            env.workspace_root = f.temp.path().join("workspace");
+        } else {
+            env.workspace_root = f.temp.path().join("two-new-owners");
+        }
+        // Build the standalone candidate without its competitor only in memory.
+        state["tasks"].as_object_mut().unwrap().remove("task");
+        memory_checkpoint(&mut state, &env).unwrap();
+        state["tasks"][name].clone()
+    }
+
+    #[test]
+    fn seed_save_allows_unregistered_queue_but_rejects_malformed_task_tables() {
+        let temp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = temp.path().join("queue");
+        queue::init_isolated(&root, None, 30).unwrap();
+        let _lock = queue::locked(&root, false).unwrap();
+        let mut state = queue::load_queue(&root).unwrap();
+        assert!(state.get("tasks").is_none());
+        queue::save(&root, &mut state).unwrap();
+        let bytes = fs::read(root.join("queue.json/authority.json")).unwrap();
+        for malformed in [J::Null, json!([]), json!("invalid")] {
+            let mut next = state.clone();
+            next["tasks"] = malformed;
+            let input = next.clone();
+            assert!(queue::save(&root, &mut next).is_err());
+            assert_eq!(next, input);
+            assert_eq!(
+                fs::read(root.join("queue.json/authority.json")).unwrap(),
+                bytes
+            );
+        }
+        state["tasks"] = json!({});
+        queue::save(&root, &mut state).unwrap();
+        let bytes = fs::read(root.join("queue.json/authority.json")).unwrap();
+        state.as_object_mut().unwrap().remove("tasks");
+        let input = state.clone();
+        assert!(queue::save(&root, &mut state).is_err());
+        assert_eq!(state, input);
+        assert_eq!(
+            fs::read(root.join("queue.json/authority.json")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn seed_save_rejects_malformed_current_tables_without_repair() {
+        let temp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = temp.path().join("queue");
+        queue::init_isolated(&root, None, 30).unwrap();
+        let _lock = queue::locked(&root, false).unwrap();
+        let original = queue::load_queue(&root).unwrap();
+        for malformed in [J::Null, json!([]), json!("invalid")] {
+            let mut damaged = original.clone();
+            damaged["tasks"] = malformed;
+            // Corrupt only the private fixture authority, bypassing admission.
+            util::atomic_write_json(&root.join("queue.json"), &damaged).unwrap();
+            let bytes = fs::read(root.join("queue.json/authority.json")).unwrap();
+            let mut next = damaged.clone();
+            next["tasks"] = json!({});
+            let input = next.clone();
+            let error = queue::save(&root, &mut next).unwrap_err();
+            assert!(
+                error.to_string().contains("tasks must be an object"),
+                "{error}"
+            );
+            assert_eq!(next, input);
+            assert_eq!(queue::load_queue(&root).unwrap(), damaged);
+            assert_eq!(
+                fs::read(root.join("queue.json/authority.json")).unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn seed_reservations_guard_raw_save_and_two_new_owners_in_one_transaction() {
+        let f = Fixture::new();
+        f.interrupt("seed-saved");
+        for shared in [true, false] {
+            let before = f.state();
+            let bytes = fs::read(f.queue.join("queue.json/authority.json")).unwrap();
+            let mut next = before.clone();
+            next["tasks"]["candidate"] = raw_candidate_record(&f, "candidate", shared);
+            if !shared {
+                next["tasks"]["second"] = raw_candidate_record(&f, "second", false);
+            }
+            let input = next.clone();
+            {
+                let _lock = queue::locked(&f.queue, false).unwrap();
+                let error = queue::save(&f.queue, &mut next).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("reserved by another creation seed"),
+                    "{error}"
+                );
+            }
+            assert_eq!(next, input);
+            assert_eq!(f.state(), before);
+            assert_eq!(
+                fs::read(f.queue.join("queue.json/authority.json")).unwrap(),
+                bytes
+            );
+            assert!(!f.temp.path().join("two-new-owners").exists());
+        }
+        f.finish();
+    }
+
     #[test]
     fn control_and_envelope_process_interruptions_resume_without_new_owner() {
         for point in [

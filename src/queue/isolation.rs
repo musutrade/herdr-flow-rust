@@ -180,7 +180,7 @@ pub fn validate_save(root: &Path, s: &J) -> Result<()> {
             validate_task_save(old, &s["tasks"][_name])?;
         }
     }
-    Ok(())
+    crate::progress::environment::validate_new_seed_reservations(&current, s)
 }
 
 pub(super) fn validate_version(current: &J, next: &J) -> Result<()> {

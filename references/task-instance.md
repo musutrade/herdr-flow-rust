@@ -100,6 +100,11 @@ format is adopted or migrated, and configuration is never silently redirected.
    including Owner, initial environment image, managed envs parent inode/mount,
    fixed per-task document slot and target-parent proofs. Save this seed in the
    queue as `creating` **before** creating its control document or task lock.
+   In that same queue transaction, every other owner's durable seed reserves both
+   roots against equal, ancestor or descendant paths, even before registry entry
+   creation. The checkpoint and public queue-save entry both enforce this check.
+   Missing or malformed seeds on bound owners fail closed. Terminal or `released`
+   status does not release the reservation; final atomic owner-row removal does.
    Initialize only this reserved document slot. Sync its exact initial image and
    envelope; checkpoint `environment.bootstrap` with the envelope inode/mount.
    Partial initial bytes must be an exact prefix of that image. I/O errors are
