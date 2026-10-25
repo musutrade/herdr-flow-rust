@@ -12,6 +12,7 @@ mod cleanup;
 pub mod cli;
 pub(crate) mod discovery;
 mod env;
+pub mod instance;
 pub(crate) use env::PreparedConfinement;
 mod registry;
 mod status;

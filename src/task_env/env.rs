@@ -118,6 +118,9 @@ pub struct ProcessRecord {
 pub struct TaskEnvironment {
     pub task_id: String,
     pub instance_id: String,
+    /// Queue-bound creation journal. Legacy environments have no implicit binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<super::instance::CreationIntent>,
     pub workspace_root: PathBuf,
     pub temp_root: PathBuf,
     pub workspace_identity: Option<RootIdentity>,
@@ -225,6 +228,11 @@ impl TaskEnvironment {
     fn process_command(&self, program: impl AsRef<OsStr>, confine: bool) -> Command {
         let mut command = Command::new(program);
         command.env(MARKER_ENV, &self.instance_id);
+        if let Some(intent) = &self.creation {
+            command.env("HERDR_TASK_ID", &intent.binding.task_id);
+            command.env("HERDR_TASK_EPOCH", intent.binding.epoch.to_string());
+            command.env("HERDR_TASK_QUEUE", &intent.binding.queue_id);
+        }
         // Keep temporary files inside the disposable boundary as well.
         command.env("TMPDIR", &self.temp_root);
         let roots = vec![self.workspace_root.clone(), self.temp_root.clone()];
@@ -258,6 +266,14 @@ impl TaskEnvironment {
 
     /// Register a worktree that lives inside the disposable workspace.
     pub fn register_worktree(&mut self, path: &Path) -> Result<()> {
+        if self.creation.is_some() {
+            super::instance::verify_owned(self)?;
+            if path != self.workspace_root.join("checkout") {
+                return Err(FlowError::progress(
+                    "instance worktree registration cannot adopt another checkout",
+                ));
+            }
+        }
         let resolved = util::resolve_path(path);
         if !self.owns_path(&resolved) {
             return Err(FlowError::progress(format!(
@@ -816,6 +832,16 @@ pub fn create(
     delivery_targets: Vec<DeliveryTarget>,
     temp_root: &Path,
 ) -> Result<TaskEnvironment> {
+    create_with_intent(task_id, workspace_root, delivery_targets, temp_root, None)
+}
+
+pub(super) fn create_with_intent(
+    task_id: &str,
+    workspace_root: &Path,
+    delivery_targets: Vec<DeliveryTarget>,
+    temp_root: &Path,
+    creation: Option<super::instance::CreationIntent>,
+) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
     let lock = acquire_task_lock(task_id)?;
     let (workspace_root, temp_root, delivery_targets) =
@@ -829,6 +855,7 @@ pub fn create(
         delivery_targets,
         state_file.clone(),
     );
+    env.creation = creation;
     env.attach_lock(lock);
 
     if let Err(error) = env.persist() {
@@ -836,9 +863,19 @@ pub fn create(
         return Err(error);
     }
     if let Err(error) = reserve_environment(&env, &state_file) {
-        let _ = std::fs::remove_file(&state_file);
+        if env.creation.is_none() {
+            let _ = std::fs::remove_file(&state_file);
+        }
         env.release_ownership();
         return Err(error);
+    }
+    finish_environment_creation(env)
+}
+
+fn finish_environment_creation(mut env: TaskEnvironment) -> Result<TaskEnvironment> {
+    if env.creation.is_some() {
+        // Queue checkpoint must precede materialisation; failures retain this intent.
+        return Ok(env);
     }
     if let Err(error) = materialize_and_fingerprint(&mut env) {
         rollback_creation(&env);
@@ -935,6 +972,7 @@ fn build_environment(
     TaskEnvironment {
         task_id: task_id.to_string(),
         instance_id: util::uuid_hex(),
+        creation: None,
         workspace_root,
         temp_root,
         workspace_identity: None,
@@ -953,7 +991,7 @@ fn build_environment(
     }
 }
 
-fn reserve_environment(env: &TaskEnvironment, state_file: &Path) -> Result<()> {
+pub(super) fn reserve_environment(env: &TaskEnvironment, state_file: &Path) -> Result<()> {
     registry::register_environment(registry::RegistryEntry {
         task_id: env.task_id.clone(),
         instance_id: env.instance_id.clone(),
@@ -1036,6 +1074,11 @@ pub fn recover_interrupted(task_id: &str) -> Result<bool> {
         return recover_plan_only(task_id);
     }
     let env = restore(task_id)?;
+    if env.creation.is_some() {
+        return Err(FlowError::progress(
+            "queue-bound instance requires task-environment resume; final cleanup is not enabled",
+        ));
+    }
     if !interrupted(&env.state) && !plan_exists(task_id) {
         return Ok(false);
     }

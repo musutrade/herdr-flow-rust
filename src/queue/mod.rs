@@ -2733,7 +2733,86 @@ fn task_mutate(
     now: f64,
 ) -> Result<()> {
     crate::runtime::receiver_session(s, session)?;
+    if action == "task-environment" {
+        return task_environment(root, s, spec, now);
+    }
     task_route_mutation(root, s, action, spec, session, factory, now)
+}
+
+// Caller retains the existing queue lock; environment acquisition is nonblocking.
+// A failed checkpoint or Git operation keeps the same durable creation intent.
+fn task_environment(root: &Path, s: &mut J, spec: &J, now: f64) -> Result<()> {
+    use crate::task_env::instance;
+    let binding = progress::environment::requested(s, spec)?;
+    let mut env = environment_handle(s, spec, &binding)?;
+    checkpoint_environment(root, s, &binding, &env, now)?;
+    instance::materialize_instance(&mut env)?;
+    instance::verify_instance(&env, &binding, &env.instance_id)?;
+    progress::environment::checkpoint(s, &binding, &env, "active", util::now())
+}
+
+fn environment_handle(
+    s: &J,
+    spec: &J,
+    binding: &crate::task_env::instance::InstanceBinding,
+) -> Result<crate::task_env::TaskEnvironment> {
+    match spec["action"].as_str() {
+        Some("create") => begin_task_environment(s, spec, binding),
+        Some("resume") => resume_task_environment(spec, binding),
+        _ => Err(queue_error(
+            "task-environment action must be create or resume",
+        )),
+    }
+}
+
+fn begin_task_environment(
+    s: &J,
+    spec: &J,
+    binding: &crate::task_env::instance::InstanceBinding,
+) -> Result<crate::task_env::TaskEnvironment> {
+    if !s["tasks"][&binding.task_id]["environment"].is_null() {
+        return Err(queue_error(
+            "environment already bound; resume the recorded instance",
+        ));
+    }
+    let creation = environment_create_spec(&spec["environment"])?;
+    require_environment_candidate(&s["tasks"][&binding.task_id], &creation.commit)?;
+    crate::task_env::instance::begin_instance(binding, &creation)
+}
+
+fn require_environment_candidate(task: &J, commit: &str) -> Result<()> {
+    if task["candidate"] != commit || !model::is_full_sha(commit) {
+        return Err(queue_error(
+            "environment commit must equal the current task candidate",
+        ));
+    }
+    Ok(())
+}
+
+fn resume_task_environment(
+    spec: &J,
+    binding: &crate::task_env::instance::InstanceBinding,
+) -> Result<crate::task_env::TaskEnvironment> {
+    if spec.get("environment").is_some() {
+        return Err(queue_error("resume cannot replace the creation intent"));
+    }
+    let id = progress::text(spec.get("instance_id"), "instance_id", 128)?;
+    crate::task_env::instance::resume_instance(binding, &id)
+}
+
+fn checkpoint_environment(
+    root: &Path,
+    s: &mut J,
+    binding: &crate::task_env::instance::InstanceBinding,
+    env: &crate::task_env::TaskEnvironment,
+    now: f64,
+) -> Result<()> {
+    progress::environment::checkpoint(s, binding, env, "creating", now)?;
+    save(root, s)
+}
+
+fn environment_create_spec(spec: &J) -> Result<crate::task_env::instance::CreateSpec> {
+    serde_json::from_value(spec.clone()).map_err(Into::into)
 }
 
 fn task_route_mutation(

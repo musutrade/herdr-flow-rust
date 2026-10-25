@@ -8,6 +8,7 @@ pub mod acceptance;
 pub mod artifact;
 pub mod authorize;
 pub mod claim;
+pub mod environment;
 pub mod lineage;
 pub(crate) mod ownership;
 

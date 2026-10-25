@@ -14,6 +14,14 @@ The CLI selects `OPENCODE_SESSION_ID` for an OpenCode producer or coordinator an
 pending operation, independently of the coordinator's adapter. Native collectors
 verify their bound session directly; they do not set or impersonate either variable.
 
+## Queue-bound creation (#130 PR1)
+
+[Task-instance creation](task-instance.md) connects an existing queue task and
+positive epoch to one environment instance, a directly created Git worktree and
+managed runtime ownership. It does not require a Herdr workspace. Legacy entry
+below remains distinct: it does not infer queue authority. The creation slice is
+not deployment approval, an all-writer barrier or automatic finalization.
+
 ## Owned environment and fresh activity
 
 ### Preparatory environment entry
