@@ -14,7 +14,7 @@ use crate::runtime;
 use crate::util;
 use crate::watch_service;
 
-use super::{queue_error, run_command, summary, task_action, validate_watch};
+use super::{queue_error, run_command, summary, validate_watch};
 
 const ACTIONS: &[&str] = &[
     "init",
@@ -849,7 +849,8 @@ fn task_action_state(
     } else {
         crate::opencode::session::receiver_session(root)?
     };
-    let state = task_action(root, &args.action, spec, session.as_deref(), factory)?;
+    let state =
+        super::finalization::task_action(root, &args.action, spec, session.as_deref(), factory)?;
     Ok(Outcome::state(state))
 }
 
@@ -938,22 +939,59 @@ fn run_watch(root: &Path, args: &Args) -> Result<()> {
 }
 
 fn watch_tick(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<bool> {
-    let lock = match super::locked(root, false) {
-        Ok(lock) => lock,
-        Err(error) if error.kind == ErrorKind::StateBusy => {
-            if args.once {
-                return Err(error);
-            }
-            return Ok(false);
+    let Some(report) = cleanup_before_tick(root, args.once)? else {
+        return Ok(false);
+    };
+    let Some(lock) = watch_queue_lock(root, args.once)? else {
+        return Ok(false);
+    };
+    watch_locked_tick(root, args, factory, report.pending, lock)
+}
+
+fn cleanup_before_tick(
+    root: &Path,
+    once: bool,
+) -> Result<Option<super::finalization::CleanupReport>> {
+    let report = match super::finalization::drive(root) {
+        Ok(report) => report,
+        Err(error) if !once => {
+            eprintln!("terminal cleanup observation failed; retrying next tick: {error}");
+            return Ok(None);
         }
         Err(error) => return Err(error),
     };
+    for error in &report.errors {
+        eprintln!("terminal cleanup pending: {error}");
+    }
+    Ok(Some(report))
+}
+
+fn watch_queue_lock(root: &Path, once: bool) -> Result<Option<util::FileLock>> {
+    match super::locked(root, false) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind == ErrorKind::StateBusy => {
+            if once {
+                return Err(error);
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn watch_locked_tick(
+    root: &Path,
+    args: &Args,
+    factory: &ReceiverFactory,
+    pending: usize,
+    lock: util::FileLock,
+) -> Result<bool> {
     let current = super::tick(root, factory, None)?;
     if args.once || model::bool_or(&current, "stopped", false) {
         println!("{}", summary(&current));
     }
     drop(lock);
-    Ok(model::bool_or(&current, "stopped", false))
+    Ok(model::bool_or(&current, "stopped", false) && pending == 0)
 }
 
 fn background_allowed(args: &Args) -> bool {
@@ -1177,11 +1215,15 @@ fn run_inner_metrics(root: &Path, args: &Args) -> Result<Option<i32>> {
 }
 
 fn run_locked_guarded(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
-    if args.action == "init-isolated" {
+    if args.action == "init-isolated" || task_action_owns_lock(&args.action) {
         return run_locked(root, args, factory);
     }
     let _lock = super::locked(root, false)?;
     run_locked(root, args, factory)
+}
+
+fn task_action_owns_lock(action: &str) -> bool {
+    action.starts_with("task-") || action.starts_with("pr-") || action.starts_with("batch-")
 }
 
 fn print_outcome_and_code(state: &J, as_json: bool, code: Option<i32>) -> Result<Option<i32>> {

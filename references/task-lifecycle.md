@@ -1,17 +1,21 @@
-# Isolated lifecycle outcomes and write barrier (PR2)
+# Isolated task outcomes, write barriers and finalization
 
-This is the second ordered slice of [Issue #130](https://github.com/musutrade/herdr-flow-rust/issues/130).
+These are the second and third ordered slices of [Issue #130](https://github.com/musutrade/herdr-flow-rust/issues/130).
 It extends [task-instance creation](task-instance.md) with explicit owner outcomes
-and short mutation permits. It does **not** deploy a new runtime or execute
-terminal cleanup. Unified stop and whole-root deletion are PR3; cross-module
-crash combinations are PR4. Existing production resources are not migrated.
+and short mutation permits, then automatic owned-resource finalization. PR3
+reuses the existing watch and cleanup machinery; cross-module fault combinations
+remain PR4. This does not deploy a new runtime or migrate production resources.
 
 ## Fresh authority only
 
 `queue init-isolated --state-dir NEW_QUEUE` requires an absent or empty private
 queue directory. Use a fresh `HERDR_TASK_ENV_ROOT` for its environment control
 state. Neither legacy queues, PR1 instances, live handles nor existing control
-registries are adopted or upgraded.
+registries are adopted or upgraded. PR3 uses authority format 2; prior PR2
+isolated objects are also not migrated. Old fixed entry points reject this
+format. The queue has a checked monotonic `authority_version`: every save must
+match the current version, preventing an old snapshot from resurrecting a removed
+owner without retaining a permanent per-task tombstone.
 
 The logical `queue.json` and environment `registry.json` are directories whose
 private `authority.json` contains the new document. Queue results, deliveries,
@@ -123,20 +127,79 @@ resources. It never repairs a registry as a side effect of the decision.
 
 Once the final outcome is recorded, ordinary writes, spawn, submission, result
 signal/import, task mutation and observer attachment refuse that owner. No
-writer, process, worktree, receipt or registration is cleared; PR2 does not
-claim teardown has happened. An already active mixed notification delivery may
-remain frozen with its uncertainty preserved until PR3 handles related entries.
-It is not falsely ACKed, dropped or resent. Other owners' business permits are
-independent, although that shared notification slot can remain occupied.
+writer, process, worktree, receipt or registration is cleared by recording alone; it does not
+claim teardown has happened at that checkpoint. The high-level terminal entry
+then releases its recording locks and automatically attempts finalization. Other
+owners retain independent business permits.
+
+## Automatic finalization (PR3)
+
+The CLI `task-finalize` and explicit owner cancellation use the high-level
+`queue::finalization::task_action` entry: record the final decision, release the
+queue transaction, then drive one bounded cleanup attempt. The caller-locked
+`queue::task_action` library entry is a recording layer for transactions and
+crash-recovery fixtures; it is not the complete finalization API. Existing watch
+iterations also drive pending obligations, including on stopped queues. Busy
+resources or observation errors preserve the obligation for system retry; they
+do not change the business outcome or request manual deletion approval.
+
+The driver holds the exact owner's EX gate, uses short queue/environment locks,
+and freezes typed association and resource identities in the existing temporary
+cleanup plan. It stops proved task processes before touching the worktree or
+roots. Both final success and final failure remove the entire dedicated roots,
+including dirty files, untracked files, build outputs and runtime journals.
+No project-type, extension or directory-content deletion classifier is used.
+Formal delivery targets outside those roots remain intact.
+
+Git removal verifies source, checkout, Git pointer and administrative identities.
+Native mutation children carry the instance/task/epoch/queue markers and direct
+parent-death protection. A durable `GitRemoving` checkpoint permits recovery of
+partly removed components: every surviving identity must still match. Incomplete
+admin directories are quarantined at the recorded inode before their contents
+are cleared. There is no repository-wide prune. Wrong identities, unknown
+partial roots or mounts retain the obligation; a missing path alone does not
+prove completed cleanup.
+
+Process observation is fallible. Fresh creation records boot ID, PID/time
+namespace identity and an integer boot-clock birth floor before managed spawn;
+recovery never resamples it. Only positively older, unregistered processes can
+be excluded before reading their environment. Equal/newer processes and known
+registered, descendant or frozen targets remain strictly checked. Boot/namespace
+changes, unreadable relevant identity or uncertain ancestry block destructive
+steps for retry. Historical descendant snapshots alone never grant signal
+authority. Direct-child parent-death protection is not a universal process-tree
+sandbox or proof of arbitrary marker-clearing helper ownership.
+
+Owned results/waits/events are removed by full queue/task/epoch/assignment/owner
+binding. Mixed in-flight deliveries retain their ID, receiver session, phase and
+uncertainty while owned event payloads are removed; surviving owners can ACK the
+same delivery. They are never resent or falsely ACKed by cleanup. An all-owned
+delivery is removed together with its exact shared-receiver link. A task-owned
+receiver additionally requires a protected runtime Owner and containment inside
+the registered roots; a label is insufficient. Shared receivers and unrelated
+lane state remain intact. Fresh isolated admission rejects cross-owner V1
+claim/root succession; cleanup cannot erase a surviving claim authority chain.
+Explicit same-owner V2 activities retain their individual epochs and are removed
+with the owner. Settled Git receipt references are matched by typed identity.
+
+After resources and associations are gone, the driver releases the environment
+and registry claim, checkpoints the cleanup-plan inode proof in the queue,
+removes that temporary plan and task gates, and atomically removes the owner and
+its activities last. The queue checkpoint supports interrupted plan erasure.
+Late writes, signals, ACKs and spawn cannot recreate deleted authority. All
+cleanup records, logs inside roots and recovery registrations are temporary;
+this creates no permanent evidence archive.
 
 ## Recovery and acceptance boundaries
 
 Pending cleanup is not a permanent archive. Only the agreed formal delivery
-survives the eventual unified cleanup; authority, gates, journals, temporary
-logs and recovery records are temporary obligations to remove in PR3/PR4.
+survives unified cleanup; authority, gates, journals, temporary logs and recovery
+records are removed with their task obligations.
 Generic legacy destroy/recover/unregister paths cannot release isolated claims.
 No new isolated task should be deployed for production use before the subsequent
-reviewed cleanup and recovery slices are complete.
+reviewed recovery and genuine end-to-end acceptance are complete. The creation
+mkdir-before-inode-checkpoint window remains unresolved when ownership cannot be
+proved; recovery never adopts such a directory.
 
 Tests use private fixture queues, Git worktrees and non-model subprocesses. They
 exercise real locks, directory sentinels and an idle fixture broker refusing a

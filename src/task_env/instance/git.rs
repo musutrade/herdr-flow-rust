@@ -27,11 +27,10 @@ fn run(repo: &Path, args: &[&str]) -> Result<String> {
     execute(repo, args, &options())
 }
 
-fn owned_run(env: &TaskEnvironment, repo: &Path, args: &[&str]) -> Result<String> {
+fn owned_options(binding: &InstanceBinding, instance: &str) -> util::process::CommandOptions {
     let mut options = options();
-    let binding = &get_intent(env)?.binding;
     for (key, value) in [
-        (super::super::MARKER_ENV, env.instance_id.clone()),
+        (super::super::MARKER_ENV, instance.to_owned()),
         ("HERDR_TASK_ID", binding.task_id.clone()),
         ("HERDR_TASK_EPOCH", binding.epoch.to_string()),
         ("HERDR_TASK_QUEUE", binding.queue_id.clone()),
@@ -39,7 +38,15 @@ fn owned_run(env: &TaskEnvironment, repo: &Path, args: &[&str]) -> Result<String
         options.env.insert(key.into(), value);
     }
     options.kill_on_parent_death = true;
-    execute(repo, args, &options)
+    options
+}
+
+fn owned_run(env: &TaskEnvironment, repo: &Path, args: &[&str]) -> Result<String> {
+    execute(
+        repo,
+        args,
+        &owned_options(&get_intent(env)?.binding, &env.instance_id),
+    )
 }
 
 fn execute(repo: &Path, args: &[&str], options: &util::process::CommandOptions) -> Result<String> {
@@ -81,6 +88,7 @@ pub(super) fn intent(binding: &InstanceBinding, spec: &CreateSpec) -> Result<Cre
     validate_new_roots(spec, &common_dir)?;
     Ok(CreationIntent {
         binding: binding.clone(),
+        process_boundary: Some(super::ProcessBoundary::capture()?),
         lifecycle_queue: None,
         phase: CreationPhase::Prepared,
         repository,
@@ -370,6 +378,200 @@ fn reject_filters(repo: &Path) -> Result<()> {
         require(
             !name.starts_with("filter."),
             "source checkout filters are unsupported for task instance creation",
+        )?;
+    }
+    Ok(())
+}
+
+/// Prepare exact removal before any Git side effect. Unknown partial adds are
+/// retained; their identity cannot be inferred from an attractive checkout path.
+pub(in crate::task_env) fn verify_removal(i: &CreationIntent) -> Result<()> {
+    source(i)?;
+    if i.git_identity.is_some() {
+        roots::verify(
+            &i.checkout,
+            i.checkout_identity
+                .ok_or_else(|| FlowError::guard("missing checkout inode"))?,
+            true,
+        )?;
+        verify_ready(i)
+    } else {
+        verify_unrecorded_removal(i)
+    }
+}
+
+fn absent(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}
+pub(in crate::task_env) fn verify_removed(i: &CreationIntent) -> Result<()> {
+    source(i)?;
+    require(!listed(i)?, "Git worktree registration remains")?;
+    if let Some(g) = &i.git_identity {
+        require(
+            absent(&i.checkout)? && absent(&g.admin_dir)?,
+            "owned Git checkout/admin remains",
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(in crate::task_env) struct RemovalPresence {
+    pub checkout: bool,
+    pub git_file: bool,
+    pub admin: bool,
+    pub complete_admin: bool,
+}
+/// Identity of every surviving component after a durable GitRemoving checkpoint.
+/// Missing components do not authorize replacements or a new Git registration.
+pub(in crate::task_env) fn removal_presence(i: &CreationIntent) -> Result<RemovalPresence> {
+    source(i)?;
+    let g = i
+        .git_identity
+        .as_ref()
+        .ok_or_else(|| FlowError::guard("missing removal identity"))?;
+    let (checkout, git_file) = surviving_checkout(i, g)?;
+    let (admin, complete_admin) = surviving_admin(i, g)?;
+    // A native remove may have unlinked registration files before rmdir.
+    // Only the complete case can still require Git's listing to be readable.
+    if !admin || complete_admin {
+        require(listed(i)? == admin, "Git removal registry identity changed")?;
+    }
+    Ok(RemovalPresence {
+        checkout,
+        git_file,
+        admin,
+        complete_admin,
+    })
+}
+fn surviving_admin_links(i: &CreationIntent, admin: &Path) -> Result<bool> {
+    let backlink = admin.join("gitdir");
+    let common = admin.join("commondir");
+    let head = admin.join("HEAD");
+    let have_backlink = !absent(&backlink)?;
+    let have_common = !absent(&common)?;
+    let have_head = !absent(&head)?;
+    if have_backlink {
+        validate_backlink(i, &backlink)?;
+    }
+    if have_common {
+        validate_common(i, admin, &common)?;
+    }
+    validate_surviving_head(&head, have_head)?;
+    Ok([have_backlink, have_common, have_head]
+        .into_iter()
+        .all(|v| v))
+}
+pub(in crate::task_env) fn verify_source(i: &CreationIntent) -> Result<()> {
+    source(i)
+}
+pub(in crate::task_env) fn verify_unregistered(i: &CreationIntent) -> Result<()> {
+    source(i)?;
+    require(!listed(i)?, "Git worktree registration remains")?;
+    if let Some(g) = &i.git_identity {
+        require(
+            absent(&g.admin_dir)?,
+            "Git administrative directory remains",
+        )?;
+    }
+    Ok(())
+}
+pub(in crate::task_env) fn remove_registered(
+    i: &CreationIntent,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    require(
+        i.binding.queue_id == owner.queue_id
+            && i.binding.task_id == owner.task_id
+            && i.binding.epoch == owner.epoch,
+        "Git removal owner binding changed",
+    )?;
+    reject_filters(&i.repository)?;
+    let path = i
+        .checkout
+        .to_str()
+        .ok_or_else(|| FlowError::guard("non-UTF8 worktree path"))?;
+    execute(
+        &i.repository,
+        &["worktree", "remove", "--force", path],
+        &owned_options(&i.binding, &owner.instance_id),
+    )?;
+    verify_unregistered(i)
+}
+
+fn verify_unrecorded_removal(i: &CreationIntent) -> Result<()> {
+    require(!listed(i)?, "unrecorded partial Git registration")?;
+    if let Some(before) = &i.git_admin_before {
+        require(before == &admin_snapshot(i)?, "unresolved partial Git add")?;
+    }
+    require(
+        !i.checkout.join(".git").try_exists()?,
+        "unrecorded Git pointer",
+    )
+}
+
+fn surviving_checkout(i: &CreationIntent, g: &GitIdentity) -> Result<(bool, bool)> {
+    let checkout = !absent(&i.checkout)?;
+    if checkout {
+        roots::verify(
+            &i.checkout,
+            i.checkout_identity
+                .ok_or_else(|| FlowError::guard("checkout identity missing"))?,
+            true,
+        )?;
+    }
+    let git_file = surviving_gitfile(i, g)?;
+    Ok((checkout, git_file))
+}
+
+fn surviving_admin(i: &CreationIntent, g: &GitIdentity) -> Result<(bool, bool)> {
+    let admin = !absent(&g.admin_dir)?;
+    let mut complete_admin = false;
+    if admin {
+        roots::verify(&g.admin_dir, g.admin_identity, true)?;
+        complete_admin = surviving_admin_links(i, &g.admin_dir)?;
+        require(
+            !g.admin_dir.join("locked").try_exists()?,
+            "locked worktree retains cleanup obligation",
+        )?;
+    }
+    Ok((admin, complete_admin))
+}
+
+fn validate_backlink(i: &CreationIntent, path: &Path) -> Result<()> {
+    require(
+        Path::new(bounded_text(path)?.trim()) == i.checkout.join(".git"),
+        "Git worktree backlink changed",
+    )
+}
+fn validate_common(i: &CreationIntent, admin: &Path, path: &Path) -> Result<()> {
+    require(
+        util::resolve_path(&admin.join(bounded_text(path)?.trim())) == i.common_dir,
+        "worktree common repository changed",
+    )
+}
+
+fn surviving_gitfile(i: &CreationIntent, g: &GitIdentity) -> Result<bool> {
+    let git_file = !absent(&i.checkout.join(".git"))?;
+    if git_file {
+        roots::verify(&i.checkout.join(".git"), g.git_file_identity, false)?;
+        require(
+            admin_pointer(&i.checkout.join(".git"), &i.common_dir)? == g.admin_dir,
+            "Git removal pointer changed",
+        )?;
+    }
+    Ok(git_file)
+}
+
+fn validate_surviving_head(head: &Path, present: bool) -> Result<()> {
+    if present {
+        require(
+            !bounded_text(head)?.trim().is_empty(),
+            "empty worktree HEAD",
         )?;
     }
     Ok(())

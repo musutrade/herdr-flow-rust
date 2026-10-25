@@ -25,6 +25,7 @@
 
 mod observation;
 mod signals;
+pub mod terminal;
 
 use std::ffi::{CString, OsStr};
 use std::fs::File;
@@ -67,6 +68,8 @@ pub struct Quarantine {
 /// Durable cleanup plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<terminal::TerminalState>,
     pub task_id: String,
     pub instance_id: String,
     /// Minimal proof that a delivery-confirmed environment entered cleanup.
@@ -99,6 +102,7 @@ impl CleanupState {
         let roots = build_roots(env, &claimed)?;
         let pending_root_removals = roots.iter().map(|root| root.path.clone()).collect();
         Ok(Self {
+            terminal: None,
             task_id: env.task_id.clone(),
             instance_id: env.instance_id.clone(),
             delivery_confirmed: env.delivery["phase"] == "cleaning"
@@ -823,6 +827,9 @@ fn resume_present_quarantine(
     let check = open_child_dir(parent, name)?
         .ok_or_else(|| FlowError::progress(format!("quarantine {} vanished", quarantine.name)))?;
     ensure_identity(&check, expected, root_path)?;
+    if state.terminal.is_some() {
+        clear_directory(&check, 0)?;
+    }
     commit_unlink(state, parent, name, quarantine, &check, root_path)
 }
 
@@ -868,7 +875,7 @@ fn start_quarantine(
     root_path: &Path,
 ) -> Result<()> {
     let dir = open_verified_root(parent, root_name, expected, root_path)?;
-    if pinned_root_is_empty(&dir, root_path)? {
+    if pinned_root_is_empty(&dir, root_path, state.terminal.is_some())? {
         return Ok(());
     }
     ensure_entry_identity(parent, root_name, expected, root_path)?;
@@ -877,8 +884,10 @@ fn start_quarantine(
     finish_quarantine(state, parent, &quarantine, expected, root_path)
 }
 
-fn pinned_root_is_empty(dir: &File, root_path: &Path) -> Result<bool> {
-    unmount_under(root_path);
+fn pinned_root_is_empty(dir: &File, root_path: &Path, terminal: bool) -> Result<bool> {
+    if !terminal {
+        unmount_under(root_path);
+    }
     clear_directory(dir, 0)?;
     Ok(dir.metadata()?.nlink() == 0)
 }
@@ -1019,7 +1028,7 @@ fn remove_worktree(worktree: &WorktreeRegistration, roots: &[PendingDirectory]) 
     if !repo.exists() {
         return Ok(());
     }
-    run_worktree_removal(repo, &worktree.path);
+    run_worktree_removal(repo, &worktree.path)?;
     if worktree_registered(repo, &worktree.path)? {
         return Err(FlowError::progress(format!(
             "repository {} still lists worktree {}",
@@ -1046,18 +1055,25 @@ fn ensure_worktree_owned(
     )))
 }
 
-fn run_worktree_removal(repo: &Path, worktree: &Path) {
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "remove", "--force", "--force"])
-        .arg(worktree)
-        .output();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "prune"])
-        .output();
+fn run_worktree_removal(repo: &Path, worktree: &Path) -> Result<()> {
+    let argv = vec![
+        "git".into(),
+        "-C".into(),
+        repo.to_string_lossy().into_owned(),
+        "worktree".into(),
+        "remove".into(),
+        "--force".into(),
+        worktree.to_string_lossy().into_owned(),
+    ];
+    let options = util::process::git_options(std::time::Duration::from_secs(60));
+    let output = util::process::run_command(&argv, &options)?;
+    if !output.success() {
+        return Err(FlowError::progress(format!(
+            "Git worktree removal failed: {}",
+            output.stderr_text()
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `git -C repo worktree list` still contains `path`.
@@ -1133,6 +1149,42 @@ pub fn quiesce_environment(env: &mut TaskEnvironment) -> Result<()> {
     }
     env.release_file_handles();
     Ok(())
+}
+
+// Used for the exact Git administrative directory: persist and rename before
+// clearing identity-bearing files, so a crash cannot lose the recovery anchor.
+fn quarantine_before_clear(state: &mut CleanupState, root: &PendingDirectory) -> Result<()> {
+    let expected = root
+        .identity
+        .ok_or_else(|| FlowError::guard("quarantine identity absent"))?;
+    let (parent, name) = open_root_parent(root)?;
+    let dir = open_verified_root(&parent, name, expected, &root.path)?;
+    let quarantine = persist_quarantine_rename(state, root, &parent, name, expected)?;
+    clear_directory(&dir, 0)?;
+    commit_unlink(
+        state,
+        &parent,
+        OsStr::new(&quarantine.name),
+        &quarantine,
+        &dir,
+        &root.path,
+    )?;
+    state.quarantine = None;
+    save_plan(state)
+}
+
+fn persist_quarantine_rename(
+    state: &mut CleanupState,
+    root: &PendingDirectory,
+    parent: &File,
+    name: &OsStr,
+    expected: RootIdentity,
+) -> Result<Quarantine> {
+    let quarantine = begin_quarantine(state, &root.path)?;
+    rename_into_quarantine(parent, name, &quarantine, &root.path)?;
+    parent.sync_all()?;
+    ensure_entry_identity(parent, OsStr::new(&quarantine.name), expected, &root.path)?;
+    Ok(quarantine)
 }
 
 #[cfg(test)]

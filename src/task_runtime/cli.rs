@@ -74,6 +74,10 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_missing_duplicate_and_unknown_cli_fields() {
+        // The valid missing-task case reaches restore, which can create control
+        // directories. Isolate it under the same lock as environment fixtures.
+        let temp = crate::util::fs::test_tempdir();
+        let _root = crate::task_env::test_env_root(&temp.path().join("control"));
         for args in [
             vec![],
             vec!["create"],

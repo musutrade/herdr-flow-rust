@@ -30,6 +30,10 @@ pub struct Permit {
 }
 
 pub fn acquire(owner: &Owner, exclusive: bool) -> Result<Permit> {
+    acquire_with_creation(owner, exclusive, exclusive && owner.instance_id.is_empty())
+}
+
+fn acquire_with_creation(owner: &Owner, exclusive: bool, create: bool) -> Result<Permit> {
     validate_owner_location(owner)?;
     let root = crate::queue::artifacts(&owner.queue_root)?.join("gates");
     util::ensure_private_dir(&root, false)?;
@@ -37,7 +41,7 @@ pub fn acquire(owner: &Owner, exclusive: bool) -> Result<Permit> {
     let file = OpenOptions::new()
         .read(true)
         .write(exclusive)
-        .create(exclusive)
+        .create(create)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -214,6 +218,49 @@ fn verify_runtime_record(root: &std::path::Path, owner: &Owner) -> Result<()> {
         {
             return Err(FlowError::guard("runtime lifecycle record changed"));
         }
+    }
+    Ok(())
+}
+
+/// Caller holds queue lock and has re-read the exact current terminal owner.
+/// Only a released tail can recreate a gate lost after its retirement.
+pub fn acquire_terminal(owner: &Owner) -> Result<Permit> {
+    let s = crate::queue::load_queue(&owner.queue_root)?;
+    let t = &s["tasks"][&owner.task_id];
+    verify_task_tuple(&s, t, owner)?;
+    verify_mapping(&t["environment"], owner)?;
+    if t["cleanup_obligation"]["owner"] != json!(owner)
+        || !matches!(t["final_outcome"].as_str(), Some("success" | "failure"))
+    {
+        return Err(FlowError::guard(
+            "terminal gate requires current cleanup obligation",
+        ));
+    }
+    let recreate = t["cleanup_obligation"]["status"] == "released"
+        && !t["cleanup_obligation"]["plan_removal"].is_null();
+    acquire_with_creation(owner, true, recreate)
+}
+
+/// Retire only the held gate under the queue transaction, before removing owner.
+/// Old descriptors cannot pass identity() after unlink or replacement.
+pub fn retire(owner: &Owner, permit: &Permit) -> Result<()> {
+    verify_retirement(owner, permit)?;
+    permit.identity()?;
+    fs::remove_file(&permit.path)?;
+    File::open(permit.path.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+fn verify_retirement(owner: &Owner, permit: &Permit) -> Result<()> {
+    let s = crate::queue::load_queue(&owner.queue_root)?;
+    permit.check(&s, true)?;
+    if !permit.exclusive
+        || permit.owner() != owner
+        || s["tasks"][&owner.task_id]["cleanup_obligation"]["status"] != "released"
+    {
+        return Err(FlowError::guard(
+            "gate retirement requires released current owner",
+        ));
     }
     Ok(())
 }

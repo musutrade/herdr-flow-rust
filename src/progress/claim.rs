@@ -12,6 +12,28 @@ use crate::Result;
 
 pub const SCHEMA: i64 = 3;
 
+/// Fresh isolated authority cannot infer a shared writable-root claim from a
+/// task name, an intake receipt, or an unbound bootstrap task.
+pub fn isolated_admission(s: &J, name: &str, claim: &J) -> Result<()> {
+    if s["lifecycle"].is_null() {
+        return Ok(());
+    }
+    let source = match claim["kind"].as_str() {
+        Some("member") => claim["root"].as_str(),
+        Some("root") => claim["previous"]["task"].as_str(),
+        _ => None,
+    };
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let target = crate::lifecycle::task_owner(s, name)?;
+    let source = crate::lifecycle::task_owner(s, source)?;
+    ensure(
+        target.is_some() && target == source,
+        "isolated cross-owner or unbound same-root claims are unsupported",
+    )
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum Claim {
@@ -447,6 +469,7 @@ pub fn execution(s: &J, t: &J) -> Result<()> {
 
 /// Called only on the registration staging copy, before reserving a writer.
 pub(super) fn admit(s: &mut J, t: &mut J, spec: &J, now: f64) -> Result<()> {
+    isolated_admission(s, t["task"].as_str().unwrap_or(""), &spec["claim"])?;
     if t.get("lineage").is_some() {
         return ensure(
             spec.get("claim").is_none(),

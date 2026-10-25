@@ -17,6 +17,11 @@ pub(super) fn data_root(root: &Path) -> Result<PathBuf> {
         }
         Ok(root.join("registry.json"))
     } else {
+        if std::fs::symlink_metadata(root.join("registry.json")).is_ok_and(|m| m.is_dir()) {
+            return Err(FlowError::guard(
+                "isolated registry document marker missing",
+            ));
+        }
         Ok(root.to_path_buf())
     }
 }
