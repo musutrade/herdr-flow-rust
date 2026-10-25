@@ -1,14 +1,19 @@
 //! Remove only the associations frozen before any resource deletion.
 use super::*;
 
-pub(super) fn remove(root: &Path, s: &mut J, plan: &Associations) -> Result<()> {
+pub(super) fn remove(
+    root: &Path,
+    s: &mut J,
+    plan: &Associations,
+    retirements: &receiver::Retirements,
+) -> Result<()> {
     validate_records(s, plan)?;
     shared::validate(s, plan)?;
     let artifacts = super::super::artifacts(root)?;
     remove_results(&artifacts, plan)?;
     filter_deliveries(&artifacts, s, plan)?;
     clear_receiver(root, s, plan)?;
-    prune(s, plan)
+    prune(s, plan, retirements)
 }
 
 fn validate_records(s: &J, plan: &Associations) -> Result<()> {
@@ -19,13 +24,7 @@ fn validate_records(s: &J, plan: &Associations) -> Result<()> {
     ] {
         for (id, frozen) in records {
             let current = &s[field][id];
-            let mut expected = frozen.clone();
-            if field == "tasks"
-                && id == &plan.owner.task_id
-                && current["cleanup_obligation"]["status"] == "associations_removed"
-            {
-                expected["cleanup_obligation"]["status"] = json!("associations_removed");
-            }
+            let expected = expected_record(field, id, frozen, current, plan)?;
             require(
                 current.is_null() || current == &expected,
                 "cleanup association was replaced",
@@ -33,6 +32,23 @@ fn validate_records(s: &J, plan: &Associations) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn expected_record(
+    field: &str,
+    id: &str,
+    frozen: &J,
+    current: &J,
+    plan: &Associations,
+) -> Result<J> {
+    let mut expected = frozen.clone();
+    if field == "tasks" && id == plan.owner.task_id.as_str() {
+        receiver::normalize_task(&mut expected, current, plan)?;
+        if current["cleanup_obligation"]["status"] == "associations_removed" {
+            expected["cleanup_obligation"]["status"] = json!("associations_removed");
+        }
+    }
+    Ok(expected)
 }
 
 fn remove_results(artifacts: &Path, plan: &Associations) -> Result<()> {
@@ -151,17 +167,35 @@ fn clear_receiver(root: &Path, s: &J, plan: &Associations) -> Result<()> {
     let Some(path) = &plan.guard_dir else {
         return Ok(());
     };
+    if receiver::retired(s, plan)? {
+        return Ok(());
+    }
+    verify_receiver_binding(s, path, plan)?;
+    let _lock = crate::guard::locked_existing(path)?;
+    let mut guard = verify_receiver(path, plan)?;
+    clear_external_delivery(root, s, plan, path, &mut guard)
+}
+
+fn verify_receiver_binding(s: &J, path: &Path, plan: &Associations) -> Result<()> {
     require(
         s["receiver"] == plan.receiver && s["guard_dir"] == json!(path),
         "cleanup receiver changed",
     )?;
-    let _lock = crate::guard::locked(path)?;
-    let mut guard = util::read_state_json(path, "state.json")?;
+    verify_receiver(path, plan)?;
+    Ok(())
+}
+
+fn verify_receiver(path: &Path, plan: &Associations) -> Result<J> {
+    require(
+        super::plan::receiver_owner(Some(path))? == plan.receiver_owner,
+        "cleanup receiver owner changed",
+    )?;
+    let guard = util::read_state_json(path, "state.json")?;
     require(
         crate::guard::scope(&guard) == plan.receiver,
         "cleanup receiver scope changed",
     )?;
-    clear_external_delivery(root, s, plan, path, &mut guard)
+    Ok(guard)
 }
 
 fn clear_external_delivery(
@@ -202,7 +236,11 @@ fn delivery_empty(delivery: &J, plan: &Associations) -> Result<bool> {
         .is_some_and(Vec::is_empty))
 }
 
-pub(super) fn prune(s: &mut J, plan: &Associations) -> Result<()> {
+pub(super) fn prune(
+    s: &mut J,
+    plan: &Associations,
+    retirements: &receiver::Retirements,
+) -> Result<()> {
     validate_records(s, plan)?;
     shared::prune(s, plan)?;
     remove_entries(s, "waits", plan.waits.keys());
@@ -213,6 +251,7 @@ pub(super) fn prune(s: &mut J, plan: &Associations) -> Result<()> {
     if plan.owned_receiver {
         clear_owned_receiver(s, plan)?;
     }
+    receiver::apply(s, retirements)?;
     if !s["tasks"][&plan.owner.task_id].is_null() {
         s["tasks"][&plan.owner.task_id]["cleanup_obligation"]["status"] =
             json!("associations_removed");

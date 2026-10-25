@@ -1,10 +1,10 @@
 # Isolated task outcomes, write barriers and finalization
 
-These are the second and third ordered slices of [Issue #130](https://github.com/musutrade/herdr-flow-rust/issues/130).
+These are the lifecycle slices of [Issue #130](https://github.com/musutrade/herdr-flow-rust/issues/130).
 It extends [task-instance creation](task-instance.md) with explicit owner outcomes
 and short mutation permits, then automatic owned-resource finalization. PR3
-reuses the existing watch and cleanup machinery; cross-module fault combinations
-remain PR4. This does not deploy a new runtime or migrate production resources.
+reuses the existing watch and cleanup machinery; PR4 exercises cross-module
+fault combinations. This does not deploy a new runtime or migrate production resources.
 
 ## Fresh authority only
 
@@ -160,6 +160,18 @@ are cleared. There is no repository-wide prune. Wrong identities, unknown
 partial roots or mounts retain the obligation; a missing path alone does not
 prove completed cleanup.
 
+If real Git add completed while its reply was lost, the original creation may
+still be `GitPending` without a saved Git identity. After process quiescence,
+cleanup can reconcile that exact add read-only: both roots and checkout must have
+their original recorded inodes, the repository/common directory and reciprocal
+Git links must match, HEAD must equal the creation commit, and the exact admin
+directory must not occur in the saved pre-add snapshot. Cleanup freezes the
+observed identity as `git_removal_identity` in the temporary terminal plan before
+`GitRemoving`. It does not alter the environment's original creation document,
+materialize the checkout, or repeat add. Recovery uses that frozen proof through
+Git removal and final absence verification; it never resamples a replacement
+path. Prepared intents and unknown mkdir objects do not gain this authority.
+
 Process observation is fallible. Fresh creation records boot ID, PID/time
 namespace identity and an integer boot-clock birth floor before managed spawn;
 recovery never resamples it. Only positively older, unregistered processes can
@@ -181,6 +193,20 @@ lane state remain intact. Fresh isolated admission rejects cross-owner V1
 claim/root succession; cleanup cannot erase a surviving claim authority chain.
 Explicit same-owner V2 activities retain their individual epochs and are removed
 with the owner. Settled Git receipt references are matched by typed identity.
+
+Two closing owners can depend on the same task-owned receiver. Its owner may
+finish cleanup before the other owner resumes. Under the queue lock, receiver
+retirement reads each pending owner's immutable cleanup plan once, without
+taking that other owner's EX gate. The same fixed map is used for pruning and
+validating the queue transaction. That transaction records an exact
+`receiver_dependency` and `retired_by` Owner in the dependent owner's existing
+cleanup obligation, including when its plan was saved before the dependency
+checkpoint. The plan itself is never rewritten. A verified retirement skips
+the old receiver path entirely; missing paths or matching session labels alone
+do not grant this permission. Without that proof, cleanup verifies the frozen
+Owner and scope before and after locking the existing guard, without creating
+its directory. A replacement receiver is not touched. These dependency records
+disappear with the owner; ordinary saves still cannot change terminal rows.
 
 After resources and associations are gone, the driver releases the environment
 and registry claim, checkpoints the cleanup-plan inode proof in the queue,
@@ -206,3 +232,27 @@ exercise real locks, directory sentinels and an idle fixture broker refusing a
 late RPC without contacting a native server. They do not replace real Agent,
 Herdr, production teardown or the 20-task end-to-end acceptance. Herdr remains
 optional and no shared resource ownership is inferred.
+
+The creation/removal reply-loss fixture executes real Git in a supervisor child,
+withholds the completed mutation's reply, then kills the supervisor. Assertions
+before fixture destruction check same-instance recovery, direct-child exit,
+unchanged original creation, and removal of roots, Git registration, queue owner
+and temporary recovery records. Invalid pre-add identity, HEAD, reciprocal links
+and replaced inodes are separate refusal cases. These are isolated crash fixtures,
+not real Agent or Herdr lifecycle acceptance.
+
+A test-only checkpoint also stops a real driver after durable process freezing:
+the supervisor is killed while the fixture child is still stopped, then another
+driver terminates it and removes the roots. A separate combination uses the
+existing Local file executor and protocol acceptance fixtures: an actual file
+delivery loses its reply, observation later confirms it, and terminal recovery
+preserves the customer file with exactly one execution. The acceptance protocol
+in that test is synthetic; the endpoint I/O and cleanup are real fixture actions.
+
+Additional combinations run two separate driver processes against one obligation,
+recover an actually filtered mixed-delivery sidecar after a busy guard prevents
+the queue commit, and reuse a fully cleaned task name and paths for a new epoch
+and instance. The latter verifies that stale results, snapshots and terminal
+requests cannot change the new instance. Receiver-retirement tests distinguish
+real owner cleanup from deliberately constructed checkpoint and corrupt-record
+states; they do not treat missing state as retirement proof.

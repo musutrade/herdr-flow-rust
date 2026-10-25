@@ -34,6 +34,8 @@ pub struct TerminalState {
     pub associations: J,
     pub phase: Phase,
     pub creation: CreationIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_removal_identity: Option<crate::task_env::instance::GitIdentity>,
     pub environment: DocumentRemoval,
     pub environment_digest: String,
     pub registry: Option<registry::RegistryEntry>,
@@ -93,6 +95,7 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
             associations,
             phase: Phase::Prepared,
             creation,
+            git_removal_identity: None,
             environment,
             environment_digest: environment_digest(env.state_file())?,
             registry: entry,
@@ -118,6 +121,32 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
 pub fn association_plan(owner: &Owner, permit: &Permit) -> Result<J> {
     check(owner, permit)?;
     Ok(terminal(&storage::load(owner)?)?.associations.clone())
+}
+
+/// Read the immutable association snapshot of another pending owner. The caller
+/// holds the shared queue transaction; no owner gate or environment lock is
+/// taken, and no missing control path or plan is created.
+pub fn frozen_association_plan(owner: &Owner) -> Result<Option<J>> {
+    let queue = crate::queue::load_queue(&owner.queue_root)?;
+    validate_frozen_pending(&queue, owner)?;
+    storage::load_optional(owner)?
+        .map(|plan| Ok(terminal(&plan)?.associations.clone()))
+        .transpose()
+}
+
+fn validate_frozen_pending(queue: &J, owner: &Owner) -> Result<()> {
+    require(
+        queue["id"] == owner.queue_id
+            && crate::lifecycle::task_owner(queue, &owner.task_id)?.as_ref() == Some(owner),
+        "frozen association owner changed",
+    )?;
+    let task = &queue["tasks"][&owner.task_id];
+    require(
+        task["cleanup_obligation"]["owner"] == serde_json::to_value(owner)?
+            && task["cleanup_obligation"]["status"] == "pending"
+            && matches!(task["final_outcome"].as_str(), Some("success" | "failure")),
+        "frozen associations require current pending owner",
+    )
 }
 
 /// Queue lock is not held during process/Git/root work. EX remains held.
@@ -312,7 +341,7 @@ fn save_prepared(owner: &Owner, plan: &CleanupState) -> Result<()> {
 
 fn checkpoint_git_removing(plan: &mut CleanupState) -> Result<()> {
     if terminal(plan)?.phase == Phase::Prepared {
-        super::super::instance::git::verify_removal(&terminal(plan)?.creation)?;
+        git::prepare_removal(plan)?;
         plan.terminal.as_mut().unwrap().phase = Phase::GitRemoving;
         storage::save(plan)?;
     }
@@ -416,9 +445,13 @@ mod tests {
             let _lock = queue::locked(&self.queue, false).unwrap();
             queue::save(&self.queue, s).unwrap();
         }
-        fn create(&self) -> Owner {
+        fn creation_spec(&self) -> J {
             let s = self.state();
-            self.call("task-environment", &json!({"action":"create","task":"task","queue_id":s["id"],"epoch":1,"state_version":1,"environment":{"workspace_root":self.temp.path().join("workspace"),"temp_root":self.temp.path().join("scratch"),"delivery_targets":[],"repository":self.temp.path().join("repo"),"commit":s["tasks"]["task"]["candidate"]}})).unwrap();
+            json!({"action":"create","task":"task","queue_id":s["id"],"epoch":1,"state_version":1,"environment":{"workspace_root":self.temp.path().join("workspace"),"temp_root":self.temp.path().join("scratch"),"delivery_targets":[],"repository":self.temp.path().join("repo"),"commit":s["tasks"]["task"]["candidate"]}})
+        }
+        fn create(&self) -> Owner {
+            self.call("task-environment", &self.creation_spec())
+                .unwrap();
             lifecycle::task_owner(&self.state(), "task")
                 .unwrap()
                 .unwrap()
@@ -450,7 +483,8 @@ mod tests {
             let report = queue::finalization::drive(&self.queue).unwrap();
             assert_eq!(report.pending, 1, "{report:?}");
             let permit = lifecycle::acquire(owner, true).unwrap();
-            let associations = task_env::terminal::association_plan(owner, &permit).unwrap();
+            let associations = task_env::terminal::association_plan(owner, &permit)
+                .unwrap_or_else(|error| panic!("{report:?}: {error}"));
             fs::remove_dir(&workspace).unwrap();
             fs::rename(&held, &workspace).unwrap();
             associations
@@ -659,7 +693,8 @@ mod tests {
             let mut c = Command::new("sh");
             c.args(["-c", "printf 'ready\\n'; IFS= read -r stop"])
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped());
+                .stdout(Stdio::piped())
+                .process_group(0);
             if let Some(id) = marker {
                 c.env(task_env::MARKER_ENV, id);
             }
@@ -1106,6 +1141,545 @@ read -r ignored < "$REMOVAL_FIXTURE_FIFO"
         fs::remove_dir(&env.workspace_root).unwrap();
         drop(env);
         f.record(&owner);
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.completed, 1, "{report:?}");
+        f.clean(&owner);
+    }
+
+    #[test]
+    #[ignore = "private lifecycle crash-supervisor subprocess fixture"]
+    fn lifecycle_recovery_worker() {
+        let input = PathBuf::from(std::env::var_os("RECOVERY_FIXTURE_INPUT").unwrap());
+        let data: J = serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+        let root = Path::new(data["queue"].as_str().unwrap());
+        configure_stop_checkpoint(&data);
+        if data["action"] == "remove" {
+            let report = queue::finalization::drive(root).unwrap();
+            assert_eq!(report.completed, 1, "{report:?}");
+            return;
+        }
+        queue::finalization::task_action(
+            root,
+            "task-environment",
+            &data["spec"],
+            Some(SESSION),
+            &|_| panic!("fixture must not invoke a native agent"),
+        )
+        .unwrap();
+    }
+
+    fn configure_stop_checkpoint(data: &J) {
+        if let Some(path) = data["stop_ready"].as_str() {
+            super::process::faults::pause_after_freeze(PathBuf::from(path));
+        }
+    }
+
+    fn mutation_reply_loss(f: &Fixture, action: &str) -> Owner {
+        let input = f.temp.path().join(format!("{action}-input.json"));
+        fs::write(
+            &input,
+            serde_json::to_vec(&json!({"queue":f.queue,"spec":f.creation_spec(),"action":action}))
+                .unwrap(),
+        )
+        .unwrap();
+        let bin = f.temp.path().join(format!("{action}-bin"));
+        private(&bin);
+        // Real Git completes the mutation. The same PID withholds its reply;
+        // no exec follows the ready marker. Only this subprocess changes PATH.
+        fs::write(
+            bin.join("git"),
+            br#"#!/bin/sh
+/usr/bin/git "$@"
+status=$?
+[ "$status" = 0 ] || exit "$status"
+if [ "$3" = worktree ] && [ "$4" = "$RECOVERY_FIXTURE_ACTION" ]; then
+    printf '%s\n' "$$" > "$RECOVERY_FIXTURE_PID"
+    read -r ignored < "$RECOVERY_FIXTURE_FIFO"
+fi
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o700)).unwrap();
+        let fifo = f.temp.path().join(format!("{action}-fifo"));
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: private fixture path; no production filesystem or process.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let pidfile = f.temp.path().join(format!("{action}-child-pid"));
+        let log = fs::File::create(f.temp.path().join(format!("{action}-worker.log"))).unwrap();
+        let mut worker = ReadyWorker(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "task_env::cleanup::terminal::tests::lifecycle_recovery_worker",
+                ])
+                .env("PATH", &bin)
+                .env("RECOVERY_FIXTURE_INPUT", &input)
+                .env("RECOVERY_FIXTURE_ACTION", action)
+                .env("RECOVERY_FIXTURE_PID", &pidfile)
+                .env("RECOVERY_FIXTURE_FIFO", &fifo)
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            if let Ok(data) = fs::read_to_string(&pidfile) {
+                if let Ok(pid) = data.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "creation worker exited: {}",
+                fs::read_to_string(f.temp.path().join(format!("{action}-worker.log"))).unwrap()
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real Git mutation did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let state = f.state();
+        let owner = lifecycle::task_owner(&state, "task").unwrap().unwrap();
+        assert_eq!(state["tasks"]["task"]["environment"]["phase"], "creating");
+        let record = task_env::ProcessRecord {
+            pid,
+            start_time: task_env::process_start_time(pid),
+        };
+        assert!(record.start_time.is_some());
+        assert!(task_env::process_has_marker(pid, &owner.instance_id));
+        let doc = util::read_json(Path::new(
+            state["tasks"]["task"]["environment"]["state_file"]
+                .as_str()
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(doc["creation"]["phase"], "git_pending");
+        assert!(doc["creation"]["git_identity"].is_null());
+        assert_eq!(
+            f.temp.path().join("workspace/checkout/.git").is_file(),
+            action == "add"
+        );
+        worker.0.kill().unwrap();
+        worker.0.wait().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while task_env::process_record_is_alive(&record) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !task_env::process_record_is_alive(&record),
+            "Git reply wrapper survived supervisor"
+        );
+        owner
+    }
+
+    #[test]
+    fn creation_reply_loss_then_final_failure_uses_same_instance_cleanup() {
+        let f = Fixture::new();
+        let owner = mutation_reply_loss(&f, "add");
+        f.record(&owner);
+        let before = f.state();
+        let spec = json!({"action":"resume","task":"task","queue_id":owner.queue_id,
+            "epoch":owner.epoch,"instance_id":owner.instance_id,
+            "state_version":before["tasks"]["task"]["state_version"]});
+        assert!(f.call("task-environment", &spec).is_err());
+        assert_eq!(f.state(), before);
+        let first = queue::finalization::drive(&f.queue).unwrap();
+        let second = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(
+            first.completed + second.completed,
+            1,
+            "first={first:?}; retry={second:?}"
+        );
+        f.clean(&owner);
+    }
+
+    #[test]
+    fn pending_git_removal_rejects_foreign_or_incomplete_identity() {
+        let f = Fixture::new();
+        let owner = mutation_reply_loss(&f, "add");
+        f.record(&owner);
+        f.freeze_before_resources(&owner);
+        let plan = super::storage::load(&owner).unwrap();
+        let original = super::terminal(&plan).unwrap().creation.clone();
+        let proof = task_env::instance::git::pending_removal_identity(&original)
+            .unwrap()
+            .unwrap();
+        let before = f.state();
+        let mut invalid = plan.clone();
+        invalid
+            .terminal
+            .as_mut()
+            .unwrap()
+            .creation
+            .git_admin_before
+            .as_mut()
+            .unwrap()
+            .insert(
+                proof
+                    .admin_dir
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                proof.admin_identity,
+            );
+        assert!(super::git::prepare_removal(&mut invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("existed before"));
+        let mut invalid = plan.clone();
+        invalid.terminal.as_mut().unwrap().creation.git_admin_before = None;
+        assert!(super::git::prepare_removal(&mut invalid).is_err());
+        let mut invalid = plan.clone();
+        invalid.roots[0].identity = None;
+        assert!(super::git::prepare_removal(&mut invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("recorded root"));
+        for (name, foreign) in [
+            ("HEAD", "0000000000000000000000000000000000000000\n"),
+            ("gitdir", "/foreign/checkout/.git\n"),
+            ("commondir", "/foreign/common\n"),
+        ] {
+            let path = proof.admin_dir.join(name);
+            let bytes = fs::read(&path).unwrap();
+            fs::write(&path, foreign).unwrap();
+            let report = queue::finalization::drive(&f.queue).unwrap();
+            assert_eq!(report.pending, 1, "{name}: {report:?}");
+            assert!(original.checkout.exists());
+            assert_eq!(fs::read_to_string(&path).unwrap(), foreign);
+            assert_eq!(f.state(), before);
+            fs::write(path, bytes).unwrap();
+        }
+        let held = f.temp.path().join("retained-checkout");
+        fs::rename(&original.checkout, &held).unwrap();
+        private(&original.checkout);
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.pending, 1, "{report:?}");
+        assert!(held.join(".git").exists());
+        assert_eq!(f.state(), before);
+        fs::remove_dir(&original.checkout).unwrap();
+        fs::rename(held, &original.checkout).unwrap();
+        assert!(super::terminal(&super::storage::load(&owner).unwrap())
+            .unwrap()
+            .git_removal_identity
+            .is_none());
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.completed, 1, "{report:?}");
+        f.clean(&owner);
+    }
+
+    #[test]
+    fn real_add_and_remove_reply_losses_resume_frozen_removal_proof() {
+        let f = Fixture::new();
+        let owner = mutation_reply_loss(&f, "add");
+        let state_file = PathBuf::from(
+            f.state()["tasks"]["task"]["environment"]["state_file"]
+                .as_str()
+                .unwrap(),
+        );
+        let original_env = util::read_json(&state_file).unwrap();
+        f.record(&owner);
+        assert_eq!(mutation_reply_loss(&f, "remove"), owner);
+        let plan = super::storage::load(&owner).unwrap();
+        let terminal = super::terminal(&plan).unwrap();
+        assert_eq!(terminal.phase, super::Phase::GitRemoving);
+        assert!(terminal.creation.git_identity.is_none());
+        let proof = terminal.git_removal_identity.as_ref().unwrap();
+        assert!(!proof.admin_dir.exists());
+        assert!(!f.temp.path().join("workspace/checkout").exists());
+        assert_eq!(util::read_json(&state_file).unwrap(), original_env);
+        // The saved proof must also drive final absence checks, even with the
+        // original creation identity still None. No add/populate is permitted.
+        assert_eq!(
+            super::git::removal_intent(&plan)
+                .unwrap()
+                .git_identity
+                .as_ref(),
+            Some(proof)
+        );
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.completed, 1, "{report:?}");
+        assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+        f.clean(&owner);
+    }
+
+    #[test]
+    fn supervisor_crash_after_persisted_stop_resumes_kill_and_root_removal() {
+        let f = Fixture::new();
+        let owner = f.create();
+        let mut child = ReadyWorker::new(Some(&owner.instance_id));
+        let mut env = task_env::restore_environment("task").unwrap();
+        env.register_process(child.pid()).unwrap();
+        drop(env);
+        f.record(&owner);
+        {
+            let _fault = super::process::faults::inject(child.pid(), true, libc::EACCES);
+            let report = queue::finalization::drive(&f.queue).unwrap();
+            assert_eq!(report.pending, 1, "{report:?}");
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert!(f.temp.path().join("workspace/checkout/.git").is_file());
+            assert_eq!(f.state()["tasks"]["task"]["final_outcome"], "failure");
+        }
+        let input = f.temp.path().join("stop-input.json");
+        let ready = f.temp.path().join("stop-ready");
+        fs::write(
+            &input,
+            serde_json::to_vec(&json!({"queue":f.queue,"action":"remove","stop_ready":ready}))
+                .unwrap(),
+        )
+        .unwrap();
+        let log = fs::File::create(f.temp.path().join("stop-worker.log")).unwrap();
+        let mut supervisor = ReadyWorker(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "task_env::cleanup::terminal::tests::lifecycle_recovery_worker",
+                ])
+                .env("RECOVERY_FIXTURE_INPUT", &input)
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                supervisor.0.try_wait().unwrap().is_none(),
+                "supervisor exited: {}",
+                fs::read_to_string(f.temp.path().join("stop-worker.log")).unwrap()
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stop checkpoint not reached"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        supervisor.0.kill().unwrap();
+        supervisor.0.wait().unwrap();
+        let plan = super::storage::load(&owner).unwrap();
+        assert!(super::terminal(&plan)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|r| r.pid == child.pid()
+                && r.start_time == task_env::process_start_time(child.pid())));
+        assert_eq!(
+            super::terminal(&plan).unwrap().phase,
+            super::Phase::Prepared
+        );
+        let stat = fs::read_to_string(format!("/proc/{}/stat", child.pid())).unwrap();
+        assert_eq!(
+            stat.rsplit_once(')').unwrap().1.split_whitespace().next(),
+            Some("T")
+        );
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(f.temp.path().join("workspace/checkout/.git").is_file());
+        assert_eq!(f.state()["tasks"]["task"]["final_outcome"], "failure");
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.completed, 1, "{report:?}");
+        child.0.wait().unwrap();
+        assert!(!task_env::process_record_is_alive(
+            &task_env::ProcessRecord {
+                pid: child.pid(),
+                start_time: plan
+                    .terminal
+                    .as_ref()
+                    .unwrap()
+                    .targets
+                    .iter()
+                    .find(|r| r.pid == child.pid())
+                    .unwrap()
+                    .start_time
+            }
+        ));
+        f.clean(&owner);
+    }
+
+    fn lineage_step(f: &Fixture, mut spec: J) {
+        let mut s = f.state();
+        spec["task"] = json!("task");
+        spec["state_version"] = s["tasks"]["task"]["state_version"].clone();
+        crate::progress::lineage::action(&mut s, &spec, 1.0).unwrap();
+        f.save(&mut s);
+    }
+
+    fn delivery_instance(f: &Fixture, target: &Path) -> Owner {
+        let mut s = f.state();
+        let sha = s["tasks"]["task"]["candidate"].clone();
+        s["tasks"] = json!({});
+        crate::progress::lineage::action(&mut s, &json!({"kind":"plan","task":"task","goal":"deliver A","basis":{"original":["fixture request"],"changes":[],"specifications":[],"endpoint":"local file","confirmation":"fixture owner"},"authorization":[{"id":"publish","action":"delivery","source":"explicit fixture authorization"}]}), 1.0).unwrap();
+        f.save(&mut s);
+        lineage_step(
+            f,
+            json!({"kind":"artifact","artifact":{"adapter":"git","id":sha,"location":f.temp.path().join("repo")}}),
+        );
+        lineage_step(
+            f,
+            json!({"kind":"candidate","candidate":sha,"reason":"initial Git source"}),
+        );
+        let mut spec = f.creation_spec();
+        spec["state_version"] = f.state()["tasks"]["task"]["state_version"].clone();
+        spec["environment"]["delivery_targets"] = json!([{"path":target,"target_type":"formal"}]);
+        f.call("task-environment", &spec).unwrap();
+        let owner = lifecycle::task_owner(&f.state(), "task").unwrap().unwrap();
+        let mut s = f.state();
+        let shared = PathBuf::from(s["guard_dir"].as_str().unwrap());
+        let root = f.temp.path().join("scratch/receiver");
+        private(&root);
+        util::protected::runtime_namespace(&root).unwrap();
+        util::atomic_write_json(&root.join("lifecycle-owner.json"), &json!(owner)).unwrap();
+        let mut receiver = util::read_state_json(&shared, "state.json").unwrap();
+        receiver["task"] = json!("task");
+        receiver["cwd"] = json!(f.temp.path().join("workspace/checkout"));
+        util::atomic_write_json(&root.join("state.json"), &receiver).unwrap();
+        s["guard_dir"] = json!(root);
+        s["receiver"] = guard::scope(&receiver);
+        f.save(&mut s);
+        owner
+    }
+
+    fn accept_file_fixture(f: &Fixture) {
+        use crate::progress::{self, acceptance};
+        let source = f.temp.path().join("workspace/checkout/formal.txt");
+        fs::write(&source, b"formal deliverable").unwrap();
+        let artifact = json!({"adapter":"file-sha256","id":util::pyjson::sha256_hex(b"formal deliverable"),"location":source});
+        lineage_step(f, json!({"kind":"artifact","artifact":artifact}));
+        lineage_step(
+            f,
+            json!({"kind":"candidate","candidate":artifact["id"],"reason":"fixture final output"}),
+        );
+        lineage_step(
+            f,
+            json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"opencode","session":"independent"}}}),
+        );
+        let mut s = f.state();
+        let verdict = acceptance::submit(&mut s,"review",&json!({"adapter":"opencode","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"fixture request","status":"passed","evidence":"protocol fixture only"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
+        let mut event = json!({"id":"result","task":"review","wait":"review","acknowledged":true,"outcome":"complete"});
+        let wait = s["waits"]["review"].clone();
+        event["epoch"] = wait["epoch"].clone();
+        progress::attach(&mut s, &mut event, &wait, 2.0).unwrap();
+        s["events"]["result"] = event;
+        let spec = json!({"task":"review","state_version":s["tasks"]["review"]["state_version"],"event":"result","verdict":verdict["id"],"next_action":{"kind":"delivery","owner":"customer","reason":"passed","condition":"correct endpoint"}});
+        progress::apply(&mut s, &spec, 3.0).unwrap();
+        f.save(&mut s);
+    }
+
+    struct LostDeliveryReply {
+        executions: std::cell::Cell<usize>,
+    }
+    impl crate::delivery::Executor for LostDeliveryReply {
+        fn preflight(&self, intent: &J) -> crate::Result<()> {
+            crate::delivery::local::Local.preflight(intent)
+        }
+        fn execute(&self, intent: &J) -> crate::Result<()> {
+            self.executions.set(self.executions.get() + 1);
+            crate::delivery::local::Local.execute(intent)?;
+            Err(crate::FlowError::progress("fixture lost execute reply"))
+        }
+        fn observe(&self, _: &J) -> crate::Result<crate::delivery::Observation> {
+            Ok(crate::delivery::Observation::Unknown(
+                "fixture temporary observation outage".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn confirmed_local_delivery_after_lost_reply_survives_terminal_recovery_without_reexecution() {
+        use crate::delivery;
+        let f = Fixture::new();
+        let target = f.temp.path().join("customer.txt");
+        let owner = delivery_instance(&f, &target);
+        accept_file_fixture(&f);
+        let executor = LostDeliveryReply {
+            executions: std::cell::Cell::new(0),
+        };
+        let mut env = task_env::restore_environment("task").unwrap();
+        let spec = json!({"adapter":"file","target":target,"authorization":"publish","state_version":f.state()["tasks"]["task"]["state_version"]});
+        delivery::prepare(&mut env, &f.queue, &spec, &executor).unwrap();
+        assert_eq!(
+            delivery::execute(&mut env, &executor).unwrap()["phase"],
+            "unknown"
+        );
+        assert!(delivery::execute(&mut env, &executor).is_err());
+        assert_eq!(executor.executions.get(), 1);
+        assert_eq!(fs::read(&target).unwrap(), b"formal deliverable");
+        drop(env);
+        assert!(f.call("task-finalize", &f.spec(&owner, "success")).is_err());
+        assert!(f.temp.path().join("workspace/checkout").exists());
+        let mut env = task_env::restore_environment("task").unwrap();
+        assert_eq!(
+            delivery::reconcile(&mut env, &delivery::local::Local).unwrap()["phase"],
+            "confirmed"
+        );
+        drop(env);
+        {
+            let _lock = queue::locked(&f.queue, false).unwrap();
+            queue::task_action(
+                &f.queue,
+                "task-finalize",
+                &f.spec(&owner, "success"),
+                Some(SESSION),
+                &|_| panic!("no native call"),
+            )
+            .unwrap();
+        }
+        f.freeze_before_resources(&owner);
+        assert_eq!(f.state()["tasks"]["task"]["final_outcome"], "success");
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.completed, 1, "{report:?}");
+        assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+        assert_eq!(executor.executions.get(), 1);
+        assert_eq!(fs::read(&target).unwrap(), b"formal deliverable");
+        assert!(f.state()["tasks"]["review"].is_null());
+        assert!(f.state()["waits"]["review"].is_null());
+        assert!(f.state()["events"]["result"].is_null());
+        f.clean(&owner);
+    }
+
+    #[test]
+    fn frozen_associations_are_read_only_without_taking_another_owner_gate() {
+        let f = Fixture::new();
+        let owner = f.create();
+        assert!(super::frozen_association_plan(&owner).is_err());
+        f.record(&owner);
+        let queue_before = f.state();
+        let path = super::storage::plan_path(&owner).unwrap();
+        assert!(!path.exists());
+        assert!(super::frozen_association_plan(&owner).unwrap().is_none());
+        assert!(!path.exists());
+        assert_eq!(f.state(), queue_before);
+        let expected = f.freeze_before_resources(&owner);
+        let permit = lifecycle::acquire(&owner, true).unwrap();
+        let _queue = queue::locked(&f.queue, false).unwrap();
+        let original = util::read_json(&path).unwrap();
+        let before = fs::read(path.join("authority.json")).unwrap();
+        assert_eq!(
+            super::frozen_association_plan(&owner).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(fs::read(path.join("authority.json")).unwrap(), before);
+        let mut wrong = owner.clone();
+        wrong.epoch += 1;
+        assert!(super::frozen_association_plan(&wrong).is_err());
+        wrong = owner.clone();
+        wrong.instance_id.push_str("-foreign");
+        assert!(super::frozen_association_plan(&wrong).is_err());
+        let mut malformed = original.clone();
+        malformed["terminal"]["owner"]["epoch"] = json!(999);
+        util::atomic_write_json(&path, &malformed).unwrap();
+        let bad_before = fs::read(path.join("authority.json")).unwrap();
+        assert!(super::frozen_association_plan(&owner).is_err());
+        assert_eq!(fs::read(path.join("authority.json")).unwrap(), bad_before);
+        assert_eq!(f.state(), queue_before);
+        util::atomic_write_json(&path, &original).unwrap();
+        drop(_queue);
+        drop(permit);
         let report = queue::finalization::drive(&f.queue).unwrap();
         assert_eq!(report.completed, 1, "{report:?}");
         f.clean(&owner);

@@ -132,6 +132,8 @@ fn validate_retained_descendants(plan: &CleanupState) -> Result<()> {
 }
 pub(super) fn quiesce(plan: &mut CleanupState) -> Result<()> {
     freeze(plan)?;
+    #[cfg(test)]
+    faults::after_freeze();
     boundary(plan)?;
     for r in &terminal(plan)?.targets {
         signals::signal(r, libc::SIGKILL)?;
@@ -387,6 +389,22 @@ fn freeze_round(plan: &mut CleanupState) -> Result<bool> {
 pub(super) mod faults {
     use std::{cell::RefCell, io};
     thread_local! {static FAULT:RefCell<Option<(i32,bool,i32)>>=const{RefCell::new(None)};}
+    thread_local! {static STOP_READY:RefCell<Option<std::path::PathBuf>>=const{RefCell::new(None)};}
+    pub fn pause_after_freeze(path: std::path::PathBuf) {
+        STOP_READY.with(|slot| *slot.borrow_mut() = Some(path));
+    }
+    pub(super) fn after_freeze() {
+        STOP_READY.with(|slot| {
+            if let Some(path) = slot.borrow().as_ref() {
+                std::fs::write(path, b"stopped\n").unwrap();
+                loop {
+                    // SAFETY: only the private crash-test supervisor enables
+                    // this checkpoint. Its parent kills and reaps it boundedly.
+                    unsafe { libc::pause() };
+                }
+            }
+        });
+    }
     pub struct Guard;
     pub fn inject(pid: i32, environ: bool, errno: i32) -> Guard {
         FAULT.with(|f| {

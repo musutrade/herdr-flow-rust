@@ -3,7 +3,7 @@ use super::*;
 use crate::task_env::instance::git as identity;
 
 pub(super) fn remove(plan: &mut CleanupState) -> Result<()> {
-    let intent = terminal(plan)?.creation.clone();
+    let intent = removal_intent(plan)?;
     let Some(g) = &intent.git_identity else {
         return identity::verify_removal(&intent);
     };
@@ -55,4 +55,38 @@ fn resume_admin_quarantine(
     storage::save(plan)?;
     identity::verify_unregistered(intent)?;
     Ok(true)
+}
+
+/// Freeze recovered Git identity separately; the environment snapshot is immutable.
+pub(super) fn prepare_removal(plan: &mut CleanupState) -> Result<()> {
+    let mut intent = terminal(plan)?.creation.clone();
+    let recovered = identity::pending_removal_identity(&intent)?;
+    if let Some(proof) = &recovered {
+        require(
+            plan.roots.iter().all(|root| root.identity.is_some()),
+            "pending Git removal requires recorded root identities",
+        )?;
+        intent.git_identity = Some(proof.clone());
+    }
+    identity::verify_removal(&intent)?;
+    plan.terminal.as_mut().unwrap().git_removal_identity = recovered;
+    Ok(())
+}
+
+pub(super) fn removal_intent(plan: &CleanupState) -> Result<CreationIntent> {
+    let t = terminal(plan)?;
+    let mut intent = t.creation.clone();
+    if let Some(proof) = &t.git_removal_identity {
+        require(
+            plan.roots.iter().all(|root| root.identity.is_some()),
+            "pending Git removal requires recorded root identities",
+        )?;
+        require(
+            t.phase != Phase::Prepared,
+            "removal identity has no GitRemoving checkpoint",
+        )?;
+        identity::validate_pending_removal_identity(&intent, proof)?;
+        intent.git_identity = Some(proof.clone());
+    }
+    Ok(intent)
 }

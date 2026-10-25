@@ -400,6 +400,69 @@ pub(in crate::task_env) fn verify_removal(i: &CreationIntent) -> Result<()> {
     }
 }
 
+/// Reconcile only a completed add whose reply/identity checkpoint was lost.
+/// This observes the original intent; it never adds or populates a checkout.
+pub(in crate::task_env) fn pending_removal_identity(
+    i: &CreationIntent,
+) -> Result<Option<GitIdentity>> {
+    if i.git_identity.is_some() || i.phase != CreationPhase::GitPending {
+        return Ok(None);
+    }
+    source(i)?;
+    if absent(&i.checkout.join(".git"))? {
+        verify_unrecorded_removal(i)?;
+        return Ok(None);
+    }
+    inspect_pending_removal(i).map(Some)
+}
+
+fn inspect_pending_removal(i: &CreationIntent) -> Result<GitIdentity> {
+    roots::verify(
+        &i.checkout,
+        i.checkout_identity
+            .ok_or_else(|| FlowError::guard("pending Git checkout inode missing"))?,
+        true,
+    )?;
+    let identity = inspect(i)?;
+    validate_pending_removal_identity(i, &identity)?;
+    initial_head(i)?;
+    require(
+        inspect(i)? == identity,
+        "pending Git identity changed during observation",
+    )?;
+    Ok(identity)
+}
+
+/// Pure binding validation also works after the proved resources are gone.
+pub(in crate::task_env) fn validate_pending_removal_identity(
+    i: &CreationIntent,
+    identity: &GitIdentity,
+) -> Result<()> {
+    require(
+        i.phase == CreationPhase::GitPending
+            && i.git_identity.is_none()
+            && i.checkout_identity.is_some(),
+        "removal proof requires original pending Git intent",
+    )?;
+    require(
+        identity.admin_dir.parent() == Some(i.common_dir.join("worktrees").as_path()),
+        "removal proof has foreign Git administration",
+    )?;
+    let name = identity
+        .admin_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| FlowError::guard("invalid pending Git administrative name"))?;
+    let before = i
+        .git_admin_before
+        .as_ref()
+        .ok_or_else(|| FlowError::guard("pending Git pre-add snapshot missing"))?;
+    require(
+        !before.contains_key(name),
+        "pending Git administration existed before add",
+    )
+}
+
 fn absent(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(false),

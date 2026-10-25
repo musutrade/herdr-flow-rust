@@ -474,6 +474,32 @@ fn isolated_resume_recovers_exact_intent_before_queue_checkpoint_and_ready() {
     retry["state_version"] = active["tasks"]["task"]["state_version"].clone();
     let ready = f.call(&retry).unwrap();
     assert_eq!(ready["tasks"]["task"]["environment"]["instance_id"], id);
+    let owner = lifecycle::task_owner(&ready, "task").unwrap().unwrap();
+    let workspace = f.temp.path().join("workspace");
+    fs::write(workspace.join("checkout/untracked"), "task output").unwrap();
+    let receiver = fs::read(f.temp.path().join("receiver/state.json")).unwrap();
+    // Continue the recovered instance through the real terminal driver, rather
+    // than relying on TempDir to remove the resumed worktree and registration.
+    f.finalize("failure").unwrap();
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.completed, 1, "{report:?}");
+    assert!(!workspace.exists());
+    assert!(!f.temp.path().join("scratch").exists());
+    assert!(!task_env::is_registered("task").unwrap());
+    assert!(!task_env::environment_state_path("task").unwrap().exists());
+    assert!(!task_env::cleanup_state_path("task").unwrap().exists());
+    assert!(f.state()["tasks"]["task"].is_null());
+    assert!(!git(
+        &f.temp.path().join("repo"),
+        &["worktree", "list", "--porcelain"]
+    )
+    .contains("workspace/checkout"));
+    assert!(lifecycle::write_permit(&owner).is_err());
+    assert_eq!(
+        fs::read(f.temp.path().join("receiver/state.json")).unwrap(),
+        receiver
+    );
+    assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
 }
 
 #[test]

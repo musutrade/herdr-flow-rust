@@ -63,7 +63,7 @@ fn assemble(
     })
 }
 
-fn receiver_owner(root: Option<&Path>) -> Result<Option<Owner>> {
+pub(super) fn receiver_owner(root: Option<&Path>) -> Result<Option<Owner>> {
     let Some(root) = root else {
         return Ok(None);
     };
