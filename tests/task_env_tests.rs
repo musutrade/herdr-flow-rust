@@ -1211,6 +1211,7 @@ fn renamed_root_without_replacement_retains_the_slot() {
 
 fn write_root_plan(env: &TaskEnvironment, quarantine: Option<Quarantine>, roots: Vec<PathBuf>) {
     let plan = CleanupState {
+        terminal: None,
         delivery_confirmed: false,
         task_id: env.task_id.clone(),
         instance_id: env.instance_id.clone(),

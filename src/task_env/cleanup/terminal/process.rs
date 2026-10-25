@@ -1,0 +1,411 @@
+//! Fallible per-PID observation for destructive work. Diagnostic marker APIs
+//! retain their old best-effort behavior; none of them authorizes this path.
+use super::super::{observation, signals};
+use super::*;
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Read},
+    os::unix::fs::MetadataExt,
+    time::{Duration, Instant},
+};
+
+#[derive(Clone)]
+struct Seen {
+    record: ProcessRecord,
+    parent: i32,
+    marked: bool,
+}
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+fn gone(pid: i32) -> io::Result<bool> {
+    Ok(signals::open(pid)?.is_none())
+}
+fn stat(pid: i32) -> io::Result<Option<(ProcessRecord, i32, bool)>> {
+    #[cfg(test)]
+    faults::check(pid, false)?;
+    let text = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(v) => v,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    parse_stat(pid, &text)
+}
+fn marker(pid: i32, instance: &str) -> io::Result<Option<bool>> {
+    #[cfg(test)]
+    faults::check(pid, true)?;
+    let path = format!("/proc/{pid}/environ");
+    let mut bytes = Vec::new();
+    let result = fs::File::open(path).and_then(|f| f.take(1024 * 1024 + 1).read_to_end(&mut bytes));
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(None),
+        Err(e) => return Err(e),
+        Ok(_) => (),
+    }
+    if bytes.len() > 1024 * 1024 {
+        return Err(invalid("process environment exceeds observation budget"));
+    }
+    let expected = format!("{}={instance}", crate::task_env::MARKER_ENV);
+    Ok(Some(
+        bytes
+            .split(|b| *b == 0)
+            .any(|row| row == expected.as_bytes()),
+    ))
+}
+fn scan(plan: &CleanupState) -> Result<BTreeMap<i32, Seen>> {
+    let boundary = boundary(plan)?;
+    let mut result = BTreeMap::new();
+    for (index, entry) in fs::read_dir("/proc")?.enumerate() {
+        require(index < 262144, "process scan budget exceeded")?;
+        let entry = entry?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if let Some(seen) = observe_entry(plan, boundary.start_ticks, pid, &entry.path())? {
+            result.insert(pid, seen);
+        }
+    }
+    Ok(result)
+}
+fn add(targets: &mut Vec<ProcessRecord>, record: ProcessRecord) -> Result<bool> {
+    require(
+        record.pid > 1 && record.pid != std::process::id() as i32 && record.start_time.is_some(),
+        "invalid/self cleanup process identity",
+    )?;
+    if targets.contains(&record) {
+        return Ok(false);
+    }
+    require(targets.len() < 16384, "process ownership budget exceeded")?;
+    targets.push(record);
+    Ok(true)
+}
+fn live(record: &ProcessRecord) -> Result<bool> {
+    require(
+        record.start_time.is_some(),
+        "recorded process lacks start identity",
+    )?;
+    Ok(observation::is_alive(record)?)
+}
+fn freeze(plan: &mut CleanupState) -> Result<()> {
+    boundary(plan)?;
+    // Existing registered roots are authority; historical descendant snapshots
+    // alone are not. Their survivors must be marked or proved by frozen ancestry.
+    freeze_registered(plan)?;
+    for _ in 0..32 {
+        let changed = freeze_round(plan)?;
+        if !changed {
+            return validate_retained_descendants(plan);
+        }
+    }
+    Err(FlowError::guard(
+        "process family did not stabilize; retry with obligation retained",
+    ))
+}
+fn wait_stopped(records: &[ProcessRecord]) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut pending = false;
+        for r in records {
+            pending |= needs_stop(r)?;
+        }
+        if !pending {
+            return Ok(());
+        }
+        require(
+            Instant::now() < deadline,
+            "owned process did not stop; no filesystem cleanup",
+        )?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+fn validate_retained_descendants(plan: &CleanupState) -> Result<()> {
+    for p in &plan.pending_processes {
+        for r in &p.descendants {
+            require(
+                !live(r)? || terminal(plan)?.targets.contains(r),
+                "live historical descendant lacks current signal authority",
+            )?;
+        }
+    }
+    Ok(())
+}
+pub(super) fn quiesce(plan: &mut CleanupState) -> Result<()> {
+    freeze(plan)?;
+    boundary(plan)?;
+    for r in &terminal(plan)?.targets {
+        signals::signal(r, libc::SIGKILL)?;
+    }
+    await_exits(plan)?;
+    ensure_gone(plan)?;
+    plan.pending_processes.clear();
+    storage::save(plan)
+}
+pub(super) fn ensure_gone(plan: &CleanupState) -> Result<()> {
+    boundary(plan)?;
+    for r in &terminal(plan)?.targets {
+        require(!live(r)?, "owned process remains")?;
+    }
+    validate_retained_descendants(plan)?;
+    require(
+        !scan(plan)?.values().any(|p| p.marked),
+        "new marked process observed; retry cleanup",
+    )
+}
+
+pub(in crate::task_env) fn registered_identity(pid: i32, instance: &str) -> Result<ProcessRecord> {
+    let (record, _, dead) =
+        stat(pid)?.ok_or_else(|| FlowError::guard("registered process disappeared"))?;
+    require(
+        !dead && marker(pid, instance)? == Some(true),
+        "registered process lacks exact marker",
+    )?;
+    verify_registered_stat(&record)?;
+    Ok(record)
+}
+
+fn boundary(plan: &CleanupState) -> Result<&crate::task_env::instance::ProcessBoundary> {
+    let boundary = terminal(plan)?
+        .creation
+        .process_boundary
+        .as_ref()
+        .ok_or_else(|| FlowError::guard("instance has no process birth boundary"))?;
+    boundary.verify()?;
+    Ok(boundary)
+}
+fn known(plan: &CleanupState, record: &ProcessRecord) -> Result<bool> {
+    Ok(terminal(plan)?.targets.contains(record)
+        || plan.pending_processes.iter().any(|p| {
+            (p.pid == record.pid && p.start_time == record.start_time)
+                || p.descendants.contains(record)
+        }))
+}
+
+fn parse_stat(pid: i32, text: &str) -> io::Result<Option<(ProcessRecord, i32, bool)>> {
+    let (prefix, rest) = text
+        .rsplit_once(')')
+        .ok_or_else(|| invalid("malformed proc stat"))?;
+    validate_stat_pid(pid, prefix)?;
+    let fields = rest.split_whitespace().collect::<Vec<_>>();
+    let state = *fields
+        .first()
+        .ok_or_else(|| invalid("missing proc state"))?;
+    if !matches!(
+        state,
+        "R" | "S" | "D" | "Z" | "T" | "t" | "X" | "x" | "K" | "W" | "P" | "I"
+    ) {
+        return Err(invalid("invalid proc state"));
+    }
+    let parent = fields
+        .get(1)
+        .ok_or_else(|| invalid("missing parent"))?
+        .parse()
+        .map_err(|_| invalid("invalid parent"))?;
+    let start = fields
+        .get(19)
+        .ok_or_else(|| invalid("missing start time"))?
+        .parse()
+        .map_err(|_| invalid("invalid start time"))?;
+    Ok(Some((
+        ProcessRecord {
+            pid,
+            start_time: Some(start),
+        },
+        parent,
+        matches!(state, "Z" | "X" | "x"),
+    )))
+}
+
+fn validate_stat_pid(pid: i32, prefix: &str) -> io::Result<()> {
+    let id = prefix
+        .split_once(" (")
+        .ok_or_else(|| invalid("malformed proc pid"))?
+        .0
+        .parse::<i32>()
+        .map_err(|_| invalid("invalid pid"))?;
+    if id != pid {
+        return Err(invalid("proc pid changed"));
+    }
+    Ok(())
+}
+
+fn observe_entry(plan: &CleanupState, floor: u64, pid: i32, path: &Path) -> Result<Option<Seen>> {
+    if !same_uid_process(pid, path)? {
+        return Ok(None);
+    }
+    let Some((record, parent, dead)) = stat(pid)? else {
+        return Ok(None);
+    };
+    if dead {
+        return Ok(None);
+    }
+    if record.start_time.is_some_and(|start| start < floor) && !known(plan, &record)? {
+        return Ok(None);
+    }
+    let Some(marked) = stable_marker(&record, &plan.instance_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(Seen {
+        record,
+        parent,
+        marked,
+    }))
+}
+
+fn same_uid_process(pid: i32, path: &Path) -> Result<bool> {
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    // Positive foreign UID evidence only. Same-UID permission/read errors
+    // are not interpreted as a negative marker match.
+    if metadata.uid() != util::process::current_uid() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn stable_marker(record: &ProcessRecord, instance: &str) -> Result<Option<bool>> {
+    let Some(marked) = marker(record.pid, instance)? else {
+        return Ok(None);
+    };
+    let Some((after, _, dead)) = stat(record.pid)? else {
+        return Ok(None);
+    };
+    require(
+        *record == after,
+        "process identity changed during observation; retry",
+    )?;
+    if dead {
+        return Ok(None);
+    }
+    Ok(Some(marked))
+}
+
+fn freeze_registered(plan: &mut CleanupState) -> Result<()> {
+    for p in plan.pending_processes.clone() {
+        let r = ProcessRecord {
+            pid: p.pid,
+            start_time: p.start_time,
+        };
+        if live(&r)? {
+            add(&mut plan.terminal.as_mut().unwrap().targets, r)?;
+        }
+    }
+    storage::save(plan)?;
+    Ok(())
+}
+
+fn discover_targets(
+    plan: &mut CleanupState,
+    prior: &[ProcessRecord],
+    seen: &BTreeMap<i32, Seen>,
+) -> Result<bool> {
+    let mut changed = false;
+    for p in seen.values().filter(|p| p.marked) {
+        changed |= add(
+            &mut plan.terminal.as_mut().unwrap().targets,
+            p.record.clone(),
+        )?;
+    }
+    // Only a currently stopped, start-matched owned parent grants ancestry.
+    for p in seen.values() {
+        if prior.iter().any(|r| {
+            seen.get(&r.pid).is_some_and(|parent| parent.record == *r) && p.parent == r.pid
+        }) {
+            changed |= add(
+                &mut plan.terminal.as_mut().unwrap().targets,
+                p.record.clone(),
+            )?;
+        }
+    }
+    Ok(changed)
+}
+
+fn needs_stop(r: &ProcessRecord) -> Result<bool> {
+    if !live(r)? {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(format!("/proc/{}/stat", r.pid))?;
+    let state = text
+        .rsplit_once(')')
+        .and_then(|(_, v)| v.split_whitespace().next())
+        .ok_or_else(|| invalid("invalid stopped stat"))?;
+    Ok(!matches!(state, "T" | "t" | "Z" | "X" | "x"))
+}
+
+fn await_exits(plan: &CleanupState) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive = terminal(plan)?
+            .targets
+            .iter()
+            .map(live)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .any(|b| b);
+        if !alive {
+            break;
+        }
+        require(
+            Instant::now() < deadline,
+            "owned process exit pending; cleanup will retry",
+        )?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn verify_registered_stat(record: &ProcessRecord) -> Result<()> {
+    let (after, _, dead) =
+        stat(record.pid)?.ok_or_else(|| FlowError::guard("registered process disappeared"))?;
+    require(
+        !dead && after == *record,
+        "registered process identity changed",
+    )?;
+    Ok(())
+}
+
+fn stop_targets(prior: &[ProcessRecord]) -> Result<()> {
+    for r in prior {
+        signals::signal(r, libc::SIGSTOP)?;
+    }
+    wait_stopped(prior)?;
+    Ok(())
+}
+
+fn freeze_round(plan: &mut CleanupState) -> Result<bool> {
+    let prior = terminal(plan)?.targets.clone();
+    stop_targets(&prior)?;
+    let seen = scan(plan)?;
+    let changed = discover_targets(plan, &prior, &seen)?;
+    storage::save(plan)?;
+    Ok(changed)
+}
+#[cfg(test)]
+pub(super) mod faults {
+    use std::{cell::RefCell, io};
+    thread_local! {static FAULT:RefCell<Option<(i32,bool,i32)>>=const{RefCell::new(None)};}
+    pub struct Guard;
+    pub fn inject(pid: i32, environ: bool, errno: i32) -> Guard {
+        FAULT.with(|f| {
+            assert!(f.borrow().is_none());
+            *f.borrow_mut() = Some((pid, environ, errno));
+        });
+        Guard
+    }
+    pub(super) fn check(pid: i32, environ: bool) -> io::Result<()> {
+        FAULT.with(|f| match *f.borrow() {
+            Some((p, e, errno)) if p == pid && e == environ => {
+                Err(io::Error::from_raw_os_error(errno))
+            }
+            _ => Ok(()),
+        })
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FAULT.with(|f| *f.borrow_mut() = None);
+        }
+    }
+}

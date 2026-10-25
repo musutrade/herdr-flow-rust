@@ -180,7 +180,7 @@ impl TaskEnvironment {
             )
         {
             return Err(FlowError::guard(
-                "isolated cleanup requires lifecycle finalizer; not implemented",
+                "isolated cleanup requires lifecycle finalizer",
             ));
         }
         self.state = state;
@@ -358,8 +358,7 @@ impl TaskEnvironment {
     /// Keep the ownership lock while registering. /proc reads are observations,
     /// not an atomic identity proof; disappearance can fail registration.
     /// Persistence failure can leave the in-memory record appended.
-    pub fn register_process(&mut self, pid: i32) -> Result<()> {
-        let _permit = super::isolation::mutation_permit(self)?;
+    fn registered_group(&self, pid: i32) -> Result<i32> {
         if pid <= 1 {
             return Err(FlowError::progress(format!(
                 "invalid process id {pid}: must be greater than 1"
@@ -386,10 +385,20 @@ impl TaskEnvironment {
                 "pid {pid} shares the supervisor's process group"
             )));
         }
+        Ok(pgid)
+    }
+    pub fn register_process(&mut self, pid: i32) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
+        let pgid = self.registered_group(pid)?;
+        let start_time = if super::isolation::owner(self).is_some() {
+            super::cleanup::terminal::registered_identity(pid, &self.instance_id)?.start_time
+        } else {
+            process_start_time(pid)
+        };
         let entry = RegisteredProcess {
             pid,
             pgid,
-            start_time: process_start_time(pid),
+            start_time,
             descendants: descendants_snapshot(pid),
             direct_children: direct_children_of(std::process::id() as i32),
         };
@@ -1121,8 +1130,8 @@ fn rollback_creation(env: &TaskEnvironment) {
 /// ownership rather than sharing an existing handle.
 pub fn restore(task_id: &str) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
-    let lock = acquire_task_lock(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
+    let lock = restore_lock(task_id, &state_file)?;
     ensure_state_exists(task_id, &state_file)?;
     let mut env = read_environment(&state_file)?;
     registry::validate_outside_control(&env.workspace_root)?;
@@ -1568,4 +1577,15 @@ pub(crate) fn unlink_at_dir(dir: &File, name: &std::ffi::OsStr) -> Result<()> {
     Err(FlowError::progress(format!(
         "cannot remove directory {name:?}: {error}"
     )))
+}
+
+fn restore_lock(task_id: &str, state_file: &Path) -> Result<File> {
+    Ok(
+        if crate::util::protected::is_namespace(state_file.parent().unwrap())? {
+            registry::try_lock_existing_task(task_id)?
+                .ok_or_else(|| FlowError::guard("environment busy"))?
+        } else {
+            acquire_task_lock(task_id)?
+        },
+    )
 }

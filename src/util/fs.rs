@@ -12,7 +12,7 @@ use tempfile::Builder;
 
 use crate::error::{FlowError, Result};
 
-mod secure;
+pub(in crate::util) mod secure;
 
 pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path)

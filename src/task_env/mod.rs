@@ -9,6 +9,7 @@
 
 mod boundary;
 mod cleanup;
+pub use cleanup::terminal;
 pub mod cli;
 pub(crate) mod discovery;
 mod env;

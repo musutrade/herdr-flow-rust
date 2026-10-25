@@ -22,7 +22,9 @@ managed runtime ownership. It does not require a Herdr workspace. Legacy entry
 below remains distinct: it does not infer queue authority. The creation slice is
 not deployment approval or automatic finalization. The opt-in
 [isolated lifecycle barrier](task-lifecycle.md) adds owner outcomes and short
-write/spawn permits without migrating these legacy entries.
+write/spawn permits, followed by PR3 automatic finalization of fresh isolated
+owners. That path stops proved managed resources and deletes dedicated roots;
+it does not migrate these legacy entries or infer shared session ownership.
 
 ## Owned environment and fresh activity
 

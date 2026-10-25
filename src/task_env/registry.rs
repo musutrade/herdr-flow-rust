@@ -253,11 +253,18 @@ pub(super) fn lock_registry() -> Result<std::fs::File> {
 /// own the same environment at the same time. Returns `Ok(None)` when the task
 /// is already owned.
 pub fn try_lock_task(task_id: &str) -> Result<Option<std::fs::File>> {
+    lock_task(task_id, true)
+}
+
+pub(super) fn try_lock_existing_task(task_id: &str) -> Result<Option<std::fs::File>> {
+    lock_task(task_id, false)
+}
+fn lock_task(task_id: &str, create: bool) -> Result<Option<std::fs::File>> {
     validate_task_id(task_id)?;
     let _registry_lock = lock_registry()?;
     let path = lock_dir()?.join(format!("{task_id}.lock"));
     let file = OpenOptions::new()
-        .create(true)
+        .create(create)
         .truncate(false)
         .read(true)
         .write(true)
@@ -649,4 +656,81 @@ pub(super) fn finish_cleanup(task_id: &str) -> Result<()> {
     let _lock = lock_registry()?;
     util::remove_file_if_exists(&lock_dir()?.join(format!("{task_id}.lock")))?;
     util::remove_file_if_exists(&cleanup_state_path(task_id)?)
+}
+
+/// Exact isolated claim release after the durable terminal plan proves resources
+/// and associations gone. A missing claim is an idempotent crash continuation.
+pub(super) fn release_terminal_claim(
+    owner: &crate::lifecycle::Owner,
+    expected: Option<&RegistryEntry>,
+) -> Result<()> {
+    let _lock = lock_registry()?;
+    let path = registry_path()?;
+    if !util::protected::is_document(&path)? {
+        return Err(FlowError::guard(
+            "terminal release requires isolated registry",
+        ));
+    }
+    let mut registry = load_registry()?;
+    let Some(entry) = registry.get(&owner.task_id) else {
+        return Ok(());
+    };
+    if entry.task_id != owner.task_id
+        || entry.instance_id != owner.instance_id
+        || expected.is_none_or(|e| serde_json::to_value(e).ok() != serde_json::to_value(entry).ok())
+    {
+        return Err(FlowError::guard(
+            "terminal registry release identity changed",
+        ));
+    }
+    registry.entries.remove(&owner.task_id);
+    save_registry(&registry)
+}
+
+pub(super) fn retire_terminal_lock(owner: &crate::lifecycle::Owner) -> Result<()> {
+    let _registry = lock_registry()?;
+    let path = lock_dir()?.join(format!("{}.lock", owner.task_id));
+    let Some(file) = existing_terminal_lock(&path)? else {
+        return Ok(());
+    };
+    if !util::flock_try_exclusive(file.as_raw_fd())? {
+        return Err(FlowError::guard("environment lock busy at release"));
+    }
+    verify_terminal_lock(owner, &path, &file)?;
+    unlink_terminal_lock(&path)
+}
+
+fn existing_terminal_lock(path: &Path) -> Result<Option<std::fs::File>> {
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn verify_terminal_lock(
+    owner: &crate::lifecycle::Owner,
+    path: &Path,
+    file: &std::fs::File,
+) -> Result<()> {
+    let named = std::fs::symlink_metadata(path)?;
+    let held = file.metadata()?;
+    if !named.is_file() || (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+        return Err(FlowError::guard("environment lock replaced"));
+    }
+    if load_registry()?.contains(&owner.task_id) {
+        return Err(FlowError::guard("environment claim still present"));
+    }
+    Ok(())
+}
+
+fn unlink_terminal_lock(path: &Path) -> Result<()> {
+    std::fs::remove_file(path)?;
+    std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+    Ok(())
 }

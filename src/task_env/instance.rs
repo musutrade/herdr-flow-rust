@@ -1,6 +1,6 @@
 //! Creation-only task ownership. Queue checkpoint precedes Git side effects.
 //! This is not the terminal writer barrier or the finalizer (separate slices).
-mod git;
+pub(super) mod git;
 mod roots;
 
 use super::{
@@ -42,6 +42,8 @@ pub enum CreationPhase {
 #[serde(deny_unknown_fields)]
 pub struct CreationIntent {
     pub binding: InstanceBinding,
+    #[serde(default)]
+    pub process_boundary: Option<ProcessBoundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_queue: Option<PathBuf>,
     pub phase: CreationPhase,
@@ -383,4 +385,62 @@ pub(super) fn verify_terminal_identity(
         )?;
     }
     Ok(())
+}
+
+/// Positive exclusion of processes that predate creation, within this boot.
+/// Captured before the random instance is allocated or any managed child starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessBoundary {
+    pub boot_id: String,
+    pub start_ticks: u64,
+    pub pid_namespace: RootIdentity,
+    pub time_namespace: RootIdentity,
+}
+impl ProcessBoundary {
+    pub(crate) fn capture() -> Result<Self> {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            .trim()
+            .to_owned();
+        require(!boot_id.is_empty(), "boot identity missing")?;
+        let start_ticks = boot_ticks()?;
+        Ok(Self {
+            boot_id,
+            start_ticks,
+            pid_namespace: RootIdentity::of(&std::fs::metadata("/proc/self/ns/pid")?),
+            time_namespace: RootIdentity::of(&std::fs::metadata("/proc/self/ns/time")?),
+        })
+    }
+    pub(crate) fn verify(&self) -> Result<()> {
+        let current = Self::capture()?;
+        require(
+            self.boot_id == current.boot_id
+                && self.start_ticks <= current.start_ticks
+                && self.pid_namespace == current.pid_namespace
+                && self.time_namespace == current.time_namespace,
+            "process boot boundary changed",
+        )
+    }
+}
+
+fn boot_ticks() -> Result<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid writable timespec and scalar supported clock ID.
+    require(
+        unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } == 0,
+        "boot clock unavailable",
+    )?;
+    // SAFETY: sysconf takes a scalar selector, no borrowed memory.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    require(
+        hz > 0 && time.tv_sec >= 0 && time.tv_nsec >= 0,
+        "invalid boot clock",
+    )?;
+    let ticks = (time.tv_sec as u128) * (hz as u128)
+        + (time.tv_nsec as u128) * (hz as u128) / 1_000_000_000;
+    let start_ticks = u64::try_from(ticks).map_err(|_| FlowError::guard("boot ticks overflow"))?;
+    Ok(start_ticks)
 }

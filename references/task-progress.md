@@ -407,11 +407,13 @@ does not inspect or delete shared OpenCode transcripts/cache, stop agents,
 change the queue, or replace the [owned delivery lifecycle](delivery.md).
 
 
-## Isolated owner outcomes (#130 PR2)
+## Isolated owner outcomes and cleanup (#130 PR2/PR3)
 
 Fresh isolated queues use [the lifecycle outcome/write contract](task-lifecycle.md).
 `task-finalize` records final success/failure and a pending cleanup obligation
 atomically; activity acceptance/completion alone does not finalize the owner.
-No existing queue is migrated, and this slice does not stop processes or delete
-roots. Legacy cleanup diagnostics above do not authorize isolated finalization
+The high-level CLI then automatically attempts unified finalization, and the
+existing watch resumes pending cleanup. Exact owned processes are stopped before
+whole dedicated roots and temporary associations are removed. No existing queue
+is migrated. Legacy cleanup diagnostics above do not authorize isolated finalization
 or make residual occupancy a manual deletion approval condition.

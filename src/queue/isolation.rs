@@ -92,6 +92,13 @@ pub fn closed(s: &J, name: &str) -> bool {
 }
 
 pub fn task_permit(s: &J, action: &str, spec: &J) -> Result<Option<Permit>> {
+    if action == "task-add" {
+        progress::claim::isolated_admission(
+            s,
+            spec["task"].as_str().unwrap_or(""),
+            &spec["claim"],
+        )?;
+    }
     if s["lifecycle"].is_null() || bootstrap(s, action, spec)? {
         return Ok(None);
     }
@@ -164,6 +171,7 @@ pub fn validate_save(root: &Path, s: &J) -> Result<()> {
         return Ok(());
     }
     let current = super::load_queue(root)?;
+    validate_version(&current, s)?;
     if current["id"] != s["id"] || current["lifecycle"] != s["lifecycle"] {
         return Err(queue_error("isolated queue authority identity changed"));
     }
@@ -172,6 +180,27 @@ pub fn validate_save(root: &Path, s: &J) -> Result<()> {
             validate_task_save(old, &s["tasks"][_name])?;
         }
     }
+    Ok(())
+}
+
+pub(super) fn validate_version(current: &J, next: &J) -> Result<()> {
+    if current["authority_version"].as_u64().is_none()
+        || current["authority_version"] != next["authority_version"]
+    {
+        return Err(queue_error("isolated queue snapshot is obsolete"));
+    }
+    Ok(())
+}
+
+pub(super) fn advance_version(s: &mut J) -> Result<()> {
+    if s["lifecycle"].is_null() {
+        return Ok(());
+    }
+    let version = s["authority_version"]
+        .as_u64()
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| queue_error("invalid queue authority version"))?;
+    s["authority_version"] = json!(version);
     Ok(())
 }
 
@@ -242,6 +271,7 @@ pub fn creation_permit(
     if s["lifecycle"].is_null() {
         return Ok(None);
     }
+    progress::terminal::ensure_open(s, &binding.task_id)?;
     if !s["tasks"][&binding.task_id]["lineage"]["requirement"].is_null() {
         return Err(queue_error(
             "create the explicit lifecycle owner environment, not an activity root",
@@ -294,6 +324,22 @@ pub fn delivery_permits(s: &J, id: &str) -> Result<Vec<Permit>> {
         }
     }
     Ok(permits)
+}
+
+pub(super) fn delivery_closing(s: &J, delivery: &J) -> bool {
+    if s["lifecycle"].is_null() {
+        return false;
+    }
+    delivery["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|id| {
+            let name = s["events"][id.as_str().unwrap_or("")]["task"]
+                .as_str()
+                .unwrap_or("");
+            closed(s, name)
+        })
 }
 
 pub fn active_permits(s: &J) -> Result<Vec<Permit>> {

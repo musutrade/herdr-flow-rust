@@ -1,6 +1,10 @@
 //! Opt-in document directories: legacy file readers and atomic file replacements
 //! cannot consume or overwrite their authority. Never converts existing files.
+mod removal;
 use crate::{FlowError, Result};
+pub use removal::{
+    prepare_document_removal, remove_document, resume_document_removal, DocumentRemoval,
+};
 use std::{
     fs,
     io::{Read, Write},
@@ -10,7 +14,7 @@ use std::{
 const DOCUMENT: &str = ".flow-document-v2";
 const NAMESPACE: &str = ".flow-namespace-v2";
 const RUNTIME: &str = ".flow-runtime-v2";
-const FORMAT: &[u8] = b"herdr-flow isolated authority 1\n";
+const FORMAT: &[u8] = b"herdr-flow isolated authority 2\n";
 
 fn marker(root: &Path, name: &str) -> Result<bool> {
     let path = root.join(name);
@@ -179,4 +183,28 @@ pub fn is_runtime_namespace(root: &Path) -> Result<bool> {
         return Err(FlowError::guard("runtime authority namespace is missing"));
     }
     Ok(runtime)
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    #[test]
+    fn previous_format_is_refused_without_migration_or_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        namespace(temp.path()).unwrap();
+        let marker = temp.path().join(NAMESPACE);
+        assert_eq!(fs::read(&marker).unwrap(), FORMAT);
+        let old = b"herdr-flow isolated authority 1\n";
+        assert_ne!(FORMAT, old);
+        fs::write(&marker, old).unwrap();
+        assert!(is_namespace(temp.path()).is_err());
+        assert!(namespace(temp.path()).is_err());
+        assert!(write_path(&temp.path().join("fresh.json")).is_err());
+        assert!(!temp.path().join("fresh.json").exists());
+        assert_eq!(fs::read(&marker).unwrap(), old);
+    }
 }

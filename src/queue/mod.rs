@@ -15,6 +15,7 @@ struct NoticeText<'a> {
 pub mod cleanup_preflight;
 pub mod cli;
 pub mod command;
+pub mod finalization;
 pub mod isolation;
 
 use std::collections::BTreeSet;
@@ -66,6 +67,7 @@ pub fn save(root: &Path, s: &mut J) -> Result<()> {
     isolation::validate_layout(root, s)?;
     isolation::validate_save(root, s)?;
     util::ensure_private_dir(root, true)?;
+    isolation::advance_version(s)?;
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&root.join("queue.json"), s)
 }
@@ -117,6 +119,7 @@ fn initialize_isolated_queue(root: &Path, guard_dir: Option<&Path>, interval: u6
     initialize_isolated_sidecars(&document)?;
     let mut s = initial_queue(root, guard_dir, interval)?;
     s["lifecycle"] = json!({"queue_root":root,"format":"isolated-v1"});
+    s["authority_version"] = json!(1);
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&document, &s)?;
     Ok(s)
@@ -1678,6 +1681,9 @@ fn update_delivery_phase(
 
 fn update_active_delivery(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()> {
     let (active, mut delivery) = load_active_delivery(s)?;
+    if isolation::delivery_closing(s, &delivery) {
+        return Ok(());
+    }
     update_permitted_delivery(root, s, factory, &active, &mut delivery)
 }
 
@@ -2822,6 +2828,9 @@ fn progress_release(
     progress::release(s, spec, now).map(|_| ())
 }
 
+/// Low-level queue transaction; the caller holds the queue lock. Terminal
+/// records are durable obligations. Use `finalization::task_action` for the
+/// public operation that also releases this lock and continues cleanup.
 pub fn task_action(
     root: &Path,
     action: &str,
@@ -3088,7 +3097,13 @@ fn validate_watch_state(state: J) -> Result<J> {
 }
 
 fn ensure_watchable(state: &J) -> Result<()> {
-    if model::bool_or(state, "stopped", false) {
+    let pending = !state["lifecycle"].is_null()
+        && state["tasks"]
+            .as_object()
+            .into_iter()
+            .flat_map(|tasks| tasks.values())
+            .any(|task| !task["cleanup_obligation"].is_null());
+    if model::bool_or(state, "stopped", false) && !pending {
         return Err(queue_error("stopped queue cannot be watched"));
     }
     Ok(())
