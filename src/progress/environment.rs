@@ -106,17 +106,170 @@ pub fn checkpoint(
     now: f64,
 ) -> Result<()> {
     mapping(s, binding, env)?;
+    let previous = s["tasks"][&binding.task_id]["environment"].clone();
+    let mut record = json!({"queue_id":binding.queue_id,"task_id":binding.task_id,
+        "epoch":binding.epoch,"instance_id":env.instance_id,"state_file":env.state_file(),
+        "checkout":env.workspace_root.join("checkout"),"phase":phase});
+    checkpoint_seed(s, &mut record, &previous, env, phase)?;
     let t = &mut s["tasks"][&binding.task_id];
     let version = t["state_version"]
         .as_u64()
         .and_then(|n| n.checked_add(1))
         .ok_or_else(|| super::progress_error("invalid task state_version"))?;
-    t["environment"] = json!({"queue_id":binding.queue_id,"task_id":binding.task_id,
-        "epoch":binding.epoch,"instance_id":env.instance_id,"state_file":env.state_file(),
-        "checkout":env.workspace_root.join("checkout"),"phase":phase});
+    t["environment"] = record;
     t["state_version"] = json!(version);
     t["updated_at"] = json!(now);
     Ok(())
+}
+
+fn checkpoint_seed(
+    s: &J,
+    record: &mut J,
+    previous: &J,
+    env: &TaskEnvironment,
+    phase: &str,
+) -> Result<()> {
+    if crate::task_env::isolation::owner(env).is_none() {
+        return Ok(());
+    }
+    let image = serde_json::to_value(env)?;
+    let seed = previous
+        .get("creation_seed")
+        .filter(|value| !value.is_null());
+    record["creation_seed"] = match seed {
+        Some(seed) => seed.clone(),
+        None => {
+            let seed = initial_seed(previous, &image, phase)?;
+            ensure_seed_roots_available(s, env)?;
+            seed
+        }
+    };
+    checkpoint_envelope(record, previous, &image, phase)
+}
+
+/// A durable seed reserves both roots until its owner row is finally removed.
+/// Caller holds the queue lock. Never infer release from phase or registry absence.
+fn ensure_seed_roots_available(s: &J, env: &TaskEnvironment) -> Result<()> {
+    absolute_seed_roots(env)?;
+    for (name, task) in object(&s["tasks"], "tasks")? {
+        if name == &env.task_id || task["environment"].is_null() {
+            continue;
+        }
+        let reserved = checked_seed(s, name)?;
+        disjoint_seed_roots(env, &reserved)?;
+    }
+    Ok(())
+}
+
+fn checked_seed(s: &J, name: &str) -> Result<TaskEnvironment> {
+    let seed: TaskEnvironment =
+        serde_json::from_value(s["tasks"][name]["environment"]["creation_seed"].clone())?;
+    let owner = crate::task_env::isolation::owner(&seed)
+        .ok_or_else(|| super::progress_error("creation seed owner missing"))?;
+    ensure_seed_owner(s, name, &seed, &owner)?;
+    ensure(
+        crate::lifecycle::task_owner(s, name)?.as_ref() == Some(&owner),
+        "creation seed owner differs from current queue/task/epoch/instance",
+    )?;
+    mapping(s, &seed.creation.as_ref().unwrap().binding, &seed)?;
+    absolute_seed_roots(&seed)?;
+    Ok(seed)
+}
+
+fn ensure_seed_owner(
+    s: &J,
+    name: &str,
+    seed: &TaskEnvironment,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    ensure(
+        seed.task_id == name && owner.task_id == name && s["tasks"][name]["task"] == name,
+        "creation seed task row binding changed",
+    )?;
+    ensure(
+        owner.epoch > 0 && !owner.instance_id.is_empty() && owner.queue_root.is_absolute(),
+        "invalid creation seed owner",
+    )
+}
+
+fn absolute_seed_roots(env: &TaskEnvironment) -> Result<()> {
+    ensure(
+        env.workspace_root.is_absolute() && env.temp_root.is_absolute(),
+        "creation seed roots must be absolute and nonempty",
+    )
+}
+
+fn disjoint_seed_roots(candidate: &TaskEnvironment, reserved: &TaskEnvironment) -> Result<()> {
+    for target in [&candidate.workspace_root, &candidate.temp_root] {
+        for root in [&reserved.workspace_root, &reserved.temp_root] {
+            ensure(
+                !crate::util::overlap(target, root),
+                "environment root reserved by another creation seed",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn seed_task_table<'a>(current: &J, next: &'a J) -> Result<Option<&'a serde_json::Map<String, J>>> {
+    // A newly initialized queue has no task table until its first registration.
+    if current.get("tasks").is_none() && next.get("tasks").is_none() {
+        return Ok(None);
+    }
+    if let Some(tasks) = current.get("tasks") {
+        object(tasks, "tasks")?;
+    }
+    Ok(Some(object(&next["tasks"], "tasks")?))
+}
+
+/// The public queue save entry also checks new seed transitions, including two
+/// new owners in one transaction; raw snapshots cannot bypass seed admission.
+pub(crate) fn validate_new_seed_reservations(current: &J, next: &J) -> Result<()> {
+    let Some(tasks) = seed_task_table(current, next)? else {
+        return Ok(());
+    };
+    for (name, task) in tasks {
+        if !current["tasks"][name]["environment"].is_null() || task["environment"].is_null() {
+            continue;
+        }
+        let seed = checked_seed(next, name)?;
+        ensure_seed_roots_available(next, &seed)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_envelope(record: &mut J, previous: &J, image: &J, phase: &str) -> Result<()> {
+    let envelope = image["creation"]["allocation"]["envelope"].clone();
+    ensure(
+        previous["bootstrap"].is_null() || previous["bootstrap"] == envelope,
+        "environment bootstrap identity changed",
+    )?;
+    ensure(
+        phase != "active" || !envelope.is_null(),
+        "active environment has no bootstrap identity",
+    )?;
+    record["bootstrap"] = envelope;
+    Ok(())
+}
+
+fn initial_seed(previous: &J, image: &J, phase: &str) -> Result<J> {
+    ensure(
+        previous.is_null(),
+        "isolated environment lost its creation seed",
+    )?;
+    ensure(
+        phase == "creating",
+        "creation seed requires creating checkpoint",
+    )?;
+    ensure(
+        !image["creation"]["allocation"].is_null(),
+        "creation seed has no allocation reservation",
+    )?;
+    ensure(
+        image["creation"]["allocation"]["envelope"].is_null(),
+        "creation seed must precede envelope creation",
+    )?;
+    Ok(image.clone())
 }
 
 /// Local tuple check for instance-owned native creation/recovery, not a closing barrier.

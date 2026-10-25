@@ -14,13 +14,13 @@ use std::{
 const DOCUMENT: &str = ".flow-document-v2";
 const NAMESPACE: &str = ".flow-namespace-v2";
 const RUNTIME: &str = ".flow-runtime-v2";
-const FORMAT: &[u8] = b"herdr-flow isolated authority 2\n";
+pub(crate) const FORMAT: &[u8] = b"herdr-flow isolated authority 3\n";
 
 fn marker(root: &Path, name: &str) -> Result<bool> {
     let path = root.join(name);
     let mut f = match fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(&path)
     {
         Ok(f) => f,

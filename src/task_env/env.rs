@@ -167,6 +167,13 @@ impl TaskEnvironment {
     /// durable state before retrying a higher-level operation.
     pub fn persist(&self) -> Result<()> {
         let _permit = super::isolation::mutation_permit(self)?;
+        if self
+            .creation
+            .as_ref()
+            .is_some_and(|i| i.allocation.is_some())
+        {
+            return super::instance::allocation::persist(self);
+        }
         let value = serde_json::to_value(self)?;
         util::atomic_write_json(&self.state_file, &value)
     }
@@ -956,6 +963,72 @@ pub(super) fn create_with_lease(
         return Err(error);
     }
     finish_environment_creation(env)
+}
+
+/// Allocate only an in-memory seed. The queue persists its exact Owner and
+/// parent reservation before any per-task directory, registry claim or lock.
+pub(super) fn prepare_instance_seed(
+    task_id: &str,
+    spec: &super::instance::CreateSpec,
+    creation: super::instance::CreationIntent,
+    lease: Arc<crate::lifecycle::Permit>,
+) -> Result<TaskEnvironment> {
+    registry::validate_task_id(task_id)?;
+    let (workspace, temporary, targets) = prepare_seed_roots(spec)?;
+    let state_file = seed_state_path(task_id)?;
+    let mut env = build_environment(task_id, workspace, temporary, targets, state_file);
+    env.creation = Some(creation);
+    *env.creation_permit.lock().unwrap() = Some(lease);
+    super::instance::allocation::prepare(&mut env)?;
+    Ok(env)
+}
+
+fn prepare_seed_roots(
+    spec: &super::instance::CreateSpec,
+) -> Result<(PathBuf, PathBuf, Vec<DeliveryTarget>)> {
+    let workspace = util::resolve_path(&spec.workspace_root);
+    let temporary = util::resolve_path(&spec.temp_root);
+    let control = registry::control_path()?;
+    ensure_distinct(&workspace, &temporary)?;
+    for root in [&workspace, &temporary] {
+        if util::overlap(root, &control) {
+            return Err(FlowError::guard("allocation root overlaps control"));
+        }
+        require_vacant(root)?;
+        validate_ancestors(root)?;
+    }
+    let targets = super::boundary::validate_delivery_targets(
+        spec.delivery_targets.clone(),
+        &workspace,
+        &temporary,
+    )?;
+    Ok((workspace, temporary, targets))
+}
+fn seed_state_path(task_id: &str) -> Result<PathBuf> {
+    let control = registry::control_path()?;
+    let state_file = control
+        .join("registry.json/envs")
+        .join(format!("{task_id}.json"));
+    for path in [
+        &state_file,
+        &control
+            .join("registry.json/plans")
+            .join(format!("{task_id}.json")),
+    ] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Err(FlowError::guard("allocation state already exists")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(state_file)
+}
+
+pub(super) fn lock_seed(env: &mut TaskEnvironment) -> Result<()> {
+    if !env.owns_lock() {
+        env.attach_lock(super::instance::allocation::lock_seed(env)?);
+    }
+    Ok(())
 }
 
 fn require_creation_lease(lease: Option<&crate::lifecycle::Permit>) -> Result<()> {

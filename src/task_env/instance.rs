@@ -1,5 +1,6 @@
 //! Creation-only task ownership. Queue checkpoint precedes Git side effects.
 //! This is not the terminal writer barrier or the finalizer (separate slices).
+pub(crate) mod allocation;
 pub(super) mod git;
 mod roots;
 
@@ -41,6 +42,8 @@ pub enum CreationPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreationIntent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<allocation::Allocation>,
     pub binding: InstanceBinding,
     #[serde(default)]
     pub process_boundary: Option<ProcessBoundary>,
@@ -106,20 +109,28 @@ pub fn begin_isolated(
     queue_root: &std::path::Path,
     permit: std::sync::Arc<crate::lifecycle::Permit>,
 ) -> Result<TaskEnvironment> {
+    prepare_isolated(binding, spec, queue_root, permit)
+}
+
+/// Prepare only: the caller must durably checkpoint creation_seed in the queue
+/// before initialize_prepared and materialize_instance.
+pub fn prepare_isolated(
+    binding: &InstanceBinding,
+    spec: &CreateSpec,
+    queue_root: &std::path::Path,
+    permit: std::sync::Arc<crate::lifecycle::Permit>,
+) -> Result<TaskEnvironment> {
     validate_binding(binding)?;
     validate_spec(spec)?;
     verify_prospective_lease(binding, queue_root, &permit)?;
+    allocation::verify_control_current(queue_root)?;
     let mut intent = git::intent(binding, spec)?;
     intent.lifecycle_queue = Some(queue_root.to_path_buf());
-    super::isolation::enable(queue_root, &binding.queue_id)?;
-    super::env::create_with_lease(
-        &binding.task_id,
-        &spec.workspace_root,
-        spec.delivery_targets.clone(),
-        &spec.temp_root,
-        Some(intent),
-        Some(permit),
-    )
+    super::env::prepare_instance_seed(&binding.task_id, spec, intent, permit)
+}
+
+pub fn initialize_prepared(env: &mut TaskEnvironment) -> Result<()> {
+    allocation::initialize_prepared(env)
 }
 fn verify_prospective_lease(
     binding: &InstanceBinding,
@@ -144,7 +155,14 @@ pub fn resume_isolated(
     expected: &str,
     permit: std::sync::Arc<crate::lifecycle::Permit>,
 ) -> Result<TaskEnvironment> {
-    let env = super::restore_environment(&binding.task_id)?;
+    let owner = crate::lifecycle::Owner {
+        queue_root: permit.owner().queue_root.clone(),
+        queue_id: binding.queue_id.clone(),
+        task_id: binding.task_id.clone(),
+        epoch: binding.epoch,
+        instance_id: expected.into(),
+    };
+    let env = allocation::restore(&owner, &permit)?;
     *env.creation_permit.lock().unwrap() = Some(permit);
     super::isolation::mutation_permit(&env)?;
     verify_creation_identity(&env, binding, expected)?;

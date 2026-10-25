@@ -9,10 +9,13 @@ fault combinations. This does not deploy a new runtime or migrate production res
 ## Fresh authority only
 
 `queue init-isolated --state-dir NEW_QUEUE` requires an absent or empty private
-queue directory. Use a fresh `HERDR_TASK_ENV_ROOT` for its environment control
-state. Neither legacy queues, PR1 instances, live handles nor existing control
-registries are adopted or upgraded. PR3 uses authority format 2; prior PR2
-isolated objects are also not migrated. Old fixed entry points reject this
+queue directory. For fresh format 3, explicitly set `HERDR_TASK_ENV_ROOT` to
+`QUEUE/queue.json/task-environments`. The queue first durably reserves this fixed
+control child, then records its identities before any task allocation. See the
+[allocation protocol](task-instance.md#fresh-isolated-allocation-protocol) for
+mount restrictions and bootstrap recovery. Neither legacy queues, PR1 instances,
+live handles nor existing control registries are adopted or upgraded. Earlier
+isolated formats, including PR3/PR4 format 2, are not migrated. Old fixed entry points reject this
 format. The queue has a checked monotonic `authority_version`: every save must
 match the current version, preventing an old snapshot from resurrecting a removed
 owner without retaining a permanent per-task tombstone.
@@ -223,9 +226,11 @@ survives unified cleanup; authority, gates, journals, temporary logs and recover
 records are removed with their task obligations.
 Generic legacy destroy/recover/unregister paths cannot release isolated claims.
 No new isolated task should be deployed for production use before the subsequent
-reviewed recovery and genuine end-to-end acceptance are complete. The creation
-mkdir-before-inode-checkpoint window remains unresolved when ownership cannot be
-proved; recovery never adopts such a directory.
+reviewed recovery and genuine end-to-end acceptance are complete. Fresh format-3
+creation uses a durable parent-owned allocation envelope and fixed slots before
+atomic transfer. The old mkdir-before-inode window remains unsupported for legacy
+instances; none are adopted or migrated. Process-interruption fixtures for the
+fresh protocol do not prove power-failure recovery or production readiness.
 
 Tests use private fixture queues, Git worktrees and non-model subprocesses. They
 exercise real locks, directory sentinels and an idle fixture broker refusing a
