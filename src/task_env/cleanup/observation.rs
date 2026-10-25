@@ -71,8 +71,10 @@ mod tests {
     // Synthetic stat failures; these do not change host procfs or security policy.
     use super::super::*;
     use std::cell::RefCell;
-    use std::io;
-    use std::process::{Child, Command};
+    use std::io::{self, Read};
+    use std::os::fd::AsRawFd;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
 
     #[derive(Clone)]
     enum StatFault {
@@ -169,13 +171,28 @@ mod tests {
     fn marked_target_observation_errors_block_termination() {
         let instance = format!("observation-test-{}", std::process::id());
         let mut child = TestChild(
-            Command::new("sleep")
-                .arg("30")
+            Command::new("sh")
+                // Stay in this PID after announcing readiness. A subsequent
+                // exec would introduce another /proc environment transition.
+                .args(["-c", "printf 'ready\\n'; IFS= read -r stop"])
                 .env(crate::task_env::env::MARKER_ENV, &instance)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
+        // spawn() returning does not establish that the executable has reached
+        // user code or that its /proc environment is ready for observation.
+        let ready = await_ready(&mut child.0);
+        let diagnostic = child_diagnostic(&mut child.0, &instance);
+        assert!(ready.is_ok(), "readiness: {ready:?}; {diagnostic}");
+        assert!(child.0.try_wait().unwrap().is_none(), "{diagnostic}");
         let record = child.record();
+        assert!(record.start_time.is_some(), "{diagnostic}");
+        assert!(
+            crate::task_env::env::process_has_marker(record.pid, &instance),
+            "{diagnostic}"
+        );
         assert!(ensure_no_marked(&instance).is_err());
         for fault in faults() {
             let _guard = FaultGuard::set(record.pid, fault);
@@ -186,6 +203,57 @@ mod tests {
         terminate_marked(&instance).unwrap();
         child.0.wait().unwrap();
         ensure_no_marked(&instance).unwrap();
+    }
+
+    fn await_ready(child: &mut Child) -> io::Result<()> {
+        let stdout = child.stdout.as_mut().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for expected in b"ready\n" {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let mut fd = libc::pollfd {
+                fd: stdout.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, and a bounded nonnegative timeout.
+            let result =
+                unsafe { libc::poll(&mut fd, 1, remaining.as_millis().max(1) as libc::c_int) };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if result == 0 {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let mut byte = [0];
+            stdout.read_exact(&mut byte)?;
+            if byte[0] != *expected {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn child_diagnostic(child: &mut Child, instance: &str) -> String {
+        let pid = child.id() as i32;
+        let needle = format!("{}={instance}", crate::task_env::env::MARKER_ENV);
+        let environment = match std::fs::read(format!("/proc/{pid}/environ")) {
+            Ok(bytes) => format!(
+                "bytes={}, marker={}",
+                bytes.len(),
+                bytes
+                    .split(|b| *b == 0)
+                    .any(|entry| entry == needle.as_bytes())
+            ),
+            Err(error) => format!("kind={:?}, errno={:?}", error.kind(), error.raw_os_error()),
+        };
+        format!(
+            "pid={pid}, start={:?}, exit={:?}, environ=({environment})",
+            crate::task_env::env::process_start_time(pid),
+            child.try_wait()
+        )
     }
 
     fn stat(record: &ProcessRecord, state: &str, start: &str) -> String {
