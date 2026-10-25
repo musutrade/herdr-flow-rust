@@ -29,6 +29,7 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
 /// credentials, plugins and remote server addresses are intentionally not copied.
 /// Callers may provision explicit configuration inside the returned private root.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     verify_instance_owner(env)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
@@ -36,13 +37,19 @@ pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     )?;
     validate_assignment(assignment)?;
     let root = env.temp_root.join("rt").join(assignment);
+    crate::task_env::isolation::runtime_namespace(env, &root)?;
     crate::task_env::validate_path(env, &root)?;
+    prepare_runtime_dirs(&root)?;
+    Ok(root)
+}
+
+fn prepare_runtime_dirs(root: &Path) -> Result<()> {
     for name in [
         "home", "config", "data", "cache", "state", "tmp", "c", "opencode", "runtime",
     ] {
         util::ensure_private_dir(&root.join(name), true)?;
     }
-    Ok(root)
+    Ok(())
 }
 
 fn validate_assignment(assignment: &str) -> Result<()> {
@@ -80,6 +87,9 @@ fn configure_environment(
         .env_clear()
         .env("PATH", path)
         .env(crate::task_env::MARKER_ENV, &env.instance_id);
+    if let Some(owner) = crate::task_env::isolation::owner(env) {
+        command.env("HERDR_LIFECYCLE_OWNER", serde_json::to_string(&owner)?);
+    }
     if let Some(creation) = &env.creation {
         command
             .env("HERDR_TASK_ID", &creation.binding.task_id)
@@ -129,25 +139,41 @@ fn configure_environment(
 /// Start only a dedicated server. Its process and all defaults belong to env.
 /// A persisted starting marker makes ambiguous launch non-replayable.
 pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child> {
+    let permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     let _lock = util::FileLock::acquire(&root.join("runtime.lock"), false)?
         .ok_or_else(|| FlowError::guard("runtime is busy"))?;
+    launch_owned(env, root, spec, permit.as_deref())
+}
+fn launch_owned(
+    env: &mut TaskEnvironment,
+    root: &Path,
+    spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Child> {
     ensure(
         !root.join("runtime.json").exists(),
         "runtime launch already attempted; inspect/recover, do not replay",
     )?;
-    let mut cmd = launch_command(env, root, spec)?;
-    let mut record = spec.clone();
-    if let Some(owner) = crate::task_env::instance::owner(env) {
-        record["owner"] = owner;
-    }
-    record["instance"] = json!(env.instance_id);
-    record["phase"] = json!("starting");
-    record["root"] = json!(root);
+    let mut cmd = launch_command_permitted(env, root, spec, permit)?;
+    let record = starting_record(env, root, spec)?;
     util::atomic_write_json(&root.join("runtime.json"), &record)?;
     let mut child = spawn_logged(root, &mut cmd)?;
     register_child(env, &mut child)?;
     finish_launch(env, root, spec, record, child)
 }
+fn starting_record(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    let mut record = spec.clone();
+    if let Some(owner) = crate::task_env::instance::owner(env) {
+        record["owner"] = owner;
+    }
+    record["lifecycle_owner"] = serde_json::to_value(crate::task_env::isolation::owner(env))?;
+    record["instance"] = json!(env.instance_id);
+    record["phase"] = json!("starting");
+    record["root"] = json!(root);
+    Ok(record)
+}
+
 fn finish_launch(
     env: &mut TaskEnvironment,
     root: &Path,
@@ -175,12 +201,17 @@ fn spawn_logged(root: &Path, cmd: &mut Command) -> Result<Child> {
     Ok(child)
 }
 
-fn launch_command(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<Command> {
+fn launch_command_permitted(
+    env: &TaskEnvironment,
+    root: &Path,
+    spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Command> {
     verify_instance_owner(env)?;
     let binary = PathBuf::from(required(spec, "binary")?);
     let cwd = PathBuf::from(required(spec, "cwd")?);
     validate_launch_cwd(env, &cwd)?;
-    configured_server_command(env, root, &cwd, &binary, spec)
+    configured_server_command(env, root, &cwd, &binary, spec, permit)
 }
 
 fn validate_launch_cwd(env: &TaskEnvironment, cwd: &Path) -> Result<()> {
@@ -200,8 +231,9 @@ fn configured_server_command(
     cwd: &Path,
     binary: &Path,
     spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
-    let mut cmd = server_command(env, root, cwd, binary, spec)?;
+    let mut cmd = server_command(env, root, cwd, binary, spec, permit)?;
     confine_server(&mut cmd, root, cwd, spec)?;
     let adapter = required(spec, "adapter")?;
     configure_server(&mut cmd, root, spec, &adapter)?;
@@ -237,18 +269,19 @@ fn server_command(
     cwd: &Path,
     binary: &Path,
     spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
     if spec["adapter"] != "codex" {
         ensure(
             spec.get("namespace_launcher").is_none(),
             "namespace launcher is only supported for Codex",
         )?;
-        return command(env, root, binary);
+        return configured_permitted_command(env, root, binary, permit);
     }
     // Codex 0.163 uses an absolute /tmp/codex-daemon-UID fallback even with
     // CODEX_HOME/TMPDIR/XDG_RUNTIME_DIR redirected. A private mount is required.
     let launcher = launcher::resolve(spec)?;
-    let mut cmd = namespace_environment(env, root, &launcher)?;
+    let mut cmd = namespace_environment(env, root, &launcher, permit)?;
     cmd.args([
         "--unshare-user",
         "--ro-bind",
@@ -273,13 +306,22 @@ fn server_command(
     Ok(cmd)
 }
 
-fn namespace_environment(env: &TaskEnvironment, root: &Path, launcher: &Path) -> Result<Command> {
+fn namespace_environment(
+    env: &TaskEnvironment,
+    root: &Path,
+    launcher: &Path,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Command> {
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "runtime requires active environment",
     )?;
     crate::task_env::validate_path(env, root)?;
-    configure_environment(env, root, env.namespace_command(launcher))
+    configure_environment(
+        env,
+        root,
+        env.permitted_command(launcher.as_os_str(), false, permit)?,
+    )
 }
 
 fn configure_server(cmd: &mut Command, root: &Path, spec: &J, adapter: &str) -> Result<()> {
@@ -359,6 +401,10 @@ fn verify_instance_owner(env: &TaskEnvironment) -> Result<()> {
 
 fn verify_owner_record(env: &TaskEnvironment, record: &J) -> Result<()> {
     ensure(
+        record["lifecycle_owner"] == serde_json::to_value(crate::task_env::isolation::owner(env))?,
+        "runtime lifecycle owner changed",
+    )?;
+    ensure(
         record.get("owner").filter(|v| !v.is_null()).cloned()
             == crate::task_env::instance::owner(env),
         "runtime owner queue/task/epoch/instance changed",
@@ -374,12 +420,14 @@ pub(super) fn required(value: &J, key: &str) -> Result<String> {
 /// Re-establish only the transport process; creation/turn journals still forbid
 /// replay. The caller must verify the existing session before resuming work.
 pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
+    let permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     // The child owns the exclusive broker lock and validates any stale socket.
     // Existing creation/turn journals remain untouched during transport restart.
     let binary = model::string(spec, "driver_binary")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
-    let mut cmd = command(env, root, &binary)?;
+    let mut cmd = configured_permitted_command(env, root, &binary, permit.as_deref())?;
     cmd.args(["task-runtime-broker", "--state-dir"]).arg(root);
     let mut child = spawn_broker(root, cmd)?;
     register_child(env, &mut child)?;
@@ -421,6 +469,29 @@ fn spawn_broker(root: &Path, mut cmd: Command) -> Result<Child> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .spawn()?)
+}
+
+fn configured_permitted_command(
+    env: &TaskEnvironment,
+    root: &Path,
+    binary: &Path,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Command> {
+    verify_instance_owner(env)?;
+    ensure(
+        env.owns_lock() && env.state == EnvironmentState::Active,
+        "runtime environment is not active/owned",
+    )?;
+    crate::task_env::validate_path(env, root)?;
+    ensure(
+        binary.is_absolute() && binary.is_file(),
+        "runtime binary must be an absolute file",
+    )?;
+    configure_environment(
+        env,
+        root,
+        env.permitted_command(binary.as_os_str(), true, permit)?,
+    )
 }
 
 #[cfg(test)]

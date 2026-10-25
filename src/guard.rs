@@ -86,9 +86,10 @@ pub fn scope(g: &J) -> J {
 }
 
 pub fn locked(root: &Path) -> Result<util::FileLock> {
+    let permit = crate::lifecycle::runtime_permit(root)?;
     let root = util::state_dir(root, true)?;
     match util::FileLock::acquire(&root.join("guard.lock"), false)? {
-        Some(lock) => Ok(lock),
+        Some(lock) => Ok(lock.with_lifecycle(permit)),
         None => Err(FlowError::new(
             ErrorKind::StateBusy,
             "guard state is busy; retry after this poll",
@@ -103,6 +104,7 @@ pub fn probe(root: &Path) -> Result<util::LockProbe> {
 }
 
 pub fn save(root: &Path, s: &mut J) -> Result<()> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     util::ensure_private_dir(root, true)?;
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&util::resolve_path(root).join("state.json"), s)

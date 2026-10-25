@@ -22,12 +22,16 @@ pub fn serve(root: &Path) -> Result<()> {
     let result = serve_owned(root, &owner);
     if let Err(error) = &result {
         // Best effort only: a full disk must not hide the original error.
-        let _ = util::atomic_write_json(
-            &root.join("broker-status.json"),
-            &json!({"phase":"failed", "error_kind":error.kind.type_name()}),
-        );
+        let _ = record_failure(root, error);
     }
     result
+}
+fn record_failure(root: &Path, error: &FlowError) -> Result<()> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
+    util::atomic_write_json(
+        &root.join("broker-status.json"),
+        &json!({"phase":"failed", "error_kind":error.kind.type_name()}),
+    )
 }
 fn serve_owned(root: &Path, owner: &owner::Owner) -> Result<()> {
     validate_stored_journal(root)?;
@@ -68,6 +72,7 @@ fn handle(
         Ok(request) => request,
         Err(_) => return Ok(()), // A malformed or abandoned frame owns only this connection.
     };
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     owner.verify()?;
     let result = match request_method(&request) {
         Ok(_) => execute(root, connection, &request),
@@ -134,16 +139,12 @@ fn execute(
     result
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     // EOF may arrive after valid frames in the same drain. Persist those
     // frames before reporting the disconnected transport to the supervisor.
     let transport = client.drain(0.001).map(|_| ());
     let events = client.pop_events();
-    let mut journal = if root.join("broker-events.json").exists() {
-        util::read_state_json(root, "broker-events.json")?
-    } else {
-        json!({"turns":{},"pending":{}})
-    };
-    validate_journal(&journal)?;
+    let mut journal = observation_journal(root)?;
     if events.is_empty() && root.join("broker-events.json").exists() {
         return transport;
     }
@@ -155,6 +156,16 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
     util::atomic_write_json(&root.join("broker-events.json"), &journal)?;
     transport
 }
+fn observation_journal(root: &Path) -> Result<J> {
+    let journal = if root.join("broker-events.json").exists() {
+        util::read_state_json(root, "broker-events.json")?
+    } else {
+        json!({"turns":{},"pending":{}})
+    };
+    validate_journal(&journal)?;
+    Ok(journal)
+}
+
 fn validate_stored_journal(root: &Path) -> Result<()> {
     match std::fs::symlink_metadata(root.join("broker-events.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

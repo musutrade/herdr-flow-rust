@@ -12,6 +12,7 @@ pub fn collect(
         return Ok(());
     }
     let mut queue = crate::queue::load_queue(queue_root)?;
+    let _permit = crate::queue::isolation::wait_permit(&queue, &queue["waits"][wait])?;
     if queue["waits"][wait]["lineage"]["role"] != "acceptance" {
         return Ok(());
     }

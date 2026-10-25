@@ -175,6 +175,8 @@ impl SessionAdapter {
     }
 
     pub fn submit(&self, text: &str, context: Option<J>, timeout: f64) -> Result<String> {
+        let _context_permit =
+            crate::lifecycle::context_permit(context.as_ref().unwrap_or(&J::Null))?;
         validate_submission(text, timeout)?;
         let root = self.root();
         let _lock = submission_lock(&root)?;
@@ -207,6 +209,7 @@ impl SessionAdapter {
         let Some(mut journal) = load_submission(&self.root())? else {
             return Ok(None);
         };
+        let _context_permit = crate::lifecycle::context_permit(&journal["context"])?;
         verify_journal_binding(&journal, &self.state)?;
         if terminal(&journal) {
             return Ok(Some(journal));
@@ -342,9 +345,11 @@ fn submission_allows_next(journal: Option<&J>) -> bool {
 }
 
 fn submission_lock(root: &Path) -> Result<util::FileLock> {
+    let permit = crate::lifecycle::runtime_permit(root)?;
     util::ensure_private_dir(root, false)?;
     util::FileLock::acquire(&root.join("submission.lock"), false)?
         .ok_or_else(|| FlowError::new(ErrorKind::StateBusy, "OpenCode submission is busy"))
+        .map(|lock| lock.with_lifecycle(permit))
 }
 
 fn load_submission(root: &Path) -> Result<Option<J>> {
@@ -363,7 +368,11 @@ fn save_submission(root: &Path, journal: &J) -> Result<()> {
         "invalid submission message id",
     )?;
     let reports = root.join("submissions");
-    util::ensure_private_dir(&reports, true)?;
+    if util::protected::is_runtime_namespace(root)? {
+        util::protected::namespace(&reports)?;
+    } else {
+        util::ensure_private_dir(&reports, true)?;
+    }
     util::atomic_write_json(&reports.join(format!("{id}.json")), journal)
 }
 

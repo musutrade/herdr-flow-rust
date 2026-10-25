@@ -13,6 +13,7 @@ pub mod error;
 pub mod guard;
 pub mod herdr;
 pub mod identity;
+pub mod lifecycle;
 pub mod lint_policy;
 pub mod logging;
 pub mod metrics;

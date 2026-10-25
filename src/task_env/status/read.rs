@@ -22,10 +22,11 @@ pub(super) struct Snapshot {
 pub(super) fn capture(root: &Path) -> Result<Snapshot> {
     let directories = identities(root)?;
     let mut budget = SNAPSHOT_LIMIT;
+    let data = super::super::isolation::data_root(root)?;
     let snapshot = Snapshot {
         registry: document(root, "registry.json", &mut budget)?,
-        envs: scan(&root.join("envs"), &mut budget)?,
-        plans: scan(&root.join("plans"), &mut budget)?,
+        envs: scan(&data.join("envs"), &mut budget)?,
+        plans: scan(&data.join("plans"), &mut budget)?,
         directories,
     };
     if snapshot.directories != identities(root)? {
@@ -37,10 +38,18 @@ pub(super) fn capture(root: &Path) -> Result<Snapshot> {
 }
 
 fn identities(root: &Path) -> Result<Vec<Option<(u64, u64)>>> {
-    [root.to_path_buf(), root.join("envs"), root.join("plans")]
-        .iter()
-        .map(|p| directory(p))
-        .collect()
+    {
+        let data = super::super::isolation::data_root(root)?;
+        vec![
+            root.to_path_buf(),
+            data.clone(),
+            data.join("envs"),
+            data.join("plans"),
+        ]
+    }
+    .iter()
+    .map(|p| directory(p))
+    .collect()
 }
 
 fn directory(path: &Path) -> Result<Option<(u64, u64)>> {

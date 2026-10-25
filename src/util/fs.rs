@@ -26,7 +26,8 @@ pub fn read_text(path: &Path) -> Result<String> {
 }
 
 pub fn read_json(path: &Path) -> Result<Value> {
-    let text = read_text(path)?;
+    let resolved = super::protected::read_path(path)?;
+    let text = read_text(&resolved)?;
     serde_json::from_str(&text).map_err(|error| {
         FlowError::new(
             crate::error::ErrorKind::Json,
@@ -238,14 +239,14 @@ pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
     let mut text = serde_json::to_string_pretty(value)
         .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
     text.push('\n');
-    atomic_write_bytes(path, text.as_bytes())
+    atomic_write_bytes(&super::protected::write_path(path)?, text.as_bytes())
 }
 
 pub fn atomic_write_json_compact(path: &Path, value: &Value) -> Result<()> {
     let mut text = serde_json::to_string(value)
         .map_err(|error| FlowError::new(crate::error::ErrorKind::Json, error.to_string()))?;
     text.push('\n');
-    atomic_write_bytes(path, text.as_bytes())
+    atomic_write_bytes(&super::protected::write_path(path)?, text.as_bytes())
 }
 
 pub fn write_new_file(path: &Path, value: &Value) -> Result<()> {
@@ -313,9 +314,15 @@ pub enum LockProbe {
 
 pub struct FileLock {
     file: File,
+    lifecycle: Option<crate::lifecycle::Permit>,
 }
 
 impl FileLock {
+    pub(crate) fn with_lifecycle(mut self, permit: Option<crate::lifecycle::Permit>) -> Self {
+        self.lifecycle = permit;
+        self
+    }
+
     /// Open (or create) `path` and take a `flock`. With `blocking=false`,
     /// returns `Ok(None)` when another process owns the lock.
     pub fn acquire(path: &Path, blocking: bool) -> Result<Option<Self>> {
@@ -344,7 +351,10 @@ impl FileLock {
         // takes scalar flags and does not take descriptor ownership.
         let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
         if result == 0 {
-            return Ok(Some(Self { file }));
+            return Ok(Some(Self {
+                file,
+                lifecycle: None,
+            }));
         }
         let error = std::io::Error::last_os_error();
         let code = error.raw_os_error();
@@ -504,9 +514,18 @@ pub fn state_dir(path: &Path, create: bool) -> Result<PathBuf> {
     Ok(resolve_path(path))
 }
 
-pub fn read_state_json(root: &Path, name: &str) -> Result<Value> {
+fn validate_state_name(name: &str) -> Result<()> {
     if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
         return Err(FlowError::io("state filename must be a basename"));
+    }
+    Ok(())
+}
+
+pub fn read_state_json(root: &Path, name: &str) -> Result<Value> {
+    validate_state_name(name)?;
+    let resolved = super::protected::read_path(&root.join(name))?;
+    if resolved != root.join(name) {
+        return read_state_json(&root.join(name), "authority.json");
     }
     ensure_private_dir(root, false)?;
     let directory = secure::directory(root, false)?;
@@ -534,9 +553,14 @@ pub fn read_state_json_bounded_if_exists(
     name: &str,
     limit: usize,
 ) -> Result<Option<Value>> {
-    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
-        return Err(FlowError::io("state filename must be a basename"));
+    validate_state_name(name)?;
+    let resolved = super::protected::read_path(&root.join(name))?;
+    if resolved != root.join(name) {
+        return read_state_json_bounded_if_exists(&root.join(name), "authority.json", limit);
     }
+    read_regular_bounded_state(root, name, limit)
+}
+fn read_regular_bounded_state(root: &Path, name: &str, limit: usize) -> Result<Option<Value>> {
     ensure_private_dir(root, false)?;
     let directory = secure::directory(root, false)?;
     let mut file = match OpenOptions::new()
@@ -612,9 +636,7 @@ pub fn remove_file_if_exists(path: &Path) -> Result<()> {
 /// Remove one private-state entry through a pinned, no-symlink directory.
 /// Missing sidecar directories are normal during interrupted cleanup.
 pub fn remove_state_file(root: &Path, name: &str) -> Result<()> {
-    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
-        return Err(FlowError::io("state filename must be a basename"));
-    }
+    validate_state_name(name)?;
     if !root.try_exists()? {
         return Ok(());
     }

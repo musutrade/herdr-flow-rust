@@ -282,6 +282,7 @@ pub fn configure_review(
     h: &mut dyn GuardAdapter,
     require_bridge: bool,
 ) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let (mut s, data) = review_state(root)?;
     review_attestation(&s, handoff, &data)?;
     h.set_state(&s);
@@ -290,6 +291,7 @@ pub fn configure_review(
 }
 
 pub fn reconcile_review(root: &Path, h: &mut dyn GuardAdapter) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let s = read_state(root)?;
     reconcile_review_state(root, s, h)
 }

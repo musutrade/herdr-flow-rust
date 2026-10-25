@@ -15,6 +15,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub fn checkpoint(root: &Path, path: &Path, session: &str) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let s = read_state(root)?;
     checkpoint_state(root, path, session, s)
 }

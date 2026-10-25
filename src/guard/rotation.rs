@@ -284,6 +284,7 @@ fn handle_phase(root: &Path, s: &mut J, h: &mut dyn GuardAdapter) -> Result<()> 
 }
 
 pub fn once(root: &Path, h: &mut dyn GuardAdapter) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let root = util::state_dir(root, false)?;
     let s = load_guard_state(&root)?;
     once_state(&root, h, s)
@@ -402,6 +403,7 @@ fn once_handoff_overdue(s: &J) -> bool {
 }
 
 pub fn reconcile(root: &Path, session: &str, h: &mut dyn GuardAdapter, shell: bool) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let root = util::state_dir(root, false)?;
     let s = read_state(&root)?;
     reconcile_state(root, session, h, shell, s)
@@ -685,6 +687,7 @@ fn reconcile_successor_ready(root: &Path, mut s: J) -> Result<J> {
 }
 
 pub fn ack(root: &Path, session: &str) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let root = util::state_dir(root, false)?;
     let s = read_state(&root)?;
     ack_version(root, session, s)

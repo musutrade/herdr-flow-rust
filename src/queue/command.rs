@@ -113,7 +113,7 @@ fn ensure_writer_cwd(t: &J, cwd: &str) -> Result<()> {
 }
 
 fn command_state(root: &Path, wait_id: &str, cwd: &str) -> Result<(J, Option<J>, Option<String>)> {
-    let s = crate::util::read_json(&root.join("queue.json"))?;
+    let s = super::load_queue(root)?;
     command_state_loaded(root, s, wait_id, cwd)
 }
 
@@ -488,29 +488,72 @@ fn signal_result(root: &Path, wait_id: &str, outcome: &str, message: &str, folde
 }
 
 pub fn run_command(root: &Path, wait_id: &str, argv_spec: &J, cwd: &str) -> Result<i32> {
+    super::isolation::require_legacy_execution(root)?;
+    run_legacy_command(root, wait_id, argv_spec, cwd)
+}
+
+fn run_legacy_command(root: &Path, wait_id: &str, argv_spec: &J, cwd: &str) -> Result<i32> {
+    let argv = command_argv(argv_spec)?;
+    run_argv(root, wait_id, &argv, cwd)
+}
+
+fn command_argv(argv_spec: &J) -> Result<Vec<String>> {
     let Some(items) = argv_spec.as_array() else {
         return Err(queue_error(
             "command file must be a nonempty JSON argv array",
         ));
     };
-    let argv = validate_argv(items)?;
+    validate_argv(items)
+}
+
+fn run_argv(root: &Path, wait_id: &str, argv: &[String], cwd: &str) -> Result<i32> {
     let cwd = util::resolve_path(Path::new(cwd)).display().to_string();
-    let (folder, record) = {
-        let _lock = locked(root, false)?;
-        let (mut s, t, session) = command_state(root, wait_id, &cwd)?;
-        reserve(
-            root,
-            wait_id,
-            &argv,
-            &cwd,
-            &mut s,
-            t.as_ref(),
-            session.as_deref(),
-        )?
-    };
-    let (outcome, message) = execute(&folder, &argv, &cwd, record)?;
-    signal_result(root, wait_id, &outcome, &message, &folder);
-    Ok(if outcome == "complete" { 0 } else { 1 })
+    let (folder, record) = reserve_command(root, wait_id, argv, &cwd)?;
+    finish_command(root, wait_id, argv, &cwd, &folder, record)
+}
+
+fn reserve_command(root: &Path, wait_id: &str, argv: &[String], cwd: &str) -> Result<(PathBuf, J)> {
+    let _lock = locked(root, false)?;
+    reserve_current_command(root, wait_id, argv, cwd)
+}
+
+fn reserve_current_command(
+    root: &Path,
+    wait_id: &str,
+    argv: &[String],
+    cwd: &str,
+) -> Result<(PathBuf, J)> {
+    let (mut s, t, session) = command_state(root, wait_id, cwd)?;
+    reserve(
+        root,
+        wait_id,
+        argv,
+        cwd,
+        &mut s,
+        t.as_ref(),
+        session.as_deref(),
+    )
+}
+
+fn finish_command(
+    root: &Path,
+    wait_id: &str,
+    argv: &[String],
+    cwd: &str,
+    folder: &Path,
+    record: J,
+) -> Result<i32> {
+    let (outcome, message) = execute(folder, argv, cwd, record)?;
+    signal_result(root, wait_id, &outcome, &message, folder);
+    Ok(command_exit_code(&outcome))
+}
+
+fn command_exit_code(outcome: &str) -> i32 {
+    if outcome == "complete" {
+        0
+    } else {
+        1
+    }
 }
 
 /// CLI-facing wrapper: read a JSON argv file then execute once.

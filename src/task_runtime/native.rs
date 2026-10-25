@@ -51,19 +51,29 @@ fn acceptance_protocol(requirement: &J) -> J {
 /// One create attempt per private runtime. A failed/ambiguous response leaves
 /// the journal; recovery inspects it and never creates a replacement implicitly.
 pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
+    create_owned(env, root, spec)
+}
+fn create_owned(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let runtime = super::verify(env, root)?;
     let queue_root = PathBuf::from(required(spec, "queue_dir")?);
     crate::task_env::validate_path(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let _session_lock = crate::guard::locked(root)?;
+    validate_unused_runtime(root)?;
+    let mut q = queue::load_queue(&queue_root)?;
+    let journal = creation_journal(env, &runtime, &q, spec)?;
+    finish_creation(root, &mut q, journal)
+}
+
+fn validate_unused_runtime(root: &Path) -> Result<()> {
     receiver::ensure_absent(&root.join("receiver.json"))?;
     ensure(
         !root.join("creation.json").exists(),
         "session creation already attempted; reconcile without replay",
     )?;
-    let mut q = queue::load_queue(&queue_root)?;
-    let journal = creation_journal(env, &runtime, &q, spec)?;
-    finish_creation(root, &mut q, journal)
+    Ok(())
 }
 
 fn creation_journal(env: &TaskEnvironment, runtime: &J, q: &J, spec: &J) -> Result<J> {
@@ -76,6 +86,7 @@ fn creation_journal(env: &TaskEnvironment, runtime: &J, q: &J, spec: &J) -> Resu
     if let Some(owner) = crate::task_env::instance::owner(env) {
         journal["owner"] = owner;
     }
+    journal["lifecycle_owner"] = serde_json::to_value(crate::task_env::isolation::owner(env))?;
     Ok(journal)
 }
 
@@ -326,6 +337,8 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 
 /// Rebind only a recorded, verified fresh session; never repeat thread/start or POST /session.
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &journal)?;
@@ -501,6 +514,8 @@ fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
 /// Dispatch the immutable packet once. OpenCode's existing durable collector is
 /// reused; Codex retains a turn journal and never resumes an uncertain send.
 pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     super::verify(env, root)?;
     let (journal, state) = dispatch_state(root)?;
     super::verify_owner_record(env, &journal)?;
@@ -560,15 +575,15 @@ fn dispatch_opencode(root: &Path, journal: &J, state: &J) -> Result<J> {
         &root.join("dispatch.json"),
         &json!({"phase":"sending","session":state["session"],"packet_sha256":journal["packet_sha256"]}),
     )?;
-    let path = root.join("input.json");
-    util::atomic_write_json(&path, &journal["packet"])?;
+    let path = root.join("input.txt");
+    util::atomic_write_bytes(&path, serde_json::to_string(&journal["packet"])?.as_bytes())?;
     // Keep this runtime's guard lock while retrying only pre-submission lock
     // contention. The adapter durably writes submission.json before its POST;
     // once that file exists, even a StateBusy error must never trigger a resend.
     retry_unsent(root, std::time::Duration::from_secs(15), || {
         crate::opencode::session::dispatch(
             root,
-            &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path}),
+            &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path,"lifecycle_owner":journal["lifecycle_owner"]}),
         )
     })
 }
@@ -623,6 +638,8 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
 }
 
 pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     super::verify(env, root)?;
     let creation = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &creation)?;
@@ -732,7 +749,7 @@ fn publish_codex(
     queue::signal_native(
         queue_root,
         &json!({"adapter":"codex","session":state["session"]}),
-        &json!({"wait":creation["wait"],"outcome":journal["outcome"],"summary":"Codex turn finished; inspect the bound report","evidence":root.join("turn.json")}),
+        &json!({"wait":creation["wait"],"outcome":journal["outcome"],"summary":"Codex turn finished; inspect the bound report","evidence":root.join("turn.json"),"lifecycle_owner":creation["lifecycle_owner"]}),
     )?;
     journal["phase"] = json!("signalled");
     util::atomic_write_json(&root.join("turn.json"), &journal)?;

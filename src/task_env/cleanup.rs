@@ -279,7 +279,7 @@ fn reject_queue_instance(env: &TaskEnvironment) -> Result<()> {
             "queue-bound instance final cleanup is not enabled",
         ));
     }
-    Ok(())
+    registry::require_legacy_registry()
 }
 
 fn destroy_plan(
@@ -389,6 +389,7 @@ pub fn resume_delivery_cleanup(task_id: &str) -> Result<()> {
 }
 
 fn resume_cleanup(task_id: &str, require_delivery: bool) -> Result<()> {
+    registry::require_legacy_registry()?;
     registry::validate_task_id(task_id)?;
     let _lock = registry::try_lock_task(task_id)?.ok_or_else(|| {
         FlowError::progress(format!(
@@ -396,6 +397,9 @@ fn resume_cleanup(task_id: &str, require_delivery: bool) -> Result<()> {
         ))
     })?;
 
+    resume_locked(task_id, require_delivery)
+}
+fn resume_locked(task_id: &str, require_delivery: bool) -> Result<()> {
     let document = load_document(&registry::environment_state_path(task_id)?)?;
     reject_queue_document(&document)?;
     let mut state = load_plan(task_id)?;

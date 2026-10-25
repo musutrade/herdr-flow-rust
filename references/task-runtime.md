@@ -20,7 +20,9 @@ verify their bound session directly; they do not set or impersonate either varia
 positive epoch to one environment instance, a directly created Git worktree and
 managed runtime ownership. It does not require a Herdr workspace. Legacy entry
 below remains distinct: it does not infer queue authority. The creation slice is
-not deployment approval, an all-writer barrier or automatic finalization.
+not deployment approval or automatic finalization. The opt-in
+[isolated lifecycle barrier](task-lifecycle.md) adds owner outcomes and short
+write/spawn permits without migrating these legacy entries.
 
 ## Owned environment and fresh activity
 

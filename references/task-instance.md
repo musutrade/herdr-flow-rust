@@ -5,7 +5,9 @@ A task is the lifecycle unit: its eventual final success **or** final failure
 must trigger unified teardown. An intermediate command, test or CI failure is
 not final failure. This slice establishes creation ownership; it does not yet
 connect terminal outcomes, isolate all old writers or enable automatic teardown.
-Those are the ordered PR2/PR3/PR4 work, not deployment promises from these tests.
+The opt-in [PR2 lifecycle barrier](task-lifecycle.md) is a separate fresh authority
+mode; PR3/PR4 remain required before production teardown. These creation tests
+are not deployment promises.
 
 ## One authority and existing machinery
 

@@ -81,11 +81,18 @@ fn validate_entry(
         !entry.instance_id.is_empty()
             && entry.workspace_root.is_absolute()
             && entry.temp_root.is_absolute()
-            && entry.state_file == root.join("envs").join(format!("{}.json", entry.task_id)),
+            && entry.state_file
+                == super::isolation::data_root(root)?
+                    .join("envs")
+                    .join(format!("{}.json", entry.task_id)),
         "registry identity or paths are inconsistent",
     )?;
+    validate_claim_document(snapshot, &entry.task_id)
+}
+
+fn validate_claim_document(snapshot: &read::Snapshot, task: &str) -> Result<()> {
     require(
-        snapshot.envs.contains_key(&entry.task_id) || snapshot.plans.contains_key(&entry.task_id),
+        snapshot.envs.contains_key(task) || snapshot.plans.contains_key(task),
         "registry claim has no environment or cleanup plan",
     )?;
     Ok(())
@@ -133,7 +140,10 @@ fn validate_environment_identity(root: &Path, task: &str, env: &TaskEnvironment)
     require(
         env.task_id == task
             && !env.instance_id.is_empty()
-            && env.state_file == root.join("envs").join(format!("{task}.json"))
+            && env.state_file
+                == super::isolation::data_root(root)?
+                    .join("envs")
+                    .join(format!("{task}.json"))
             && env.workspace_root.is_absolute()
             && env.temp_root.is_absolute()
             && env.delivery_targets.iter().all(|t| t.path.is_absolute()),

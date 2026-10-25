@@ -23,6 +23,26 @@ fn readiness_report(
 ) -> Result<(J, Vec<String>, Vec<String>)> {
     let gaps = Vec::new();
     let next_steps = Vec::new();
+    let producer_channels = producer_channels(root, s)?;
+    let last_confirmed = last_confirmed_receipt(s, session);
+    let result = json!({
+        "queue": s.get("id").cloned().unwrap_or(Value::Null),
+        "checked_at": crate::util::now(),
+        "session": session,
+        "result_return": false,
+        "active_wakeup": false,
+        "context_telemetry": false,
+        "safe_rotation": false,
+        "opencode_safe_rotation": "unsupported",
+        "gaps": gaps.clone(),
+        "next_steps": next_steps.clone(),
+        "producer_channels": producer_channels,
+        "last_confirmed_receipt": last_confirmed
+    });
+    Ok((result, gaps, next_steps))
+}
+
+fn producer_channels(root: &Path, s: &J) -> Result<Vec<J>> {
     let mut producer_channels = Vec::new();
     if let Some(waits) = model::get(s, "waits").and_then(Value::as_object) {
         for w in waits.values() {
@@ -33,7 +53,8 @@ fn readiness_report(
             let kind = model::string(w, "kind").unwrap_or_default();
             let result_path = if kind == "signal" {
                 Some(
-                    root.join("results")
+                    crate::queue::artifacts(root)?
+                        .join("results")
                         .join(format!("{wait_id}.json"))
                         .display()
                         .to_string(),
@@ -57,6 +78,10 @@ fn readiness_report(
             }));
         }
     }
+    Ok(producer_channels)
+}
+
+fn last_confirmed_receipt(s: &J, session: Option<&str>) -> Option<J> {
     let mut last_confirmed = None;
     if let Some(deliveries) = model::get(s, "deliveries").and_then(Value::as_object) {
         let mut candidates: Vec<&J> = deliveries
@@ -77,21 +102,7 @@ fn readiness_report(
             }));
         }
     }
-    let result = json!({
-        "queue": s.get("id").cloned().unwrap_or(Value::Null),
-        "checked_at": crate::util::now(),
-        "session": session,
-        "result_return": false,
-        "active_wakeup": false,
-        "context_telemetry": false,
-        "safe_rotation": false,
-        "opencode_safe_rotation": "unsupported",
-        "gaps": gaps.clone(),
-        "next_steps": next_steps.clone(),
-        "producer_channels": producer_channels,
-        "last_confirmed_receipt": last_confirmed
-    });
-    Ok((result, gaps, next_steps))
+    last_confirmed
 }
 
 fn delivery_acknowledged_by(delivery: &J, session: Option<&str>) -> bool {
@@ -331,8 +342,7 @@ fn load_readiness(
     session: Option<&str>,
     factory: &ReceiverFactory,
 ) -> Result<(J, Vec<String>, Vec<String>)> {
-    crate::util::read_state_json(root, "queue.json")
-        .and_then(|s| readiness_checks(root, &s, session, factory))
+    crate::queue::load_queue(root).and_then(|s| readiness_checks(root, &s, session, factory))
 }
 
 fn readiness_checks(
@@ -393,7 +403,10 @@ fn push_queue_gap(s: &J, gaps: &mut Vec<String>, next_steps: &mut Vec<String>) {
 }
 
 fn push_watch_gap(root: &Path, gaps: &mut Vec<String>, next_steps: &mut Vec<String>) {
-    if !model::bool_or(&watch_service::health(root), "healthy", false) {
+    let healthy = crate::queue::artifacts(root)
+        .map(|path| model::bool_or(&watch_service::health(&path), "healthy", false))
+        .unwrap_or(false);
+    if !healthy {
         gaps.push("queue watcher is not healthy; restart the existing watcher".to_string());
         next_steps.push(
             "inspect the queue watcher reason; restart only the verified existing watcher and check its lock/heartbeat"

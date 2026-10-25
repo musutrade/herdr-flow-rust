@@ -42,6 +42,8 @@ pub enum CreationPhase {
 #[serde(deny_unknown_fields)]
 pub struct CreationIntent {
     pub binding: InstanceBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_queue: Option<PathBuf>,
     pub phase: CreationPhase,
     pub repository: PathBuf,
     pub repository_identity: RootIdentity,
@@ -95,6 +97,58 @@ pub fn begin_instance(binding: &InstanceBinding, spec: &CreateSpec) -> Result<Ta
     )
 }
 
+/// Isolated creation requires a prospective EX lease; no legacy state is migrated.
+pub fn begin_isolated(
+    binding: &InstanceBinding,
+    spec: &CreateSpec,
+    queue_root: &std::path::Path,
+    permit: std::sync::Arc<crate::lifecycle::Permit>,
+) -> Result<TaskEnvironment> {
+    validate_binding(binding)?;
+    validate_spec(spec)?;
+    verify_prospective_lease(binding, queue_root, &permit)?;
+    let mut intent = git::intent(binding, spec)?;
+    intent.lifecycle_queue = Some(queue_root.to_path_buf());
+    super::isolation::enable(queue_root, &binding.queue_id)?;
+    super::env::create_with_lease(
+        &binding.task_id,
+        &spec.workspace_root,
+        spec.delivery_targets.clone(),
+        &spec.temp_root,
+        Some(intent),
+        Some(permit),
+    )
+}
+fn verify_prospective_lease(
+    binding: &InstanceBinding,
+    queue_root: &std::path::Path,
+    permit: &crate::lifecycle::Permit,
+) -> Result<()> {
+    let p = permit.owner();
+    require(
+        permit.exclusive()
+            && p.queue_root == queue_root
+            && p.queue_id == binding.queue_id
+            && p.task_id == binding.task_id
+            && p.epoch == binding.epoch
+            && p.instance_id.is_empty(),
+        "isolated create requires prospective exclusive lease",
+    )?;
+    Ok(())
+}
+
+pub fn resume_isolated(
+    binding: &InstanceBinding,
+    expected: &str,
+    permit: std::sync::Arc<crate::lifecycle::Permit>,
+) -> Result<TaskEnvironment> {
+    let env = super::restore_environment(&binding.task_id)?;
+    *env.creation_permit.lock().unwrap() = Some(permit);
+    super::isolation::mutation_permit(&env)?;
+    verify_creation_identity(&env, binding, expected)?;
+    Ok(env)
+}
+
 fn validate_binding(binding: &InstanceBinding) -> Result<()> {
     super::validate_task_id(&binding.task_id)?;
     require(
@@ -141,6 +195,17 @@ pub fn resume_instance(binding: &InstanceBinding, expected: &str) -> Result<Task
     Ok(env)
 }
 
+pub(super) fn verify_creation_identity(
+    env: &TaskEnvironment,
+    binding: &InstanceBinding,
+    expected: &str,
+) -> Result<()> {
+    verify_binding(env, binding, expected)?;
+    ensure_registered(env)?;
+    roots::verify_recorded(env)?;
+    git::verify_recorded(intent(env)?)
+}
+
 fn verify_binding(env: &TaskEnvironment, binding: &InstanceBinding, expected: &str) -> Result<()> {
     require(env.owns_lock(), "instance handle has no ownership lock")?;
     verify_document(env)?;
@@ -170,6 +235,7 @@ pub(super) fn intent(env: &TaskEnvironment) -> Result<&CreationIntent> {
 /// Finish this intent, including a successful Git add whose reply was lost.
 /// Unknown objects are retained as errors, never adopted, removed or recreated.
 pub fn materialize_instance(env: &mut TaskEnvironment) -> Result<()> {
+    let _permit = super::isolation::mutation_permit(env)?;
     let binding = intent(env)?.binding.clone();
     verify_binding(env, &binding, &env.instance_id)?;
     if intent(env)?.phase == CreationPhase::Ready {
@@ -298,4 +364,23 @@ fn ensure_registered(env: &TaskEnvironment) -> Result<()> {
         )?;
         super::env::reserve_environment(env, env.state_file())
     }
+}
+
+/// Terminal records an obligation even when creation cannot safely continue.
+/// It checks the durable owner, not whether every partial resource is deletable.
+pub(super) fn verify_terminal_identity(
+    env: &TaskEnvironment,
+    binding: &InstanceBinding,
+    expected: &str,
+) -> Result<()> {
+    verify_binding(env, binding, expected)?;
+    if let Some(entry) = super::load_registry()?.get(&env.task_id) {
+        require(
+            entry.instance_id == env.instance_id
+                && entry.task_id == env.task_id
+                && entry.state_file == env.state_file(),
+            "terminal registry identity changed",
+        )?;
+    }
+    Ok(())
 }

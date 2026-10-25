@@ -11,6 +11,7 @@ pub mod claim;
 pub mod environment;
 pub mod lineage;
 pub(crate) mod ownership;
+pub mod terminal;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -686,6 +687,7 @@ fn finish_registration(s: &mut J, mut registration: Registration, now: f64) -> R
 
 pub fn attach(s: &mut J, event: &mut J, w: &J, now: f64) -> Result<()> {
     let task_name = model::string(w, "task").unwrap_or_default();
+    terminal::ensure_open(s, &task_name)?;
     let Some(mut t) = model::dig(s, &["tasks", &task_name]).cloned() else {
         return Ok(());
     };
@@ -739,6 +741,7 @@ pub fn task(s: &J, name: Option<&J>, version: Option<&J>) -> Result<J> {
             "task state version changed; inspect current state before acting",
         ));
     };
+    terminal::ensure_open(s, name)?;
     let Some(version) = version.and_then(Value::as_i64) else {
         return Err(progress_error(
             "task state version changed; inspect current state before acting",
@@ -2071,6 +2074,9 @@ pub fn stalls(s: &mut J, now: f64) -> Result<()> {
 }
 
 fn stall_task(s: &mut J, queue_id: &str, name: &str, now: f64) -> Result<()> {
+    if terminal::ensure_open(s, name).is_err() {
+        return Ok(());
+    }
     let Some(task) = model::dig(s, &["tasks", name]).cloned() else {
         return Ok(());
     };
@@ -2193,9 +2199,16 @@ fn insert_stall_event(s: &mut J, event_id: &str, task: &J, now: f64, reason: &st
 }
 
 pub fn current_event(s: &J, e: &J) -> bool {
+    if terminal::ensure_open(s, e["task"].as_str().unwrap_or_default()).is_err() {
+        return false;
+    }
     event_task(s, e)
-        .map(|task| lineage::actionable(s, task) && event_is_current(task, e))
+        .map(|task| actionable_event(s, task, e))
         .unwrap_or(false)
+}
+
+fn actionable_event(s: &J, task: &J, event: &J) -> bool {
+    lineage::actionable(s, task) && event_is_current(task, event)
 }
 
 fn event_task<'a>(s: &'a J, e: &J) -> Option<&'a J> {

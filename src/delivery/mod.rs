@@ -59,6 +59,7 @@ pub fn prepare(
     spec: &J,
     executor: &dyn Executor,
 ) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "delivery requires owned active environment",
@@ -192,6 +193,7 @@ fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
 /// rather than invoke execute again. Successful return can still report an
 /// unknown/failed/absent phase; inspect the returned journal.
 pub fn execute(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     validate_execution(env)?;
     let queue = field(&env.delivery, "queue")?;
     let _lock = crate::queue::locked(Path::new(&queue), false)?;
@@ -238,6 +240,7 @@ fn ensure_owned(env: &TaskEnvironment) -> Result<()> {
 /// errors become Unknown; persistence errors propagate after in-memory changes.
 /// Retain the journal and retry observation, never infer success from Ok alone.
 pub fn reconcile(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     ensure_owned(env)?;
     if env.delivery["phase"] == "confirmed" || env.delivery["phase"] == "cleaning" {
         return Ok(env.delivery.clone());
@@ -280,6 +283,7 @@ fn record_problem(env: &mut TaskEnvironment, phase: &str, reason: String) {
 /// execute. This may submit a new external action and is not a generic error
 /// retry. Concurrent endpoint changes remain the trusted adapter's responsibility.
 pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     ensure_owned(env)?;
     ensure(
         env.delivery["phase"] == "absent",
@@ -301,6 +305,11 @@ pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
 /// and resume cleanup instead of resubmitting. Success leaves no reusable task
 /// journal; this is not a repeatable publication call.
 pub fn finish(env: &mut TaskEnvironment) -> Result<()> {
+    if crate::task_env::isolation::owner(env).is_some() {
+        return Err(FlowError::guard(
+            "isolated delivery finish requires lifecycle cleanup; not implemented",
+        ));
+    }
     ensure_owned(env)?;
     ensure(
         !crate::task_env::process_has_marker(std::process::id() as i32, &env.instance_id),
