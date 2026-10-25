@@ -107,7 +107,11 @@ persisting its inode. If a directory exists without a recorded identity, PR1
 retains it and reports an unresolved creation; it neither adopts nor deletes it.
 Likewise, partial Git administration that cannot be matched is retained. These
 are explicit recovery failures, not proof of release and not requests for a user
-to approve deletion. Broader cross-module recovery/fault combinations remain PR4.
+to approve deletion. The PR4 combinations in [task lifecycle](task-lifecycle.md)
+cover recorded identities and actual Git reply loss; they do not close the
+mkdir-before-inode-checkpoint window. Issue #130's requirement for recovery at
+every creation boundary therefore remains incomplete, even when these fixtures
+and their CI pass. This is not deployment or total lifecycle acceptance.
 Private-directory checks and exact identities do not constitute global exclusion
 of arbitrary same-UID writers; the all-writer barrier is PR2.
 

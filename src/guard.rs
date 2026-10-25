@@ -86,8 +86,17 @@ pub fn scope(g: &J) -> J {
 }
 
 pub fn locked(root: &Path) -> Result<util::FileLock> {
+    lock_state(root, true)
+}
+
+/// Lock an existing guard without recreating a retired receiver directory.
+pub fn locked_existing(root: &Path) -> Result<util::FileLock> {
+    lock_state(root, false)
+}
+
+fn lock_state(root: &Path, create: bool) -> Result<util::FileLock> {
     let permit = crate::lifecycle::runtime_permit(root)?;
-    let root = util::state_dir(root, true)?;
+    let root = util::state_dir(root, create)?;
     match util::FileLock::acquire(&root.join("guard.lock"), false)? {
         Some(lock) => Ok(lock.with_lifecycle(permit)),
         None => Err(FlowError::new(

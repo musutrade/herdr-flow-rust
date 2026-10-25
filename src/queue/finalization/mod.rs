@@ -1,6 +1,7 @@
 //! Bounded continuation of terminal obligations, driven by existing entrypoints.
 mod associations;
 mod plan;
+mod receiver;
 mod shared;
 
 use super::{isolation, queue_error};
@@ -120,12 +121,15 @@ fn cleanup_permit(owner: &Owner) -> Result<Permit> {
 
 fn prepare(owner: &Owner, permit: &Permit) -> Result<Associations> {
     let _lock = super::locked(&owner.queue_root, false)?;
-    let s = super::load_queue(&owner.queue_root)?;
+    let mut s = super::load_queue(&owner.queue_root)?;
     let existing = crate::task_env::terminal::pending_terminal_owners(&owner.queue_root)?;
-    if existing.contains(owner) {
-        return restore_associations(&s, owner, permit);
-    }
-    freeze_associations(&s, owner, permit)
+    let plan = if existing.contains(owner) {
+        restore_associations(&s, owner, permit)?
+    } else {
+        freeze_associations(&s, owner, permit)?
+    };
+    receiver::checkpoint(&mut s, &plan, permit)?;
+    Ok(plan)
 }
 
 fn restore_associations(s: &J, owner: &Owner, permit: &Permit) -> Result<Associations> {
@@ -178,9 +182,10 @@ fn remove_associations(plan: &Associations, permit: &Permit) -> Result<()> {
         return Ok(());
     }
     let _shared_permits = shared::permits(&s, plan)?;
+    let retirements = receiver::retirement_targets(&s, plan)?;
     let before = s.clone();
-    associations::remove(root, &mut s, plan)?;
-    save_cleanup(root, &before, &mut s, plan, permit)
+    associations::remove(root, &mut s, plan, &retirements)?;
+    save_cleanup(root, &before, &mut s, plan, permit, &retirements)
 }
 
 fn release_checkpoint(plan: &Associations, permit: &Permit) -> Result<()> {
@@ -276,11 +281,12 @@ fn save_cleanup(
     s: &mut J,
     plan: &Associations,
     permit: &Permit,
+    retirements: &receiver::Retirements,
 ) -> Result<()> {
     isolation::validate_layout(root, s)?;
     validate_incarnation(before, &plan.owner, permit)?;
     let mut expected = before.clone();
-    associations::prune(&mut expected, plan)?;
+    associations::prune(&mut expected, plan, retirements)?;
     require(
         &expected == s,
         "cleanup save exceeds its frozen associations",

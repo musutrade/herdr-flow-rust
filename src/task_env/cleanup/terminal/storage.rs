@@ -46,6 +46,7 @@ fn decode(value: J, owner: &Owner) -> Result<CleanupState> {
             .all(|p| plan.roots.iter().any(|r| &r.path == p)),
         "foreign pending root",
     )?;
+    super::git::removal_intent(&plan)?;
     validate_quarantine(&plan)?;
     Ok(plan)
 }
@@ -64,8 +65,9 @@ fn validate_quarantine(plan: &CleanupState) -> Result<()> {
     )?;
     let t = terminal(plan)?;
     let owned_root = plan.pending_root_removals.contains(&q.root);
+    let removal = super::git::removal_intent(plan)?;
     let owned_admin = t.phase == Phase::GitRemoving
-        && t.creation
+        && removal
             .git_identity
             .as_ref()
             .is_some_and(|g| g.admin_dir == q.root);
@@ -187,7 +189,7 @@ pub(super) fn verify_absent(plan: &CleanupState) -> Result<()> {
         let path = q.root.parent().unwrap().join(&q.name);
         require(absent(&path)?, "quarantine remains")?;
     }
-    super::super::super::instance::git::verify_removed(&terminal(plan)?.creation)?;
+    super::super::super::instance::git::verify_removed(&super::git::removal_intent(plan)?)?;
     process::ensure_gone(plan)
 }
 

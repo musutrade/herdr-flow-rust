@@ -94,6 +94,29 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+    fn create_named(&self, name: &str) -> Owner {
+        let mut s = self.state();
+        let candidate = s["tasks"]["task"]["candidate"].clone();
+        s["tasks"][name] = json!({"task":name,"epoch":1,"candidate":candidate,"state_version":1,
+            "phase":"waiting","control":"running","writer":null,"pending":[],"operations":{}});
+        self.save(&mut s);
+        self.call("task-environment", &json!({"action":"create","task":name,"queue_id":s["id"],"epoch":1,"state_version":1,
+            "environment":{"workspace_root":self.temp.path().join(format!("{name}-work")),"temp_root":self.temp.path().join(format!("{name}-tmp")),
+            "delivery_targets":[],"repository":self.temp.path().join("repo"),"commit":candidate}})).unwrap();
+        lifecycle::task_owner(&self.state(), name).unwrap().unwrap()
+    }
+    fn receiver(&self, owner: &Owner, session: &str) -> PathBuf {
+        let env = task_env::restore_environment(&owner.task_id).unwrap();
+        let root = herdr_flow::task_runtime::prepare(&env, "fixture-receiver").unwrap();
+        assert_eq!(
+            util::read_state_json(&root, "lifecycle-owner.json").unwrap(),
+            json!(owner)
+        );
+        let g = json!({"version":2,"task":owner.task_id,"role":"coordinator","pane":"w1:p1","terminal":"term1",
+            "socket":"/fixture","cwd":env.workspace_root.join("checkout"),"session":session,"phase":"monitoring"});
+        util::atomic_write_json(&root.join("state.json"), &g).unwrap();
+        root
+    }
     fn call(&self, action: &str, spec: &J) -> herdr_flow::Result<J> {
         queue::finalization::task_action(&self.queue, action, spec, Some(SESSION), &|_| {
             panic!("no native or model calls")
@@ -767,4 +790,539 @@ fn active_delivery_observation_preserves_submission_and_freezes_before_closing_o
     let report = queue::finalization::drive(&f.queue).unwrap();
     assert_eq!(report.completed, 1, "{report:?}");
     f.clean(&owner);
+}
+
+fn retiring_receiver_fixture() -> (Fixture, Owner, Owner, Owner, PathBuf) {
+    retiring_receiver_fixture_at_checkpoint(false)
+}
+
+fn frozen_shared_receiver_fixture() -> (Fixture, Owner, Owner, Owner, PathBuf) {
+    let f = Fixture::new();
+    let a = f.create();
+    let b = f.create_named("receiver-owner");
+    let c = f.create_named("survivor");
+    let receiver = f.receiver(&b, SESSION);
+    let mut g = util::read_state_json(&receiver, "state.json").unwrap();
+    let mut s = f.state();
+    s["guard_dir"] = json!(receiver);
+    s["receiver"] = guard::scope(&g);
+    for (id, owner) in [("a", &a), ("b", &b), ("c", &c)] {
+        let wait = format!("wait-{id}");
+        s["waits"][&wait] = json!({"id":wait,"task":owner.task_id,"epoch":owner.epoch});
+        s["events"][id] = json!({"id":id,"task":owner.task_id,"epoch":owner.epoch,"wait":wait,"acknowledged":false});
+    }
+    s["deliveries"]["mixed"] =
+        json!({"id":"mixed","events":["a","b","c"],"session":SESSION,"phase":"uncertain"});
+    s["active"] = json!("mixed");
+    f.save(&mut s);
+    util::atomic_write_json(&queue::artifacts(&f.queue).unwrap().join("deliveries/mixed.json"),
+        &json!({"delivery":s["deliveries"]["mixed"],"events":[s["events"]["a"],s["events"]["b"],s["events"]["c"]]})).unwrap();
+    g["external_delivery"] = json!({"queue":f.queue,"delivery":"mixed","session":SESSION});
+    guard::save(&receiver, &mut g).unwrap();
+    f.record(&a);
+    let associations = f.freeze_before_resources(&a);
+    assert_eq!(associations["receiver_owner"], json!(b));
+    (f, a, b, c, receiver)
+}
+
+fn retiring_receiver_fixture_at_checkpoint(
+    omit_dependency: bool,
+) -> (Fixture, Owner, Owner, Owner, PathBuf) {
+    let (f, a, b, c, receiver) = frozen_shared_receiver_fixture();
+    let frozen_path = task_env::cleanup_state_path(&a.task_id)
+        .unwrap()
+        .join("authority.json");
+    let frozen_bytes = fs::read(&frozen_path).unwrap();
+    if omit_dependency {
+        // Reconstruct root-prepare committed / queue dependency not committed.
+        // Ordinary save must never authorize removing terminal metadata.
+        let _queue = queue::locked(&f.queue, false).unwrap();
+        let mut checkpoint = f.state();
+        checkpoint["tasks"][&a.task_id]["cleanup_obligation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("receiver_dependency");
+        assert!(queue::save(&f.queue, &mut checkpoint).is_err());
+        util::atomic_write_json(&f.queue.join("queue.json"), &checkpoint).unwrap();
+    }
+    let held_a = if omit_dependency {
+        Some(lifecycle::acquire(&a, true).unwrap())
+    } else {
+        None
+    };
+    let version = f.state()["tasks"][&b.task_id]["state_version"].clone();
+    f.call(
+        "task-finalize",
+        &json!({"task":b.task_id,"queue_id":b.queue_id,"epoch":b.epoch,"instance_id":b.instance_id,
+        "state_version":version,"outcome":"failure","reason":"receiver owner explicitly retired"}),
+    )
+    .unwrap();
+    assert!(f.state()["tasks"][&b.task_id].is_null());
+    assert!(!receiver.exists());
+    assert!(!task_env::is_registered(&b.task_id).unwrap());
+    assert!(!queue::artifacts(&f.queue)
+        .unwrap()
+        .join("gates")
+        .join(format!("{}.lock", b.task_id))
+        .exists());
+    assert_eq!(
+        f.state()["tasks"][&a.task_id]["cleanup_obligation"]["receiver_dependency"]["retired_by"],
+        json!(b)
+    );
+    if omit_dependency {
+        assert_eq!(fs::read(&frozen_path).unwrap(), frozen_bytes);
+    }
+    drop(held_a);
+    (f, a, b, c, receiver)
+}
+
+#[test]
+fn retired_receiver_owner_does_not_strand_another_terminal_mixed_delivery() {
+    let (f, a, _b, c, receiver) = retiring_receiver_fixture();
+    let survivor = f.state()["tasks"][&c.task_id].clone();
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.completed, 1, "{report:?}");
+    assert_eq!(report.pending, 0, "{report:?}");
+    f.clean(&a);
+    assert!(!receiver.exists());
+    assert_eq!(f.state()["tasks"][&c.task_id], survivor);
+    assert!(f.temp.path().join("survivor-work/checkout").is_dir());
+    assert_eq!(
+        f.state()["deliveries"]["mixed"],
+        json!({"id":"mixed","events":["c"],"session":SESSION,"phase":"uncertain"})
+    );
+    assert_eq!(f.state()["events"]["c"]["acknowledged"], false);
+    assert_eq!(
+        util::read_json(
+            &queue::artifacts(&f.queue)
+                .unwrap()
+                .join("deliveries/mixed.json")
+        )
+        .unwrap()["events"],
+        json!([f.state()["events"]["c"]])
+    );
+}
+
+#[test]
+fn retired_receiver_cleanup_never_touches_a_replacement_guard_or_session() {
+    let (f, a, _b, c, old_receiver) = retiring_receiver_fixture();
+    let replacement = f.receiver(&c, "22222222-2222-2222-2222-222222222222");
+    let mut g = util::read_state_json(&replacement, "state.json").unwrap();
+    g["external_delivery"] =
+        json!({"queue":f.queue,"delivery":"another-delivery","session":g["session"]});
+    guard::save(&replacement, &mut g).unwrap();
+    let mut s = f.state();
+    s["guard_dir"] = json!(replacement);
+    s["receiver"] = guard::scope(&g);
+    f.save(&mut s);
+    let bytes = fs::read(replacement.join("state.json/authority.json")).unwrap();
+    let scope = s["receiver"].clone();
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.completed, 1, "{report:?}");
+    f.clean(&a);
+    assert!(!old_receiver.exists());
+    assert_eq!(
+        fs::read(replacement.join("state.json/authority.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(f.state()["receiver"], scope);
+    assert_eq!(f.state()["guard_dir"], json!(replacement));
+    assert_eq!(f.state()["deliveries"]["mixed"]["phase"], "uncertain");
+    assert_eq!(f.state()["deliveries"]["mixed"]["events"], json!(["c"]));
+    assert_eq!(f.state()["events"]["c"]["acknowledged"], false);
+}
+
+#[test]
+fn retired_receiver_recovers_root_prepare_before_dependency_queue_checkpoint() {
+    let (f, a, b, c, receiver) = retiring_receiver_fixture_at_checkpoint(true);
+    let before = f.state();
+    let proof = &before["tasks"][&a.task_id]["cleanup_obligation"]["receiver_dependency"];
+    assert_eq!(proof["owner"], json!(b));
+    assert_eq!(proof["retired_by"], json!(b));
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.completed, 1, "{report:?}");
+    f.clean(&a);
+    assert!(!receiver.exists());
+    assert_eq!(f.state()["tasks"][&c.task_id], before["tasks"][&c.task_id]);
+    assert_eq!(f.state()["deliveries"]["mixed"]["events"], json!(["c"]));
+    assert_eq!(f.state()["events"]["c"]["acknowledged"], false);
+    assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+}
+
+#[test]
+fn retired_receiver_proof_cannot_be_rebound_to_another_owner_scope_or_path() {
+    for field in ["owner", "guard_dir", "scope", "retired_by"] {
+        let (f, a, _b, c, receiver) = retiring_receiver_fixture_at_checkpoint(true);
+        let mut s = f.state();
+        let dependency = &mut s["tasks"][&a.task_id]["cleanup_obligation"]["receiver_dependency"];
+        match field {
+            "owner" | "retired_by" => dependency[field] = json!(c),
+            "guard_dir" => dependency[field] = json!(f.temp.path().join("foreign-receiver")),
+            "scope" => dependency[field]["session"] = json!("foreign-session"),
+            _ => unreachable!(),
+        }
+        {
+            let _queue = queue::locked(&f.queue, false).unwrap();
+            let original = f.state();
+            assert!(queue::save(&f.queue, &mut s).is_err());
+            assert_eq!(f.state(), original);
+            // Only the adversarial fixture can bypass the ordinary fence.
+            util::atomic_write_json(&f.queue.join("queue.json"), &s).unwrap();
+        }
+        let before = f.state();
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.pending, 1, "{field}: {report:?}");
+        assert_eq!(f.state(), before);
+        assert!(!receiver.exists());
+        assert!(f.temp.path().join("workspace/checkout").is_dir());
+        assert!(f.temp.path().join("survivor-work/checkout").is_dir());
+    }
+}
+
+#[test]
+fn existing_guard_lock_never_recreates_a_disappeared_receiver() {
+    let f = Fixture::new();
+    let path = f.temp.path().join("lock-receiver");
+    private(&path);
+    let lock = guard::locked_existing(&path).unwrap();
+    assert!(guard::locked_existing(&path).is_err());
+    drop(lock);
+    fs::remove_file(path.join("guard.lock")).unwrap();
+    fs::remove_dir(&path).unwrap();
+    assert!(guard::locked_existing(&path).is_err());
+    assert!(!path.exists());
+    // The ordinary bootstrap API retains its original directory creation.
+    drop(guard::locked(&path).unwrap());
+    assert!(path.join("guard.lock").is_file());
+}
+
+#[test]
+fn shared_receiver_without_retirement_rejects_missing_or_same_scope_foreign_owner() {
+    for replace in [false, true] {
+        let (f, a, b, c, receiver) = frozen_shared_receiver_fixture();
+        let held = f.temp.path().join("held-receiver");
+        fs::rename(&receiver, &held).unwrap();
+        let mut replacement_bytes = None;
+        if replace {
+            let replacement = f.receiver(&c, SESSION);
+            fs::rename(&replacement, &receiver).unwrap();
+            // Identical scope cannot substitute for the frozen complete Owner.
+            let old_guard = util::read_state_json(&held, "state.json").unwrap();
+            util::atomic_write_json(&receiver.join("state.json"), &old_guard).unwrap();
+            replacement_bytes = Some(fs::read(receiver.join("state.json/authority.json")).unwrap());
+        }
+        let before = f.state();
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(report.pending, 1, "replace={replace}: {report:?}");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("cleanup receiver owner changed")),
+            "replace={replace}: receiver identity must be the actual refusal: {report:?}"
+        );
+        assert_eq!(f.state(), before);
+        assert!(task_env::is_registered(&b.task_id).unwrap());
+        if let Some(bytes) = replacement_bytes {
+            assert_eq!(
+                fs::read(receiver.join("state.json/authority.json")).unwrap(),
+                bytes
+            );
+            assert_eq!(
+                util::read_state_json(&receiver, "lifecycle-owner.json").unwrap(),
+                json!(c)
+            );
+            fs::rename(&receiver, f.temp.path().join("foreign-receiver-preserved")).unwrap();
+        } else {
+            assert!(!receiver.exists());
+        }
+        fs::rename(&held, &receiver).unwrap();
+        assert_eq!(
+            util::read_state_json(&receiver, "lifecycle-owner.json").unwrap(),
+            json!(b)
+        );
+        assert_eq!(
+            guard::scope(&util::read_state_json(&receiver, "state.json").unwrap()),
+            f.state()["receiver"]
+        );
+        drop(guard::locked_existing(&receiver).unwrap());
+        let report = queue::finalization::drive(&f.queue).unwrap();
+        let plan = util::read_json(&task_env::cleanup_state_path(&a.task_id).unwrap()).ok();
+        assert_eq!(
+            report.completed,
+            1,
+            "replace={replace}: {report:?}; retained terminal phase={:?} last_error={:?}",
+            plan.as_ref().map(|p| &p["terminal"]["phase"]),
+            plan.as_ref().map(|p| &p["last_error"])
+        );
+        f.clean(&a);
+        assert!(receiver.exists());
+        assert_eq!(
+            f.state()["deliveries"]["mixed"]["events"],
+            json!(["b", "c"])
+        );
+        assert_eq!(f.state()["events"]["b"]["acknowledged"], false);
+    }
+}
+
+#[test]
+fn mixed_sidecar_filter_before_queue_commit_recovers_without_ack_or_resend() {
+    let f = Fixture::new();
+    let owner = f.create();
+    let survivor = f.create_named("survivor");
+    let mut s = f.state();
+    for (id, task) in [("owned", &owner), ("survivor", &survivor)] {
+        s["waits"][id] = json!({"id":id,"task":task.task_id,"epoch":task.epoch});
+        s["events"][id] =
+            json!({"id":id,"wait":id,"task":task.task_id,"epoch":task.epoch,"acknowledged":false});
+    }
+    s["deliveries"]["mixed"] =
+        json!({"id":"mixed","events":["owned","survivor"],"session":SESSION,"phase":"uncertain"});
+    s["active"] = json!("mixed");
+    f.save(&mut s);
+    let path = queue::artifacts(&f.queue)
+        .unwrap()
+        .join("deliveries/mixed.json");
+    util::atomic_write_json(&path, &json!({"delivery":s["deliveries"]["mixed"],"events":[s["events"]["owned"],s["events"]["survivor"]]})).unwrap();
+    let receiver = PathBuf::from(s["guard_dir"].as_str().unwrap());
+    let mut g = util::read_state_json(&receiver, "state.json").unwrap();
+    g["external_delivery"] = json!({"queue":f.queue,"delivery":"mixed","session":SESSION});
+    guard::save(&receiver, &mut g).unwrap();
+    let guard_before = fs::read(receiver.join("state.json/authority.json")).unwrap();
+    f.record(&owner);
+    let before = f.state();
+    let lock = guard::locked_existing(&receiver).unwrap();
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.pending, 1, "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("guard state is busy")),
+        "{report:?}"
+    );
+    assert_eq!(f.state(), before);
+    assert!(!f.temp.path().join("workspace").exists());
+    assert!(!f.temp.path().join("scratch").exists());
+    assert_eq!(
+        util::read_json(&path).unwrap()["events"],
+        json!([s["events"]["survivor"]])
+    );
+    assert_eq!(
+        fs::read(receiver.join("state.json/authority.json")).unwrap(),
+        guard_before
+    );
+    drop(lock);
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.completed, 1, "{report:?}");
+    f.clean(&owner);
+    assert_eq!(
+        f.state()["deliveries"]["mixed"],
+        json!({"id":"mixed","events":["survivor"],"session":SESSION,"phase":"uncertain"})
+    );
+    assert_eq!(f.state()["events"]["survivor"]["acknowledged"], false);
+    assert_eq!(
+        f.state()["tasks"][&survivor.task_id],
+        before["tasks"][&survivor.task_id]
+    );
+    assert_eq!(
+        fs::read(receiver.join("state.json/authority.json")).unwrap(),
+        guard_before
+    );
+    let after = f.state();
+    assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+    assert_eq!(f.state(), after);
+}
+
+#[test]
+fn late_old_tuple_cannot_touch_new_epoch_instance_at_the_same_task_and_paths() {
+    let f = Fixture::new();
+    let old = f.create();
+    let old_result_path = f.result(&old);
+    let old_result = util::read_json(&old_result_path).unwrap();
+    let mut snapshot = f.state();
+    let mut replacement = snapshot["tasks"]["task"].clone();
+    f.call("task-finalize", &f.spec(&old, "failure")).unwrap();
+    f.clean(&old);
+    replacement.as_object_mut().unwrap().remove("environment");
+    replacement["epoch"] = json!(2);
+    replacement["state_version"] = json!(1);
+    let mut s = f.state();
+    s["tasks"]["task"] = replacement;
+    f.save(&mut s);
+    f.call("task-environment", &json!({"action":"create","task":"task","queue_id":s["id"],"epoch":2,"state_version":1,
+        "environment":{"workspace_root":f.temp.path().join("workspace"),"temp_root":f.temp.path().join("scratch"),
+        "delivery_targets":[],"repository":f.temp.path().join("repo"),"commit":s["tasks"]["task"]["candidate"]}})).unwrap();
+    let current = lifecycle::task_owner(&f.state(), "task").unwrap().unwrap();
+    assert_eq!(current.epoch, 2);
+    assert_ne!(current.instance_id, old.instance_id);
+    fs::write(
+        f.temp.path().join("workspace/new-instance-sentinel"),
+        "keep",
+    )
+    .unwrap();
+    queue::add(&f.queue, &json!({"id":"r","task":"task","epoch":2,"kind":"signal","owner":"worker","reason":"fixture","condition":"reported","timeout_seconds":30})).unwrap();
+    let before = f.state();
+    let state_path = task_env::environment_state_path("task")
+        .unwrap()
+        .join("authority.json");
+    let document = fs::read(&state_path).unwrap();
+    {
+        let _queue = queue::locked(&f.queue, false).unwrap();
+        assert!(queue::save(&f.queue, &mut snapshot).is_err());
+    }
+    assert!(f.call("task-finalize", &f.spec(&old, "failure")).is_err());
+    let stale = lifecycle::acquire(&old, true).unwrap();
+    assert!(stale.check(&before, true).is_err());
+    assert!(task_env::terminal::resume_terminal(&old, &stale).is_err());
+    drop(stale);
+    for (key, value) in [
+        (task_env::MARKER_ENV, old.instance_id.clone()),
+        ("HERDR_TASK_ID", old.task_id.clone()),
+        ("HERDR_TASK_QUEUE", old.queue_id.clone()),
+        ("HERDR_TASK_EPOCH", old.epoch.to_string()),
+    ] {
+        std::env::set_var(key, value);
+    }
+    assert!(queue::signal(&f.queue, "r", "failed", "late old producer", None).is_err());
+    for key in [
+        task_env::MARKER_ENV,
+        "HERDR_TASK_ID",
+        "HERDR_TASK_QUEUE",
+        "HERDR_TASK_EPOCH",
+    ] {
+        std::env::remove_var(key);
+    }
+    assert!(!old_result_path.exists());
+    util::atomic_write_json(&old_result_path, &old_result).unwrap();
+    let mut observed = f.state();
+    {
+        let _queue = queue::locked(&f.queue, false).unwrap();
+        assert!(queue::collect(&f.queue, &mut observed, util::now()).is_err());
+    }
+    assert_eq!(observed, before);
+    assert_eq!(f.state(), before);
+    assert_eq!(fs::read(&state_path).unwrap(), document);
+    assert_eq!(
+        fs::read_to_string(f.temp.path().join("workspace/new-instance-sentinel")).unwrap(),
+        "keep"
+    );
+    assert!(lifecycle::write_permit(&current).is_ok());
+    util::protected::remove_document(&old_result_path).unwrap();
+    assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+    assert_eq!(f.state(), before);
+    f.call("task-finalize", &f.spec(&current, "failure"))
+        .unwrap();
+    f.clean(&current);
+}
+
+fn await_fixture_file(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture handshake missing: {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+struct DriverChild(std::process::Child);
+impl DriverChild {
+    fn spawn(queue: &Path, barrier: &Path, id: &str) -> Self {
+        Self(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "competing_finalization_driver_worker",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("FLOW_FIXTURE_QUEUE", queue)
+                .env("FLOW_FIXTURE_BARRIER", barrier)
+                .env("FLOW_FIXTURE_DRIVER", id)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+    fn finish(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                assert!(status.success(), "driver worker failed: {status}");
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver worker timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+impl Drop for DriverChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "fixture subprocess, invoked by competing_real_drivers_finish_one_obligation_without_recreating_authority"]
+fn competing_finalization_driver_worker() {
+    let queue = PathBuf::from(std::env::var_os("FLOW_FIXTURE_QUEUE").unwrap());
+    let barrier = PathBuf::from(std::env::var_os("FLOW_FIXTURE_BARRIER").unwrap());
+    let id = std::env::var("FLOW_FIXTURE_DRIVER").unwrap();
+    fs::write(barrier.join(format!("ready-{id}")), "ready").unwrap();
+    await_fixture_file(&barrier.join("blocked-go"));
+    let blocked = queue::finalization::drive(&queue).unwrap();
+    assert_eq!(blocked.pending, 1, "{blocked:?}");
+    assert!(
+        blocked.errors.iter().any(|error| error.contains("busy")),
+        "{blocked:?}"
+    );
+    fs::write(barrier.join(format!("blocked-{id}")), "blocked").unwrap();
+    await_fixture_file(&barrier.join("go"));
+    let result = queue::finalization::drive(&queue).unwrap();
+    util::atomic_write_json(&barrier.join(format!("result-{id}.json")), &json!(result)).unwrap();
+}
+
+#[test]
+fn competing_real_drivers_finish_one_obligation_without_recreating_authority() {
+    let f = Fixture::new();
+    let owner = f.create();
+    fs::write(f.temp.path().join("workspace/checkout/dirty"), "temporary").unwrap();
+    f.record(&owner);
+    let held = lifecycle::acquire(&owner, true).unwrap();
+    let barrier = f.temp.path().join("driver-barrier");
+    private(&barrier);
+    let mut a = DriverChild::spawn(&f.queue, &barrier, "a");
+    let mut b = DriverChild::spawn(&f.queue, &barrier, "b");
+    for id in ["a", "b"] {
+        await_fixture_file(&barrier.join(format!("ready-{id}")));
+    }
+    fs::write(barrier.join("blocked-go"), "go").unwrap();
+    for id in ["a", "b"] {
+        await_fixture_file(&barrier.join(format!("blocked-{id}")));
+    }
+    assert!(f.temp.path().join("workspace/checkout/dirty").exists());
+    drop(held);
+    fs::write(barrier.join("go"), "go").unwrap();
+    a.finish();
+    b.finish();
+    let results =
+        ["a", "b"].map(|id| util::read_json(&barrier.join(format!("result-{id}.json"))).unwrap());
+    let completed: u64 = results
+        .iter()
+        .map(|result| result["completed"].as_u64().unwrap())
+        .sum();
+    assert_eq!(completed, 1, "{results:?}");
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.pending, 0, "{report:?}");
+    f.clean(&owner);
+    let after = f.state();
+    assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 0);
+    assert_eq!(f.state(), after);
 }
