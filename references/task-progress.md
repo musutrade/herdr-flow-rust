@@ -405,3 +405,13 @@ clear report. Before a separately authorized Herdr-native removal without force,
 the owner must recheck those boundaries and current references. This command
 does not inspect or delete shared OpenCode transcripts/cache, stop agents,
 change the queue, or replace the [owned delivery lifecycle](delivery.md).
+
+
+## Isolated owner outcomes (#130 PR2)
+
+Fresh isolated queues use [the lifecycle outcome/write contract](task-lifecycle.md).
+`task-finalize` records final success/failure and a pending cleanup obligation
+atomically; activity acceptance/completion alone does not finalize the owner.
+No existing queue is migrated, and this slice does not stop processes or delete
+roots. Legacy cleanup diagnostics above do not authorize isolated finalization
+or make residual occupancy a manual deletion approval condition.

@@ -27,8 +27,10 @@ pub(super) fn ensure_absent(path: &Path) -> Result<()> {
 /// Exactly one thread/start attempt per runtime. A failed/crashed attempt is
 /// retained, including failures after the native response or guard publication.
 pub fn bootstrap(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let runtime = started_runtime(env, root)?;
     let guard = guard_path(env, root, &runtime, spec)?;
+    crate::task_env::isolation::runtime_namespace(env, &guard)?;
     let _runtime_lock = crate::guard::locked(root)?;
     let _guard_lock = crate::guard::locked(&guard)?;
     ensure_fresh(root, &guard)?;

@@ -853,6 +853,7 @@ pub fn observe(config: &J, api: &dyn GitHubApi) -> Result<J> {
 }
 
 pub fn persist(root: &Path, config_hash: &str, result: &J) -> Result<J> {
+    require_unbound_observer(root)?;
     util::ensure_private_dir(root, true)?;
     let key = sha256_json_sorted(result);
     let mut event = Map::new();
@@ -890,6 +891,7 @@ impl ReadyNotifier {
 }
 
 pub fn run(config_path: &Path, root: &Path, once: bool, ready_fd: Option<RawFd>) -> Result<i32> {
+    require_unbound_observer(root)?;
     let mut notifier = ReadyNotifier::new(ready_fd);
     observe_loop(config_path, root, once, &mut notifier).map_err(|error| {
         notifier.notify(json!({
@@ -1421,6 +1423,10 @@ fn dispatch_cli(mut options: CliOptions) -> i32 {
 }
 
 fn run_cli_mode(config: PathBuf, state_dir: PathBuf, options: CliOptions) -> i32 {
+    if let Err(error) = require_unbound_observer(&state_dir) {
+        eprintln!("{error}");
+        return 2;
+    }
     if options.background_mode {
         return start_background_cli(config, state_dir, options.once);
     }
@@ -1455,4 +1461,18 @@ fn cli_error(error: FlowError) -> i32 {
 /// The canonical configuration hash used by queue/PR state identities.
 pub fn config_hash(config: &J) -> String {
     util::sha256_hex(python_sorted_default(config).as_bytes())
+}
+
+/// CI observation has no task-owned observer lifecycle registration in this slice.
+/// Refuse rather than run an unbound writer under an isolated task's authority.
+fn require_unbound_observer(root: &Path) -> Result<()> {
+    if std::env::var_os("HERDR_LIFECYCLE_OWNER").is_some()
+        || util::protected::is_runtime_namespace(root)?
+        || root.join("lifecycle-owner.json").exists()
+    {
+        return Err(watch_error(
+            "task-exclusive CI watcher lifecycle is unsupported; use bounded queue observation",
+        ));
+    }
+    Ok(())
 }

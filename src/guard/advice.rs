@@ -18,6 +18,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub fn advise(root: &Path, path: &Path, session: &str) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
     let s = read_state(root)?;
     advise_state(root, path, session, s)
 }

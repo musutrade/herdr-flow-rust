@@ -172,8 +172,13 @@ fn configured_root() -> Result<PathBuf> {
 }
 
 fn subdir(name: &str) -> Result<PathBuf> {
-    let dir = state_root()?.join(name);
+    let root = state_root()?;
+    let base = super::isolation::data_root(&root)?;
+    let dir = base.join(name);
     ensure_private_dir(&dir)?;
+    if base != root && name != "locks" {
+        crate::util::protected::namespace(&dir)?;
+    }
     Ok(dir)
 }
 
@@ -225,7 +230,7 @@ pub fn registry_path() -> Result<PathBuf> {
 }
 
 /// Acquire the exclusive index lock.
-fn lock_registry() -> Result<std::fs::File> {
+pub(super) fn lock_registry() -> Result<std::fs::File> {
     let path = state_root()?.join("registry.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -275,8 +280,8 @@ pub fn load_registry() -> Result<Registry> {
     if !path.exists() {
         return Ok(Registry::default());
     }
-    let text = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&text).map_err(|error| {
+    let value = util::read_json(&path)?;
+    serde_json::from_value(value).map_err(|error| {
         FlowError::progress(format!("failed to parse {}: {error}", path.display()))
     })
 }
@@ -321,6 +326,19 @@ pub fn limit() -> usize {
 /// the resource limit is reached. The caller holds the per-task lock, so no
 /// concurrent claim for this task can interleave.
 pub fn register_environment(entry: RegistryEntry) -> Result<()> {
+    require_legacy_registry()?;
+    register_instance_environment(entry)
+}
+pub(super) fn require_legacy_registry() -> Result<()> {
+    let root = state_root()?;
+    if super::isolation::data_root(&root)? != root {
+        return Err(FlowError::guard(
+            "isolated registry mutation requires instance lifecycle ownership",
+        ));
+    }
+    Ok(())
+}
+pub(super) fn register_instance_environment(entry: RegistryEntry) -> Result<()> {
     validate_task_id(&entry.task_id)?;
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
@@ -382,6 +400,11 @@ fn ensure_capacity() -> Result<()> {
 
 /// Release the index entry, but only when it belongs to `instance_id`.
 pub fn unregister_environment(task_id: &str, instance_id: &str) -> Result<()> {
+    if super::isolation::data_root(&state_root()?)? != state_root()? {
+        return Err(FlowError::guard(
+            "isolated lifecycle claims require terminal cleanup; not implemented",
+        ));
+    }
     validate_task_id(task_id)?;
     let _lock = lock_registry()?;
     let mut registry = load_registry()?;
@@ -406,6 +429,7 @@ pub fn claim_roots_exclusively(
     instance_id: &str,
     candidates: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
+    require_legacy_registry()?;
     validate_task_id(task_id)?;
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -580,10 +604,7 @@ fn document_is_interrupted(path: &Path) -> bool {
     if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
         return false;
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(value) = util::read_json(path) else {
         return false;
     };
     matches!(

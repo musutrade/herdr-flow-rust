@@ -161,6 +161,10 @@ fn guard_failure_notify(
 }
 
 pub fn guarded_once(root: &Path, h: &mut dyn GuardAdapter, notify: bool) -> J {
+    // Refusal is not an observation error to persist or notify after closing.
+    let Ok(_permit) = crate::lifecycle::runtime_permit(root) else {
+        return read_state_or_empty(root);
+    };
     once(root, h).map_or_else(
         |error| guarded_once_error(root, h, notify, error),
         |s| guarded_once_ok(root, s),

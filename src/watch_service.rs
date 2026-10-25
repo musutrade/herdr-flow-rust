@@ -242,7 +242,7 @@ where
     F: FnMut() -> Result<bool>,
 {
     let mut state = initial_watch_state(interval);
-    util::atomic_write_json(&root.join("watch.json"), &state)?;
+    save_watch(&root, &state)?;
     notify_ready(ready_fd);
     let outcome = tick_until_done(&root, &mut state, &mut tick, interval, once);
     notify_loop_error(ready_fd, &outcome);
@@ -297,7 +297,7 @@ where
         loop {
             let stop = tick()?;
             state["heartbeat_at"] = json!(util::now());
-            util::atomic_write_json(&root.join("watch.json"), state)?;
+            save_watch(root, state)?;
             if once || stop {
                 return Ok(());
             }
@@ -310,7 +310,7 @@ where
 fn finish_watch_session(root: &Path, state: &mut J, lock: util::FileLock) {
     state["status"] = json!("stopped");
     state["heartbeat_at"] = json!(util::now());
-    let _ = util::atomic_write_json(&root.join("watch.json"), state);
+    let _ = save_watch(root, state);
     drop(lock);
 }
 
@@ -429,4 +429,9 @@ fn ready_watch_background(root: &Path, child: BackgroundChild, mut state: J) -> 
     state["state_dir"] = json!(root.display().to_string());
     let _ = pid;
     state
+}
+
+fn save_watch(root: &Path, state: &J) -> Result<()> {
+    let _permit = crate::lifecycle::runtime_permit(root)?;
+    util::atomic_write_json(&root.join("watch.json"), state)
 }

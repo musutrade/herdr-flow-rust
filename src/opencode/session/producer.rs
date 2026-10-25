@@ -71,15 +71,41 @@ pub fn dispatch(root: &Path, spec: &J) -> Result<J> {
 
 fn prepare_dispatch(state: &J, queue_root: &Path, queue: &J, spec: &J) -> Result<(String, J)> {
     let wait_id = required(spec, "wait")?;
-    let wait = current_wait(queue, &wait_id, state)?;
+    let (wait, binding) = dispatch_binding(state, queue, &wait_id)?;
+    let prompt = dispatch_prompt(spec)?;
+    let fingerprint = util::fingerprint(Path::new(&required(state, "cwd")?))?;
+    let mut context = json!({"queue_dir":queue_root,"queue_id":queue["id"],"wait":wait_id,"binding":binding,
+        "source_fingerprint":fingerprint,"producer_identity":{"adapter":"opencode","session":state["session"],"model":state["model"],"cwd":state["cwd"]}});
+    bind_dispatch_owner(queue, &wait, spec, &mut context)?;
+    Ok((prompt, context))
+}
+
+fn dispatch_binding(state: &J, queue: &J, wait_id: &str) -> Result<(J, J)> {
+    let wait = current_wait(queue, wait_id, state)?;
     progress::claim::execution(queue, &queue["tasks"][wait["task"].as_str().unwrap_or("")])?;
     let binding = progress::binding(&wait)?;
     verify_candidate(state, &binding)?;
-    let prompt = util::read_text(Path::new(&required(spec, "prompt_file")?))?;
-    let fingerprint = util::fingerprint(Path::new(&required(state, "cwd")?))?;
-    let context = json!({"queue_dir":queue_root,"queue_id":queue["id"],"wait":wait_id,"binding":binding,
-        "source_fingerprint":fingerprint,"producer_identity":{"adapter":"opencode","session":state["session"],"model":state["model"],"cwd":state["cwd"]}});
-    Ok((prompt, context))
+    Ok((wait, binding))
+}
+
+fn dispatch_prompt(spec: &J) -> Result<String> {
+    util::read_text(Path::new(&required(spec, "prompt_file")?))
+}
+
+fn bind_dispatch_owner(queue: &J, wait: &J, spec: &J, context: &mut J) -> Result<()> {
+    if !queue["lifecycle"].is_null() {
+        let name = required(wait, "task")?;
+        let owner = crate::lifecycle::task_owner(queue, &name)?
+            .ok_or_else(|| FlowError::guard("isolated submission requires bound owner"))?;
+        if !spec["lifecycle_owner"].is_null() {
+            ensure(
+                spec["lifecycle_owner"] == serde_json::to_value(&owner)?,
+                "submission owner changed from creation",
+            )?;
+        }
+        context["lifecycle_owner"] = serde_json::to_value(owner)?;
+    }
+    Ok(())
 }
 
 pub fn collect(root: &Path) -> Result<J> {
@@ -100,6 +126,7 @@ pub fn collect(root: &Path) -> Result<J> {
 
 fn collect_result(root: &Path, adapter: &SessionAdapter, journal: J) -> Result<J> {
     let context = journal["context"].clone();
+    let _permit = crate::lifecycle::context_permit(&context)?;
     let queue_root = queue_path(&context)?;
     let _queue_lock = queue::locked(&queue_root, false)?;
     let _submission_lock = submission_lock(root)?;
@@ -164,7 +191,14 @@ fn publish_result(
         adapter.session()
     );
     collect_verdict(adapter, queue_root, &wait_id, &outcome)?;
-    signal_report(queue_root, adapter, &wait_id, &outcome, &summary, &evidence)?;
+    signal_report(
+        queue_root,
+        adapter,
+        &journal["context"],
+        &outcome,
+        &summary,
+        &evidence,
+    )?;
     journal["phase"] = json!("signalled");
     save_submission(root, &journal)?;
     Ok(journal)
@@ -200,17 +234,18 @@ fn prepare_output(adapter: &SessionAdapter, journal: &mut J) -> Result<()> {
 fn signal_report(
     queue_root: &Path,
     adapter: &SessionAdapter,
-    wait_id: &str,
+    context: &J,
     outcome: &str,
     summary: &str,
     evidence: &Path,
 ) -> Result<()> {
+    let wait_id = &required(context, "wait")?;
     let wait = queue::load_queue(queue_root)?["waits"][wait_id].clone();
     if crate::identity::producer(&wait)?.is_some() {
         queue::signal_native(
             queue_root,
             &json!({"adapter":"opencode","session":adapter.state["session"]}),
-            &json!({"wait":wait_id,"outcome":outcome,"summary":summary,"evidence":evidence}),
+            &json!({"wait":wait_id,"outcome":outcome,"summary":summary,"evidence":evidence,"lifecycle_owner":context["lifecycle_owner"]}),
         )?;
     } else {
         queue::signal(
@@ -279,4 +314,30 @@ fn capture_output(state: &J, journal: &mut J) -> Result<()> {
     crate::progress::artifact::LocalArtifacts.verify(&output)?;
     journal["output"] = output;
     Ok(())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn dispatch_carries_exact_owner_and_rejects_creation_context_replacement() {
+        let q = json!({"id":"queue","lifecycle":{"queue_root":"/fixture/queue"},
+            "tasks":{"task":{"task":"task","epoch":1,"environment":{"instance_id":"instance"}}}});
+        let wait = json!({"task":"task"});
+        let owner = json!({"queue_root":"/fixture/queue","queue_id":"queue","task_id":"task","epoch":1,"instance_id":"instance"});
+        let mut context = json!({});
+        bind_dispatch_owner(&q, &wait, &json!({}), &mut context).unwrap();
+        assert_eq!(context["lifecycle_owner"], owner);
+        bind_dispatch_owner(&q, &wait, &json!({"lifecycle_owner":owner}), &mut context).unwrap();
+        let before = context.clone();
+        let mut bad = owner.clone();
+        bad["epoch"] = json!(2);
+        assert!(
+            bind_dispatch_owner(&q, &wait, &json!({"lifecycle_owner":bad}), &mut context).is_err()
+        );
+        assert_eq!(context, before);
+        assert!(
+            bind_dispatch_owner(&q, &json!({"task":"unknown"}), &json!({}), &mut context).is_err()
+        );
+    }
 }

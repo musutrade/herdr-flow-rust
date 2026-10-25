@@ -15,6 +15,7 @@ struct NoticeText<'a> {
 pub mod cleanup_preflight;
 pub mod cli;
 pub mod command;
+pub mod isolation;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -33,18 +34,21 @@ use crate::watch_service;
 
 pub use crate::guard::scope;
 pub use command::run_command;
+pub use isolation::artifacts;
 
 pub fn queue_error(message: impl Into<String>) -> FlowError {
     FlowError::queue(message)
 }
 
 pub fn load_queue(root: &Path) -> Result<J> {
-    util::read_state_json(root, "queue.json")
+    let state = util::read_state_json(root, "queue.json")?;
+    isolation::validate_layout(root, &state)?;
+    Ok(state)
 }
 
 pub fn locked(root: &Path, blocking: bool) -> Result<util::FileLock> {
     let root = util::state_dir(root, true)?;
-    match util::FileLock::acquire(&root.join("queue.lock"), blocking)? {
+    match util::FileLock::acquire(&artifacts(&root)?.join("queue.lock"), blocking)? {
         Some(lock) => Ok(lock),
         None => Err(FlowError::new(
             ErrorKind::StateBusy,
@@ -54,6 +58,13 @@ pub fn locked(root: &Path, blocking: bool) -> Result<util::FileLock> {
 }
 
 pub fn save(root: &Path, s: &mut J) -> Result<()> {
+    if !s["lifecycle"].is_null() && !isolation::isolated(root)? {
+        return Err(queue_error(
+            "isolated authority is missing; refusing recreation",
+        ));
+    }
+    isolation::validate_layout(root, s)?;
+    isolation::validate_save(root, s)?;
     util::ensure_private_dir(root, true)?;
     s["updated_at"] = json!(util::now());
     util::atomic_write_json(&root.join("queue.json"), s)
@@ -67,8 +78,64 @@ pub fn init(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
     if root.join("queue.json").exists() {
         return Err(queue_error("queue already exists"));
     }
-    let (receiver, stored_guard) = initial_receiver(&root, guard_dir)?;
-    let mut s = json!({
+    let mut s = initial_queue(&root, guard_dir, interval)?;
+    save(&root, &mut s)?;
+    Ok(s)
+}
+
+pub fn init_isolated(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
+    validate_isolated_interval(interval)?;
+    let root = reserve_isolated_root(root)?;
+    initialize_isolated_queue(&root, guard_dir, interval)
+}
+
+fn validate_isolated_interval(interval: u64) -> Result<()> {
+    if !(10..=900).contains(&interval) {
+        return Err(queue_error("poll interval must be 10..900 seconds"));
+    }
+    Ok(())
+}
+
+fn reserve_isolated_root(root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = util::state_dir(root, true)?;
+    if std::fs::read_dir(&root)?.next().is_some() {
+        return Err(queue_error(
+            "isolated queue requires a new empty root; no migration",
+        ));
+    }
+    // Exclusive mkdir reserves initialization, even if another init passed the empty check.
+    let document = root.join("queue.json");
+    std::fs::DirBuilder::new().mode(0o700).create(&document)?;
+    Ok(root)
+}
+
+fn initialize_isolated_queue(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
+    let document = root.join("queue.json");
+    util::protected::create(&document)?;
+    util::protected::namespace(&document)?;
+    initialize_isolated_sidecars(&document)?;
+    let mut s = initial_queue(root, guard_dir, interval)?;
+    s["lifecycle"] = json!({"queue_root":root,"format":"isolated-v1"});
+    s["updated_at"] = json!(util::now());
+    util::atomic_write_json(&document, &s)?;
+    Ok(s)
+}
+
+fn initialize_isolated_sidecars(root: &Path) -> Result<()> {
+    for name in ["gates", "results", "deliveries"] {
+        let path = root.join(name);
+        util::ensure_private_dir(&path, true)?;
+        if name != "gates" {
+            util::protected::namespace(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn initial_queue(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
+    let (receiver, stored_guard) = initial_receiver(root, guard_dir)?;
+    Ok(json!({
         "version": 1,
         "id": uuid_hex(),
         "guard_dir": stored_guard,
@@ -81,9 +148,7 @@ pub fn init(root: &Path, guard_dir: Option<&Path>, interval: u64) -> Result<J> {
         "deliveries": {},
         "active": null,
         "delivery_status": "disabled"
-    });
-    save(&root, &mut s)?;
-    Ok(s)
+    }))
 }
 
 fn initial_receiver(root: &Path, guard_dir: Option<&Path>) -> Result<(J, J)> {
@@ -106,6 +171,7 @@ fn initial_receiver(root: &Path, guard_dir: Option<&Path>) -> Result<(J, J)> {
 }
 
 pub fn enable(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()> {
+    isolation::validate_layout(root, s)?;
     let guard_path = enable_guard_path(s)?;
     enable_guarded(root, s, factory, &guard_path)
 }
@@ -419,12 +485,14 @@ fn validate_wait_binding(w: &J) -> Result<()> {
 
 pub fn add(root: &Path, spec: &J) -> Result<J> {
     let mut s = load_queue(root)?;
+    let _permit = isolation::registration_permit(&s, spec)?;
     let w = register_wait(&mut s, spec, util::now())?;
     save(root, &mut s)?;
     Ok(w)
 }
 
 pub(crate) fn register_wait(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    let _permit = isolation::registration_permit(s, spec)?;
     let mut w = spec.clone();
     validate_wait(&w)?;
     let id = model::string(&w, "id").unwrap_or_default();
@@ -463,6 +531,9 @@ pub fn signal(
     evidence: Option<&str>,
 ) -> Result<J> {
     let s = load_queue(root)?;
+    let w = wait_for_signal(&s, wait_id)?;
+    let _permit = isolation::wait_permit(&s, &w)?;
+    isolation::producer_marker(&s, &w)?;
     signal_checked(root, &s, wait_id, outcome, summary, evidence)
 }
 
@@ -559,20 +630,30 @@ pub(crate) fn signal_native(root: &Path, identity: &J, result: &J) -> Result<J> 
         .as_str()
         .ok_or_else(|| queue_error("missing wait"))?;
     let w = wait_for_signal(&s, id)?;
-    if crate::identity::required_producer(&w)? != crate::identity::validate(identity)? {
+    let _permit = isolation::wait_permit(&s, &w)?;
+    isolation::result_owner(&s, &w, result)?;
+    validate_native_signal(&s, &w, identity, result)?;
+    store_native_signal(root, &s, id, &w, result)
+}
+
+fn validate_native_signal(s: &J, w: &J, identity: &J, result: &J) -> Result<()> {
+    if crate::identity::required_producer(w)? != crate::identity::validate(identity)? {
         return Err(queue_error("native producer identity mismatch"));
     }
-    ensure_signal_allowed(&s, &w)?;
+    ensure_signal_allowed(s, w)?;
     let outcome = result["outcome"].as_str().unwrap_or_default();
     let summary = result["summary"].as_str().unwrap_or_default();
-    validate_signal_input(outcome, summary)?;
+    validate_signal_input(outcome, summary)
+}
+
+fn store_native_signal(root: &Path, s: &J, id: &str, w: &J, result: &J) -> Result<J> {
     signal_store(
         root,
-        &s,
+        s,
         id,
-        &w,
-        outcome,
-        summary,
+        w,
+        result["outcome"].as_str().unwrap_or_default(),
+        result["summary"].as_str().unwrap_or_default(),
         result["evidence"].as_str(),
     )
 }
@@ -586,8 +667,14 @@ fn signal_store(
     summary: &str,
     evidence: Option<&str>,
 ) -> Result<J> {
-    let path = root.join("results").join(format!("{wait_id}.json"));
-    let result = signal_payload(s, wait_id, w, outcome, summary, evidence);
+    let path = artifacts(root)?
+        .join("results")
+        .join(format!("{wait_id}.json"));
+    let mut result = signal_payload(s, wait_id, w, outcome, summary, evidence);
+    if !s["lifecycle"].is_null() {
+        result["lifecycle_owner"] =
+            isolation::owner_value(s, w["task"].as_str().unwrap_or_default())?;
+    }
     signal_persist(&path, &result)
 }
 
@@ -629,6 +716,15 @@ fn signal_existing(path: &Path, result: &J) -> Result<J> {
 }
 
 fn signal_existing_checked(old: J, result: &J) -> Result<J> {
+    if !result["lifecycle_owner"].is_null() {
+        for key in ["queue", "wait", "task", "epoch", "lifecycle_owner"] {
+            if old[key] != result[key] {
+                return Err(queue_error(
+                    "existing producer result belongs to another instance",
+                ));
+            }
+        }
+    }
     ensure_signal_immutable(&old, result)?;
     Ok(old)
 }
@@ -904,11 +1000,14 @@ fn review_phase_guarded(g: &J) -> bool {
 
 fn observe_signal(root: &Path, s: &J, w: &J) -> Result<Option<Observed>> {
     let wait_id = model::string(w, "id").unwrap_or_default();
-    let path = root.join("results").join(format!("{wait_id}.json"));
+    let path = artifacts(root)?
+        .join("results")
+        .join(format!("{wait_id}.json"));
     if !path.exists() {
         return Ok(None);
     }
     let r = util::read_json(&path)?;
+    isolation::result_owner(s, w, &r)?;
     let expected = [
         ("queue", s.get("id").cloned().unwrap_or(Value::Null)),
         ("wait", json!(wait_id)),
@@ -1089,6 +1188,7 @@ pub fn observation(root: &Path, s: &J, w: &mut J, now: f64) -> Result<Option<Obs
 }
 
 pub fn collect(root: &Path, s: &mut J, now: f64) -> Result<()> {
+    isolation::validate_layout(root, s)?;
     let queue_id = model::string(s, "id").unwrap_or_default();
     let wait_ids = collect_wait_ids(s);
     collect_each(root, s, now, &queue_id, &wait_ids)
@@ -1120,6 +1220,10 @@ fn collect_one(root: &Path, s: &mut J, now: f64, queue_id: &str, wait_id: &str) 
     if model::bool_or(&original, "closed", false) {
         return Ok(());
     }
+    if isolation::closed(s, original["task"].as_str().unwrap_or_default()) {
+        return Ok(());
+    }
+    let _permit = isolation::wait_permit(s, &original)?;
     collect_open(root, s, now, queue_id, wait_id, original)
 }
 
@@ -1132,14 +1236,19 @@ fn collect_open(
     original: J,
 ) -> Result<()> {
     let mut w = original;
-    let observed = wait_observation(root, s, &mut w, now);
+    let observed = wait_observation(root, s, &mut w, now)?;
     collect_observed(s, now, queue_id, wait_id, w, observed)
 }
 
-fn wait_observation(root: &Path, s: &J, w: &mut J, now: f64) -> Option<Observed> {
-    let observed =
-        observation(root, s, w, now).unwrap_or_else(|error| Some(source_error_observed(w, error)));
-    observed.or_else(|| deadline_observed(w, now))
+fn wait_observation(root: &Path, s: &J, w: &mut J, now: f64) -> Result<Option<Observed>> {
+    let observed = if !s["lifecycle"].is_null() && w["kind"] == "signal" {
+        // Ownership/malformed protected inbox errors must never be relabelled
+        // as a current task decision by the legacy source-error adapter.
+        observation(root, s, w, now)?
+    } else {
+        observation(root, s, w, now).unwrap_or_else(|error| Some(source_error_observed(w, error)))
+    };
+    Ok(observed.or_else(|| deadline_observed(w, now)))
 }
 
 fn source_error_observed(w: &J, error: FlowError) -> Observed {
@@ -1272,6 +1381,10 @@ fn attach_observation(
     event_id: String,
 ) -> Result<()> {
     let mut event = observation_event(&event_id, wait_id, now, &observed, &w);
+    if !s["lifecycle"].is_null() {
+        event["lifecycle_owner"] =
+            isolation::owner_value(s, w["task"].as_str().unwrap_or_default())?;
+    }
     progress::attach(s, &mut event, &w, now)?;
     s["events"][&event_id] = event;
     s["waits"][wait_id] = w;
@@ -1565,7 +1678,18 @@ fn update_delivery_phase(
 
 fn update_active_delivery(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()> {
     let (active, mut delivery) = load_active_delivery(s)?;
-    update_delivery_phase(root, s, factory, &active, &mut delivery)
+    update_permitted_delivery(root, s, factory, &active, &mut delivery)
+}
+
+fn update_permitted_delivery(
+    root: &Path,
+    s: &mut J,
+    factory: &ReceiverFactory,
+    active: &str,
+    delivery: &mut J,
+) -> Result<()> {
+    let _permits = isolation::delivery_permits(s, active)?;
+    update_delivery_phase(root, s, factory, active, delivery)
 }
 
 fn delivery_message(root: &Path, delivery: &str) -> String {
@@ -1589,6 +1713,15 @@ fn send_delivery(
     adapter: &dyn crate::herdr::ReceiverAdapter,
 ) -> Result<()> {
     let batch: Vec<J> = pending.iter().take(20).cloned().collect();
+    ensure_delivery_capacity(s)?;
+    let (delivery_id, mut delivery) = create_delivery_record(s, g, &batch);
+    persist_sending_delivery(root, s, g, guard_dir, &delivery_id, &delivery, &batch)?;
+    let message = delivery_message(root, &delivery_id);
+    submit_delivery(adapter, &message, &mut delivery)?;
+    store_submitted_delivery(root, s, &delivery_id, &delivery)
+}
+
+fn ensure_delivery_capacity(s: &J) -> Result<()> {
     let delivery_count = model::get(s, "deliveries")
         .and_then(Value::as_object)
         .map(Map::len)
@@ -1598,12 +1731,16 @@ fn send_delivery(
             "queue reached 10000 deliveries; preserve this queue before starting a new one",
         ));
     }
+    Ok(())
+}
+
+fn create_delivery_record(s: &mut J, g: &J, batch: &[J]) -> (String, J) {
     let delivery_id = uuid_hex();
     let event_ids: Vec<J> = batch
         .iter()
         .map(|event| event.get("id").cloned().unwrap_or(Value::Null))
         .collect();
-    let mut d = json!({
+    let d = json!({
         "id": delivery_id,
         "events": event_ids,
         "session": g.get("session").cloned().unwrap_or(Value::Null),
@@ -1628,6 +1765,18 @@ fn send_delivery(
             ..Default::default()
         },
     );
+    (delivery_id, d)
+}
+
+fn persist_sending_delivery(
+    root: &Path,
+    s: &mut J,
+    g: &mut J,
+    guard_dir: &Path,
+    delivery_id: &str,
+    delivery: &J,
+    batch: &[J],
+) -> Result<()> {
     // Persist the delivery before any app-server submission. A crash never replays it.
     save(root, s)?;
     g["external_delivery"] = json!({
@@ -1637,11 +1786,20 @@ fn send_delivery(
     });
     guard::save(guard_dir, g)?;
     util::atomic_write_json(
-        &root.join("deliveries").join(format!("{delivery_id}.json")),
-        &json!({"delivery": d.clone(), "events": batch}),
+        &artifacts(root)?
+            .join("deliveries")
+            .join(format!("{delivery_id}.json")),
+        &json!({"delivery": delivery, "events": batch}),
     )?;
-    let message = delivery_message(root, &delivery_id);
-    match adapter.prompt(&message) {
+    Ok(())
+}
+
+fn submit_delivery(
+    adapter: &dyn crate::herdr::ReceiverAdapter,
+    message: &str,
+    d: &mut J,
+) -> Result<()> {
+    match adapter.prompt(message) {
         Ok(turn_id) => {
             d["turn_id"] = json!(turn_id);
             d["phase"] = json!("submitted");
@@ -1661,8 +1819,12 @@ fn send_delivery(
         }
         Err(error) => return Err(error),
     }
-    s["deliveries"][&delivery_id] = d.clone();
-    let phase = model::string(&d, "phase").unwrap_or_default();
+    Ok(())
+}
+
+fn store_submitted_delivery(root: &Path, s: &mut J, delivery_id: &str, d: &J) -> Result<()> {
+    s["deliveries"][delivery_id] = d.clone();
+    let phase = model::string(d, "phase").unwrap_or_default();
     s["delivery_status"] = json!(phase);
     save(root, s)?;
     Ok(())
@@ -1877,12 +2039,17 @@ fn deliver_pending(root: &Path, s: &mut J, pending: &[J], factory: &ReceiverFact
 }
 
 pub fn dispatch(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()> {
+    isolation::validate_layout(root, s)?;
+    let _permits = isolation::active_permits(s)?;
     let pending: Vec<J> = model::get(s, "events")
         .and_then(Value::as_object)
         .map(|events| {
             events
                 .values()
-                .filter(|event| !model::bool_or(event, "acknowledged", false))
+                .filter(|event| {
+                    !model::bool_or(event, "acknowledged", false)
+                        && !isolation::closed(s, event["task"].as_str().unwrap_or_default())
+                })
                 .cloned()
                 .collect()
         })
@@ -1912,6 +2079,7 @@ pub fn dispatch(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()>
 
 pub fn tick(root: &Path, factory: &ReceiverFactory, now: Option<f64>) -> Result<J> {
     let mut s = load_queue(root)?;
+    let _permits = isolation::active_permits(&s)?;
     if model::bool_or(&s, "stopped", false) {
         return Ok(s);
     }
@@ -1925,7 +2093,8 @@ pub fn tick(root: &Path, factory: &ReceiverFactory, now: Option<f64>) -> Result<
 }
 
 pub fn acknowledge(root: &Path, delivery: &str, session: &str) -> Result<J> {
-    let s = util::read_json(&root.join("queue.json"))?;
+    let s = load_queue(root)?;
+    let _permits = isolation::delivery_permits(&s, delivery)?;
     acknowledge_state(root, s, delivery, session)
 }
 
@@ -2168,6 +2337,7 @@ pub fn resolve(root: &Path, delivery: &str, resolution: &str, reason: &str) -> R
 
 fn resolve_loaded(root: &Path, delivery_resolution: &DeliveryResolution<'_>) -> Result<J> {
     let s = load_queue(root)?;
+    let _permits = isolation::delivery_permits(&s, delivery_resolution.delivery)?;
     resolve_active(root, s, delivery_resolution)
 }
 
@@ -2682,8 +2852,12 @@ fn task_action_state(
     session: Option<&str>,
     factory: &ReceiverFactory,
 ) -> Result<J> {
+    let _permit = isolation::task_permit(s, action, spec)?;
     let now = util::now();
     task_dispatch(root, s, action, spec, session, factory, now)?;
+    if action == "task-environment" || isolation::terminal_action(s, action, spec) {
+        return Ok(s.clone());
+    }
     task_action_save(root, s)
 }
 
@@ -2733,6 +2907,12 @@ fn task_mutate(
     now: f64,
 ) -> Result<()> {
     crate::runtime::receiver_session(s, session)?;
+    if action == "task-finalize" {
+        return isolation::finalize(root, s, spec, now);
+    }
+    if isolation::terminal_action(s, action, spec) {
+        return isolation::finalize_control(root, s, spec, now);
+    }
     if action == "task-environment" {
         return task_environment(root, s, spec, now);
     }
@@ -2744,21 +2924,25 @@ fn task_mutate(
 fn task_environment(root: &Path, s: &mut J, spec: &J, now: f64) -> Result<()> {
     use crate::task_env::instance;
     let binding = progress::environment::requested(s, spec)?;
-    let mut env = environment_handle(s, spec, &binding)?;
+    let lease = isolation::creation_permit(root, s, spec, &binding)?;
+    let mut env = environment_handle(root, s, spec, &binding, lease)?;
     checkpoint_environment(root, s, &binding, &env, now)?;
     instance::materialize_instance(&mut env)?;
     instance::verify_instance(&env, &binding, &env.instance_id)?;
-    progress::environment::checkpoint(s, &binding, &env, "active", util::now())
+    progress::environment::checkpoint(s, &binding, &env, "active", util::now())?;
+    save(root, s)
 }
 
 fn environment_handle(
+    root: &Path,
     s: &J,
     spec: &J,
     binding: &crate::task_env::instance::InstanceBinding,
+    lease: Option<std::sync::Arc<crate::lifecycle::Permit>>,
 ) -> Result<crate::task_env::TaskEnvironment> {
     match spec["action"].as_str() {
-        Some("create") => begin_task_environment(s, spec, binding),
-        Some("resume") => resume_task_environment(spec, binding),
+        Some("create") => begin_task_environment(root, s, spec, binding, lease),
+        Some("resume") => resume_task_environment(spec, binding, lease),
         _ => Err(queue_error(
             "task-environment action must be create or resume",
         )),
@@ -2766,9 +2950,11 @@ fn environment_handle(
 }
 
 fn begin_task_environment(
+    root: &Path,
     s: &J,
     spec: &J,
     binding: &crate::task_env::instance::InstanceBinding,
+    lease: Option<std::sync::Arc<crate::lifecycle::Permit>>,
 ) -> Result<crate::task_env::TaskEnvironment> {
     if !s["tasks"][&binding.task_id]["environment"].is_null() {
         return Err(queue_error(
@@ -2777,6 +2963,10 @@ fn begin_task_environment(
     }
     let creation = environment_create_spec(&spec["environment"])?;
     require_environment_candidate(&s["tasks"][&binding.task_id], &creation.commit)?;
+    if let Some(lease) = lease {
+        isolation::git_owner_candidate(&s["tasks"][&binding.task_id], &creation.commit)?;
+        return crate::task_env::instance::begin_isolated(binding, &creation, root, lease);
+    }
     crate::task_env::instance::begin_instance(binding, &creation)
 }
 
@@ -2792,11 +2982,15 @@ fn require_environment_candidate(task: &J, commit: &str) -> Result<()> {
 fn resume_task_environment(
     spec: &J,
     binding: &crate::task_env::instance::InstanceBinding,
+    lease: Option<std::sync::Arc<crate::lifecycle::Permit>>,
 ) -> Result<crate::task_env::TaskEnvironment> {
     if spec.get("environment").is_some() {
         return Err(queue_error("resume cannot replace the creation intent"));
     }
     let id = progress::text(spec.get("instance_id"), "instance_id", 128)?;
+    if let Some(lease) = lease {
+        return crate::task_env::instance::resume_isolated(binding, &id, lease);
+    }
     crate::task_env::instance::resume_instance(binding, &id)
 }
 

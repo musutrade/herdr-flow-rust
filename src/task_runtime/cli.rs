@@ -123,6 +123,7 @@ mod lifecycle_tests {
             &env.workspace_root,
             Path::new("/bin/true"),
             &json!({"adapter":"codex"}),
+            None,
         );
         // Building the command is independent of host bwrap availability;
         // spawning it fails closed if the executable/namespaces are unavailable.
@@ -140,6 +141,7 @@ mod lifecycle_tests {
             &env.workspace_root,
             Path::new("/bin/true"),
             &spec,
+            None,
         )
         .unwrap();
         assert_eq!(selected.get_program(), launcher);

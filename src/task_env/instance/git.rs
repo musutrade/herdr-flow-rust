@@ -81,6 +81,7 @@ pub(super) fn intent(binding: &InstanceBinding, spec: &CreateSpec) -> Result<Cre
     validate_new_roots(spec, &common_dir)?;
     Ok(CreationIntent {
         binding: binding.clone(),
+        lifecycle_queue: None,
         phase: CreationPhase::Prepared,
         repository,
         repository_identity,

@@ -18,6 +18,7 @@ use super::{queue_error, run_command, summary, task_action, validate_watch};
 
 const ACTIONS: &[&str] = &[
     "init",
+    "init-isolated",
     "add",
     "signal",
     "status",
@@ -34,6 +35,7 @@ const ACTIONS: &[&str] = &[
     "readiness",
     "task-add",
     "task-environment",
+    "task-finalize",
     "task-authorize",
     "task-lineage",
     "task-apply",
@@ -580,7 +582,7 @@ fn close_wait_checked(root: &Path, s: J, wait_id: &str) -> Result<J> {
 }
 
 fn close_wait(root: &Path, wait_id: &str) -> Result<J> {
-    let s = util::read_json(&root.join("queue.json"))?;
+    let s = super::load_queue(root)?;
     close_wait_checked(root, s, wait_id)
 }
 
@@ -627,7 +629,7 @@ fn stop_queue_save(root: &Path, mut s: J) -> Result<J> {
 }
 
 fn stop_queue(root: &Path) -> Result<J> {
-    let s = util::read_json(&root.join("queue.json"))?;
+    let s = super::load_queue(root)?;
     stop_queue_checked(root, s)
 }
 
@@ -656,6 +658,14 @@ fn action_init(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Result<O
     )?))
 }
 
+fn action_init_isolated(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Result<Outcome> {
+    Ok(Outcome::state(super::init_isolated(
+        root,
+        args.guard_state_dir.as_deref(),
+        args.poll_seconds,
+    )?))
+}
+
 fn action_readiness(root: &Path, _args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
     let session = crate::opencode::session::receiver_session(root)?;
     let result = runtime::readiness(root, session.as_deref(), factory)?;
@@ -663,7 +673,7 @@ fn action_readiness(root: &Path, _args: &Args, factory: &ReceiverFactory) -> Res
 }
 
 fn action_readiness_report(root: &Path, result: J) -> Result<Outcome> {
-    util::atomic_write_json(&root.join("readiness.json"), &result)?;
+    util::atomic_write_json(&super::artifacts(root)?.join("readiness.json"), &result)?;
     action_readiness_print(result)
 }
 
@@ -856,6 +866,7 @@ type ActionHandler = fn(&Path, &Args, &ReceiverFactory) -> Result<Outcome>;
 
 const ACTION_HANDLERS: &[(&str, ActionHandler)] = &[
     ("init", action_init),
+    ("init-isolated", action_init_isolated),
     ("readiness", action_readiness),
     ("status", action_status),
     ("event-current", action_event_current),
@@ -869,6 +880,7 @@ const ACTION_HANDLERS: &[(&str, ActionHandler)] = &[
     ("stop", action_stop),
     ("task-add", action_task),
     ("task-environment", action_task),
+    ("task-finalize", action_task),
     ("task-authorize", action_task),
     ("task-lineage", action_task),
     ("task-apply", action_task),
@@ -916,30 +928,32 @@ fn run_watch(root: &Path, args: &Args) -> Result<()> {
     let interval = model::u64_field(&state, "poll_seconds").unwrap_or(30);
     let factory = factory_for();
     watch_service::run(
-        root,
-        || {
-            let lock = match super::locked(root, false) {
-                Ok(lock) => lock,
-                Err(error) if error.kind == ErrorKind::StateBusy => {
-                    if args.once {
-                        return Err(error);
-                    }
-                    return Ok(false);
-                }
-                Err(error) => return Err(error),
-            };
-            let current = super::tick(root, &factory, None)?;
-            if args.once || model::bool_or(&current, "stopped", false) {
-                println!("{}", summary(&current));
-            }
-            drop(lock);
-            Ok(model::bool_or(&current, "stopped", false))
-        },
+        &super::artifacts(root)?,
+        || watch_tick(root, args, &factory),
         || validate_watch(root).map(|_| ()),
         interval,
         args.ready_fd,
         args.once,
     )
+}
+
+fn watch_tick(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<bool> {
+    let lock = match super::locked(root, false) {
+        Ok(lock) => lock,
+        Err(error) if error.kind == ErrorKind::StateBusy => {
+            if args.once {
+                return Err(error);
+            }
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let current = super::tick(root, factory, None)?;
+    if args.once || model::bool_or(&current, "stopped", false) {
+        println!("{}", summary(&current));
+    }
+    drop(lock);
+    Ok(model::bool_or(&current, "stopped", false))
 }
 
 fn background_allowed(args: &Args) -> bool {
@@ -965,8 +979,17 @@ fn print_background_state(state: &J) -> Result<()> {
 }
 
 fn run_background_watch(root: &Path) -> Result<()> {
-    let state = watch_service::background(
-        root,
+    let state = background_watch_state(root)?;
+    print_background_state(&state)
+}
+
+fn background_watch_state(root: &Path) -> Result<J> {
+    start_background_watch(root, &super::artifacts(root)?)
+}
+
+fn start_background_watch(root: &Path, watch_root: &Path) -> Result<J> {
+    watch_service::background(
+        watch_root,
         &[
             "queue".to_string(),
             "watch".to_string(),
@@ -975,8 +998,7 @@ fn run_background_watch(root: &Path) -> Result<()> {
         ],
         || validate_watch(root).map(|_| ()),
         Duration::from_secs(10),
-    )?;
-    print_background_state(&state)
+    )
 }
 
 fn background_cwd<'a>(
@@ -1025,24 +1047,35 @@ fn background_spawn_with_exe(
     cwd: &Path,
     exe: &Path,
 ) -> Result<()> {
-    let child = util::spawn_detached(
-        &[
-            exe.display().to_string(),
-            "queue".to_string(),
-            "run".to_string(),
-            "--state-dir".to_string(),
-            root.display().to_string(),
-            "--wait".to_string(),
-            wait.to_string(),
-            "--command-file".to_string(),
-            util::resolve_path(command_file).display().to_string(),
-            "--cwd".to_string(),
-            util::resolve_path(cwd).display().to_string(),
-        ],
-        &root.join("watch.log"),
-        None,
-    )?;
+    let argv = background_command_argv(root, wait, command_file, cwd, exe);
+    let child = background_command_process(root, &argv)?;
     background_run_output(root, &child)
+}
+
+fn background_command_argv(
+    root: &Path,
+    wait: &str,
+    command_file: &Path,
+    cwd: &Path,
+    exe: &Path,
+) -> Vec<String> {
+    vec![
+        exe.display().to_string(),
+        "queue".to_string(),
+        "run".to_string(),
+        "--state-dir".to_string(),
+        root.display().to_string(),
+        "--wait".to_string(),
+        wait.to_string(),
+        "--command-file".to_string(),
+        util::resolve_path(command_file).display().to_string(),
+        "--cwd".to_string(),
+        util::resolve_path(cwd).display().to_string(),
+    ]
+}
+
+fn background_command_process(root: &Path, argv: &[String]) -> Result<std::process::Child> {
+    util::spawn_detached(argv, &super::artifacts(root)?.join("watch.log"), None)
 }
 
 fn background_spawn_detached(
@@ -1056,7 +1089,7 @@ fn background_spawn_detached(
 }
 
 fn background_spawn(root: &Path, wait: &str, command_file: &Path, cwd: &Path) -> Result<()> {
-    let _ = util::read_json(&root.join("queue.json"))?;
+    let _ = super::load_queue(root)?;
     background_spawn_detached(root, wait, command_file, cwd)
 }
 
@@ -1066,6 +1099,18 @@ fn run_background_run(root: &Path, args: &Args) -> Result<()> {
 }
 
 fn run_background(root: &Path, args: &Args) -> Result<()> {
+    validate_background_authority(root, args)?;
+    run_legacy_background(root, args)
+}
+
+fn validate_background_authority(root: &Path, args: &Args) -> Result<()> {
+    if args.action != "run" {
+        return Ok(());
+    }
+    super::isolation::require_legacy_execution(root)
+}
+
+fn run_legacy_background(root: &Path, args: &Args) -> Result<()> {
     ensure_background_allowed(args)?;
     run_background_checked(root, args)
 }
@@ -1132,6 +1177,9 @@ fn run_inner_metrics(root: &Path, args: &Args) -> Result<Option<i32>> {
 }
 
 fn run_locked_guarded(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
+    if args.action == "init-isolated" {
+        return run_locked(root, args, factory);
+    }
     let _lock = super::locked(root, false)?;
     run_locked(root, args, factory)
 }

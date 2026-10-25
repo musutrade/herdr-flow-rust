@@ -118,6 +118,8 @@ pub struct ProcessRecord {
 pub struct TaskEnvironment {
     pub task_id: String,
     pub instance_id: String,
+    #[serde(skip)]
+    pub(crate) creation_permit: Arc<Mutex<Option<Arc<crate::lifecycle::Permit>>>>,
     /// Queue-bound creation journal. Legacy environments have no implicit binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation: Option<super::instance::CreationIntent>,
@@ -164,11 +166,23 @@ impl TaskEnvironment {
     /// error after rename may leave the new document visible; inspect/recover
     /// durable state before retrying a higher-level operation.
     pub fn persist(&self) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         let value = serde_json::to_value(self)?;
         util::atomic_write_json(&self.state_file, &value)
     }
 
     fn transition(&mut self, state: EnvironmentState) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
+        if super::isolation::owner(self).is_some()
+            && matches!(
+                state,
+                EnvironmentState::Destroying | EnvironmentState::DestroyFailed
+            )
+        {
+            return Err(FlowError::guard(
+                "isolated cleanup requires lifecycle finalizer; not implemented",
+            ));
+        }
         self.state = state;
         self.updated_at = util::now();
         self.persist()
@@ -191,6 +205,10 @@ impl TaskEnvironment {
     /// registry claims; stop mutating this handle after relinquishing ownership.
     /// Panics if its internal ownership mutex was poisoned.
     pub fn release_ownership(&self) {
+        self.creation_permit
+            .lock()
+            .expect("creation lease poisoned")
+            .take();
         self.ownership_lock
             .lock()
             .expect("ownership slot poisoned")
@@ -216,18 +234,51 @@ impl TaskEnvironment {
     /// OS error (EOPNOTSUPP when the kernel lacks the required ABI), so callers
     /// must check spawn's Result. The parent is not confined by preparation.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
-        self.process_command(program, true)
+        let mut command = self.process_command(program, true);
+        if super::isolation::requires_managed_spawn(self) {
+            // A raw Command can outlive its check. Isolated callers must use a
+            // bounded spawn operation that retains the permit through registration.
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
+            }
+        }
+        command
     }
 
     /// Trusted namespace bootstrap only: bwrap must write uid_map before its
     /// read-only mount policy can take effect. Never execute an agent directly.
-    pub(crate) fn namespace_command(&self, launcher: &Path) -> Command {
-        self.process_command(launcher, false)
+    pub(crate) fn permitted_command(
+        &self,
+        program: &OsStr,
+        confine: bool,
+        permit: Option<&crate::lifecycle::Permit>,
+    ) -> Result<Command> {
+        self.verify_spawn_permit(permit)?;
+        Ok(self.process_command(program, confine))
+    }
+
+    fn verify_spawn_permit(&self, permit: Option<&crate::lifecycle::Permit>) -> Result<()> {
+        if let Some(owner) = super::isolation::owner(self) {
+            let permit = permit
+                .ok_or_else(|| FlowError::guard("isolated spawn requires lifecycle permit"))?;
+            if permit.owner() != &owner {
+                return Err(FlowError::guard("spawn owner mismatch"));
+            }
+            permit.check(&crate::queue::load_queue(&owner.queue_root)?, false)?;
+        }
+        Ok(())
     }
 
     fn process_command(&self, program: impl AsRef<OsStr>, confine: bool) -> Command {
         let mut command = Command::new(program);
         command.env(MARKER_ENV, &self.instance_id);
+        if let Some(owner) = super::isolation::owner(self) {
+            command.env(
+                "HERDR_LIFECYCLE_OWNER",
+                serde_json::to_string(&owner).expect("owner serialization"),
+            );
+        }
         if let Some(intent) = &self.creation {
             command.env("HERDR_TASK_ID", &intent.binding.task_id);
             command.env("HERDR_TASK_EPOCH", intent.binding.epoch.to_string());
@@ -266,6 +317,7 @@ impl TaskEnvironment {
 
     /// Register a worktree that lives inside the disposable workspace.
     pub fn register_worktree(&mut self, path: &Path) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         if self.creation.is_some() {
             super::instance::verify_owned(self)?;
             if path != self.workspace_root.join("checkout") {
@@ -307,6 +359,7 @@ impl TaskEnvironment {
     /// not an atomic identity proof; disappearance can fail registration.
     /// Persistence failure can leave the in-memory record appended.
     pub fn register_process(&mut self, pid: i32) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         if pid <= 1 {
             return Err(FlowError::progress(format!(
                 "invalid process id {pid}: must be greater than 1"
@@ -360,6 +413,7 @@ impl TaskEnvironment {
     /// Restoring metadata does not restore OS descriptors. Panics if the internal
     /// descriptor mutex was poisoned.
     pub fn register_handle(&mut self, path: &Path, handle: File) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         let resolved = util::resolve_path(path);
         if !self.owns_path(&resolved) {
             return Err(FlowError::progress(format!(
@@ -380,6 +434,7 @@ impl TaskEnvironment {
 
     /// Open `path` without following a final symlink and take ownership.
     pub fn register_file(&mut self, path: &Path) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         let resolved = util::resolve_path(path);
         if !self.owns_path(&resolved) {
             return Err(FlowError::progress(format!(
@@ -404,6 +459,7 @@ impl TaskEnvironment {
     }
 
     pub fn unregister_worktree(&mut self, path: &Path) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         let resolved = util::resolve_path(path);
         self.worktree_registrations
             .retain(|item| item.path != resolved);
@@ -411,6 +467,7 @@ impl TaskEnvironment {
     }
 
     pub fn unregister_process(&mut self, pid: i32) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         self.child_processes.retain(|entry| entry.pid != pid);
         self.persist()
     }
@@ -421,6 +478,7 @@ impl TaskEnvironment {
     /// failure does not undo the in-memory removal or reopen the descriptor.
     /// Caller must retain task ownership; a poisoned descriptor mutex panics.
     pub fn unregister_file(&mut self, path: &Path) -> Result<()> {
+        let _permit = super::isolation::mutation_permit(self)?;
         let resolved = util::resolve_path(path);
         self.open_files.retain(|item| item != &resolved);
         self.file_handles
@@ -842,7 +900,25 @@ pub(super) fn create_with_intent(
     temp_root: &Path,
     creation: Option<super::instance::CreationIntent>,
 ) -> Result<TaskEnvironment> {
+    create_with_lease(
+        task_id,
+        workspace_root,
+        delivery_targets,
+        temp_root,
+        creation,
+        None,
+    )
+}
+pub(super) fn create_with_lease(
+    task_id: &str,
+    workspace_root: &Path,
+    delivery_targets: Vec<DeliveryTarget>,
+    temp_root: &Path,
+    creation: Option<super::instance::CreationIntent>,
+    lease: Option<Arc<crate::lifecycle::Permit>>,
+) -> Result<TaskEnvironment> {
     registry::validate_task_id(task_id)?;
+    require_creation_lease(lease.as_deref())?;
     let lock = acquire_task_lock(task_id)?;
     let (workspace_root, temp_root, delivery_targets) =
         prepare_roots(workspace_root, delivery_targets, temp_root)?;
@@ -856,6 +932,7 @@ pub(super) fn create_with_intent(
         state_file.clone(),
     );
     env.creation = creation;
+    *env.creation_permit.lock().unwrap() = lease;
     env.attach_lock(lock);
 
     if let Err(error) = env.persist() {
@@ -870,6 +947,17 @@ pub(super) fn create_with_intent(
         return Err(error);
     }
     finish_environment_creation(env)
+}
+
+fn require_creation_lease(lease: Option<&crate::lifecycle::Permit>) -> Result<()> {
+    if super::isolation::data_root(&registry::state_root()?)? != registry::state_root()?
+        && lease.is_none()
+    {
+        return Err(FlowError::guard(
+            "isolated environment creation requires queue ownership",
+        ));
+    }
+    Ok(())
 }
 
 fn finish_environment_creation(mut env: TaskEnvironment) -> Result<TaskEnvironment> {
@@ -972,6 +1060,7 @@ fn build_environment(
     TaskEnvironment {
         task_id: task_id.to_string(),
         instance_id: util::uuid_hex(),
+        creation_permit: Default::default(),
         creation: None,
         workspace_root,
         temp_root,
@@ -992,7 +1081,8 @@ fn build_environment(
 }
 
 pub(super) fn reserve_environment(env: &TaskEnvironment, state_file: &Path) -> Result<()> {
-    registry::register_environment(registry::RegistryEntry {
+    let _permit = super::isolation::mutation_permit(env)?;
+    registry::register_instance_environment(registry::RegistryEntry {
         task_id: env.task_id.clone(),
         instance_id: env.instance_id.clone(),
         workspace_root: env.workspace_root.clone(),
@@ -1054,8 +1144,8 @@ fn ensure_state_exists(task_id: &str, state_file: &Path) -> Result<()> {
 }
 
 fn read_environment(state_file: &Path) -> Result<TaskEnvironment> {
-    let text = std::fs::read_to_string(state_file)?;
-    serde_json::from_str(&text).map_err(|error| {
+    let value = util::read_json(state_file)?;
+    serde_json::from_value(value).map_err(|error| {
         FlowError::progress(format!("cannot parse {}: {error}", state_file.display()))
     })
 }
@@ -1068,6 +1158,7 @@ fn read_environment(state_file: &Path) -> Result<TaskEnvironment> {
 /// execution. Failed cleanup retains evidence/claims for retry, subject to the
 /// cleanup retry limit. Repeated successful recovery eventually returns false.
 pub fn recover_interrupted(task_id: &str) -> Result<bool> {
+    registry::require_legacy_registry()?;
     registry::validate_task_id(task_id)?;
     let state_file = registry::environment_state_path(task_id)?;
     if !state_file.exists() {

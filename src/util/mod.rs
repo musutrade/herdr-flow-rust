@@ -2,6 +2,7 @@
 
 pub mod fs;
 pub mod process;
+pub mod protected;
 pub mod pyjson;
 pub mod time;
 

@@ -13,6 +13,7 @@ pub(super) struct Owner {
 
 impl Owner {
     pub fn acquire(root: &Path) -> Result<Self> {
+        let _permit = crate::lifecycle::runtime_permit(root)?;
         let instance = task_instance(root)?;
         let lock = util::FileLock::acquire(&root.join("broker.lock"), false)?
             .ok_or_else(|| FlowError::guard("broker owner is still active"))?;
@@ -68,6 +69,9 @@ impl Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
+        let Ok(_permit) = crate::lifecycle::runtime_permit(&self.root) else {
+            return;
+        };
         let path = self.root.join("broker.sock");
         // Keep the exclusive lock through cleanup; never remove a replacement.
         let _ = remove_owned_socket(&path, self.socket);

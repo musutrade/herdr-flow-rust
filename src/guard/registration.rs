@@ -230,6 +230,7 @@ pub struct InitRequest<'a> {
 
 /// Validate and initialize a guard using an explicit registration request.
 pub fn init(request: &InitRequest<'_>) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(request.root)?;
     init_session(request)?;
     init_transcript(request)
 }
