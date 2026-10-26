@@ -659,7 +659,12 @@ fn native_fixture_worker() {
         let mut peer = rpc_fixture::Peer {
             stream: stream.unwrap(),
         };
-        peer.initialize();
+        peer.initialize_with_result(
+            config
+                .get("initialization")
+                .cloned()
+                .unwrap_or(json!({"serverInfo":{"name":"fixture","version":"1"}})),
+        );
         loop {
             let mut first = [0u8];
             use std::os::fd::AsRawFd;
@@ -730,7 +735,9 @@ fn native_fixture_worker() {
                 "thread/start" => {
                     json!({"thread":saved,"model":"fixture","modelProvider":"openai"})
                 }
-                "thread/read" | "thread/resume" => json!({"thread":saved}),
+                "thread/read" | "thread/resume" => {
+                    json!({"thread":herdr_flow::util::read_json(&root.join("thread-override.json")).unwrap_or_else(|_| saved.clone())})
+                }
                 "thread/turns/list" => json!({"data":saved["turns"],"nextCursor":null}),
                 "turn/start" => {
                     saved["turns"] = json!([{"id":"turn-fixture","status":"completed","items":[{"type":"agentMessage","text":"fixture report"}]}]);
@@ -795,7 +802,18 @@ fn fixture_ready(root: &Path, child: &mut std::process::Child) -> u16 {
 #[test]
 fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    for adapter in ["codex", "opencode"] {
+    for (adapter, initialization, expected_version) in [
+        (
+            "codex",
+            json!({"serverInfo":{"name":"fixture","version":"0.163.0"}}),
+            json!("0.163.0"),
+        ),
+        ("codex", json!({"userAgent":"codex/0.999.0"}), J::Null),
+        ("codex", json!({"serverInfo":{"version":null}}), J::Null),
+        ("codex", json!({"serverInfo":{"version":123}}), J::Null),
+        ("codex", json!({"serverInfo":{"version":"  "}}), J::Null),
+        ("opencode", json!({}), json!("1.19.4")),
+    ] {
         let temp = temp();
         let mut env = environment(temp.path());
         let (q, cwd) = setup(&env, "acceptance");
@@ -803,6 +821,8 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         // Let the worker retain the listener selected by the kernel. Never
         // release a reserved port and later ask another process to rebind it.
         let binary = fixture_binary(&root, &cwd, 0);
+        let config = json!({"cwd":cwd,"port":0,"initialization":initialization});
+        herdr_flow::util::atomic_write_json(&root.join("fixture.json"), &config).unwrap();
         // Synthetic process exposes both protocols. Launch via the OpenCode path
         // so CI does not need user namespaces merely to exercise RPC fixtures.
         // The synthetic binary ignores launch argv; replace the placeholder
@@ -844,9 +864,14 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             assert!(!root.join("creation.json").exists());
             fs::remove_file(cwd.join(".herdr-verdict.json"))?;
             let state = task_runtime::native::create(&env, &root, &request)?;
-            if adapter == "opencode" {
-                assert_eq!(state["server_version"], "1.19.4");
-            }
+            assert_eq!(
+                state["server_version"], expected_version,
+                "{adapter}: {initialization}"
+            );
+            assert_eq!(
+                herdr_flow::util::read_json(&root.join("state.json"))?["server_version"],
+                expected_version
+            );
             assert_eq!(
                 state["session"],
                 if adapter == "codex" {
@@ -857,7 +882,7 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
             );
             assert!(task_runtime::launch(&mut env, &root, &spec).is_err());
             assert!(task_runtime::native::create(&env, &root, &request).is_err());
-            if adapter == "opencode" {
+            {
                 let mut stale = herdr_flow::util::read_json(&root.join("state.json"))?;
                 stale["server_version"] = json!("1.19.3");
                 herdr_flow::util::atomic_write_json(&root.join("state.json"), &stale)?;
@@ -873,10 +898,31 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
                 let mut original_queue = original_queue;
                 queue::save(&q, &mut original_queue)?;
             }
-            let recovered = task_runtime::native::recover(&env, &root)?;
-            if adapter == "opencode" {
-                assert_eq!(recovered["server_version"], "1.19.4");
+            if adapter == "codex" {
+                let saved_state = fs::read(root.join("state.json"))?;
+                let saved_journal = fs::read(root.join("creation.json"))?;
+                let original_queue = queue::load_queue(&q)?;
+                let foreign = json!({"id":"22222222-2222-2222-2222-222222222222", "cwd":cwd,
+                    "modelProvider":"openai","turns":[]});
+                herdr_flow::util::atomic_write_json(&root.join("thread-override.json"), &foreign)?;
+                let error = task_runtime::native::recover(&env, &root).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("thread identity/directory mismatch"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(root.join("state.json"))?, saved_state);
+                assert_eq!(fs::read(root.join("creation.json"))?, saved_journal);
+                assert_eq!(queue::load_queue(&q)?, original_queue);
+                fs::remove_file(root.join("thread-override.json"))?;
             }
+            let recovered = task_runtime::native::recover(&env, &root)?;
+            assert_eq!(recovered["server_version"], expected_version);
+            assert_eq!(
+                herdr_flow::util::read_json(&root.join("state.json"))?["server_version"],
+                expected_version
+            );
             assert!(task_runtime::native::dispatch(&env, &root).is_err()); // no coordinator readiness
             let (_g, _q) = receiver(&env, &q, &cwd, port);
             let turn = task_runtime::native::dispatch(&env, &root)?;

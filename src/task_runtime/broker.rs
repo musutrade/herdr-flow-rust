@@ -74,10 +74,20 @@ fn handle(
     };
     let _permit = crate::lifecycle::runtime_permit(root)?;
     owner.verify()?;
-    let result = match request_method(&request) {
-        Ok(_) => execute(root, connection, &request),
+    // Keep the action permit in this outer scope through execution and response.
+    reply(root, &mut stream, connection, &request)
+}
+
+fn reply(
+    root: &Path,
+    stream: &mut UnixStream,
+    connection: &mut Option<super::native::DirectClient>,
+    request: &J,
+) -> Result<()> {
+    let result = match request_method(request) {
+        Ok(_) => execute(root, connection, request),
         Err(error) => {
-            let _ = respond(&mut stream, Err(error));
+            let _ = respond(stream, Err(error), None);
             return Ok(());
         }
     };
@@ -88,12 +98,17 @@ fn handle(
             return result.map(|_| ());
         }
     }
-    let _ = respond(&mut stream, result);
+    let server_info = connection
+        .as_ref()
+        .and_then(|client| client.server_info.as_ref());
+    let _ = respond(stream, result, server_info);
     Ok(())
 }
-fn respond(stream: &mut UnixStream, result: Result<J>) -> Result<()> {
+fn respond(stream: &mut UnixStream, result: Result<J>, server_info: Option<&J>) -> Result<()> {
     let response = match result {
-        Ok(value) => json!({"result":value}),
+        Ok(value) => {
+            json!({"result":value,"server_info":{"version":server_info.and_then(|info| info.get("version"))}})
+        }
         Err(error) => json!({"error":{"message":error.message,"code":error.rpc_code}}),
     };
     transport::write(
@@ -204,6 +219,17 @@ fn record(journal: &mut J, event: &J) -> Result<()> {
 }
 
 pub(super) fn call(root: &Path, method: &str, params: &J) -> Result<J> {
+    Ok(call_observed(root, method, params)?.result)
+}
+
+/// Metadata belongs to the same persistent connection that returned this result.
+/// It is not a compatibility baseline or a version inferred from a binary path.
+pub(super) struct Observation {
+    pub result: J,
+    pub server_version: J,
+}
+
+pub(super) fn call_observed(root: &Path, method: &str, params: &J) -> Result<Observation> {
     let mut stream = util::unix_socket::connect(&root.join("broker.sock"))?;
     transport::write(
         &mut stream,
@@ -222,7 +248,17 @@ pub(super) fn call(root: &Path, method: &str, params: &J) -> Result<J> {
                 .with_rpc(error["code"].as_i64(), None),
         );
     }
-    Ok(value["result"].clone())
+    Ok(Observation {
+        result: value["result"].clone(),
+        server_version: observed_version(&value["server_info"]["version"]),
+    })
+}
+
+fn observed_version(value: &J) -> J {
+    value
+        .as_str()
+        .filter(|version| !version.trim().is_empty())
+        .map_or(J::Null, |version| json!(version))
 }
 
 pub(super) fn turn(root: &Path, state: &J, id: &J) -> Result<Option<J>> {

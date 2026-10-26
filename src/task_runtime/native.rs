@@ -126,7 +126,7 @@ fn make_packet(q: &J, wait: &J, spec: &J) -> Result<J> {
 fn base_state(root: &Path, runtime: &J, journal: &J) -> J {
     json!({"version":2,"adapter":runtime["adapter"],"state_dir":root,"cwd":runtime["cwd"],
         "model":runtime["model"],"approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),"auto_rotate":false,"task":journal["packet"]["binding"]["task"],
-        "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":crate::opencode::session::BASELINE_VERSION,
+        "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":null,
         "endpoint":format!("http://127.0.0.1:{}",runtime["port"]),"phase":"monitoring"})
 }
 
@@ -204,6 +204,9 @@ impl NativeClient {
     fn call(&mut self, method: &str, params: &J) -> Result<J> {
         super::broker::call(&self.root, method, params)
     }
+    fn call_observed(&mut self, method: &str, params: &J) -> Result<super::broker::Observation> {
+        super::broker::call_observed(&self.root, method, params)
+    }
 }
 fn client(root: &Path) -> Result<NativeClient> {
     ensure(
@@ -265,13 +268,20 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
     } else {
         "Perform only the supplied task packet. Report evidence and blockers."
     };
-    let result = client(root)?.call("thread/start", &json!({"cwd":state["cwd"],"model":model,
+    let observed = client(root)?.call_observed("thread/start", &json!({"cwd":state["cwd"],"model":model,
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
         "baseInstructions":instructions,
         "developerInstructions":"","config":{"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}},
         "dynamicTools":[],"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
+    let result = observed.result;
     state["session"] = result["thread"]["id"].clone();
     state["transcript"] = result["thread"]["path"].clone();
+    verify_created_codex(state, &result, &model, &provider)?;
+    state["server_version"] = observed.server_version;
+    Ok(())
+}
+
+fn verify_created_codex(state: &J, result: &J, model: &str, provider: &str) -> Result<()> {
     ensure(
         result["model"] == model && result["modelProvider"] == provider,
         "Codex selected another model/provider",
@@ -362,9 +372,10 @@ fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
     if state["adapter"] == "opencode" {
         let observed = SessionAdapter::new(state)?.server_version()?;
         state["server_version"] = json!(observed);
-        util::atomic_write_json(&root.join("state.json"), state)?;
     }
-    Ok(())
+    // Codex metadata was observed while verifying this thread on the broker's
+    // existing connection; persist only after queue/Owner validation above.
+    util::atomic_write_json(&root.join("state.json"), state)
 }
 
 fn recovered_state(root: &Path, journal: &J) -> Result<J> {
@@ -372,24 +383,30 @@ fn recovered_state(root: &Path, journal: &J) -> Result<J> {
         matches!(journal["phase"].as_str(), Some("created" | "bound")),
         "creation outcome unknown; inspect dedicated server, do not replay",
     )?;
-    let state = util::read_state_json(root, "state.json")?;
+    let mut state = util::read_state_json(root, "state.json")?;
     ensure(
         state["session"] == journal["session"],
         "recovery session changed",
     )?;
-    verify_native(root, &state)?;
+    let version = verify_native(root, &state)?;
+    if state["adapter"] == "codex" {
+        state["server_version"] = version;
+    }
     Ok(state)
 }
 
-fn verify_native(root: &Path, state: &J) -> Result<()> {
+fn verify_native(root: &Path, state: &J) -> Result<J> {
     if state["adapter"] == "opencode" {
-        SessionAdapter::new(state)?.verify_binding().map(|_| ())
+        SessionAdapter::new(state)?
+            .verify_binding()
+            .map(|_| J::Null)
     } else {
-        let response = client(root)?.call(
+        let response = client(root)?.call_observed(
             "thread/read",
             &json!({"threadId":state["session"],"includeTurns":false}),
         )?;
-        verify_thread(state, &response["thread"])
+        verify_thread(state, &response.result["thread"])?;
+        Ok(response.server_version)
     }
 }
 
