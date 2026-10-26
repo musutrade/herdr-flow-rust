@@ -169,7 +169,11 @@ mod tests {
             return;
         }
         let path = PathBuf::from(std::env::var_os("FLOW_ALLOCATION_READY").unwrap());
-        fs::write(path, point).unwrap();
+        // Publish the checkpoint as one rename: existence must imply the full
+        // pause marker is readable before the parent kills this worker.
+        let staging = path.with_extension("pending");
+        fs::write(&staging, point).unwrap();
+        fs::rename(staging, path).unwrap();
         loop {
             std::thread::park_timeout(Duration::from_secs(60));
         }

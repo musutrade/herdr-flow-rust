@@ -1,8 +1,47 @@
 # Existing upstream configuration and owned task resources (#130)
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
+## Implemented support boundary (2026-10-26)
+
+Only Codex is supported. The OpenCode module, CLI dispatch, HTTP/session creation,
+collection and journal observer, receiver readiness adapter and OpenCode-only
+mixed live harnesses have been removed, together with their HTTP dependencies.
+Old OpenCode registrations and runtime records fail closed, including when the
+caller has a Codex session identity. There is no automatic migration or fallback.
+
+Generic queue ownership, receiver bootstrap, fixed reviewer snapshots and terminal
+cleanup tests now use a synthetic Codex Unix-socket protocol fixture. These tests
+exercise task lifecycle behavior without logging in or calling a model. Historical
+OpenCode acceptance matrices are retired requirements, not passed acceptance.
+The earlier real Codex evidence below retains its original scope; this removal
+adds no new real-model or complete issue-development acceptance claim.
+
 Login, provider configuration, subscription and billing remain with the existing
-Codex/OpenCode installation. No task imports account files, creates a credential
+Codex installation. Historical OpenCode account settings remain untouched.
+No task imports account files, creates a credential
 store, changes a proxy, or switches billing routes on failure.
+
+## Historical OpenCode verification (before the removal decision)
+
+The installed/interactive binary is 1.19.4, but the observed listening service
+is a still-running 2.0.32 executable. They are not interchangeable endpoints.
+Both processes open the same upstream database and log. The database contains
+an active account and organization reference. Replacing it with an empty task
+database cannot be assumed to preserve upstream organization configuration.
+This observation does **not** establish the billing route of a particular model
+request. No such request was sent during this verification.
+
+The pinned 1.19.4 session deletion implementation removes database session data
+and events, but is not complete task-resource reclamation. Task-specific process
+mounts are only a proposal: they do not yet solve the shared account/session
+database boundary. OpenCode upstream launch remains disabled; no credential
+copy, alternate provider, shared-data deletion or 2.x fallback is authorized.
+See [verified sources, host observations and remaining work](opencode-upstream-audit.md).
+Historical observations below remain intact.
+
+See also [cleanup observation races and their regression boundaries](cleanup-observation-races.md) for the transient process-read failures found during this removal.
 
 ## Current Codex path
 

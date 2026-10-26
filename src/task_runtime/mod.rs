@@ -47,7 +47,7 @@ pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
 
 fn prepare_runtime_dirs(root: &Path) -> Result<()> {
     for name in [
-        "home", "config", "data", "cache", "state", "tmp", "c", "opencode", "runtime",
+        "home", "config", "data", "cache", "state", "tmp", "c", "runtime",
     ] {
         util::ensure_private_dir(&root.join(name), true)?;
     }
@@ -107,7 +107,6 @@ fn configure_environment(
         ("XDG_RUNTIME_DIR", "runtime"),
         ("TMPDIR", "tmp"),
         ("CODEX_HOME", "c"),
-        ("OPENCODE_CONFIG_DIR", "opencode"),
     ] {
         let target = root.join(dir);
         crate::task_env::validate_path(env, &target)?;
@@ -130,11 +129,6 @@ fn configure_environment(
             command.env(key, value);
         }
     }
-    command.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
-    command.env("OPENCODE_DISABLE_CLAUDE_CODE", "true");
-    command.env("OPENCODE_DISABLE_AUTOUPDATE", "true");
-    command.env("OPENCODE_DISABLE_MODELS_FETCH", "true");
-    command.env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true");
     Ok(command)
 }
 
@@ -244,26 +238,11 @@ fn configured_server_command(
     permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
     let mut cmd = server_command(env, root, cwd, binary, spec, permit)?;
-    confine_server(&mut cmd, root, cwd, spec)?;
     let adapter = required(spec, "adapter")?;
-    configure_server(&mut cmd, root, spec, &adapter)?;
+    configure_server(&mut cmd, root, &adapter)?;
     cmd.current_dir(cwd);
     Ok(cmd)
 }
-fn confine_server(cmd: &mut Command, root: &Path, cwd: &Path, spec: &J) -> Result<()> {
-    let roots = vec![root.to_path_buf(), cwd.to_path_buf()];
-    if spec["adapter"] != "codex" {
-        let policy = crate::task_env::PreparedConfinement::new(&roots)?;
-        // SAFETY: preparation opens paths and builds rules before fork. The
-        // callback only borrows its ruleset and performs confinement syscalls.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(move || policy.apply());
-        }
-    }
-    Ok(())
-}
-
 fn register_child(env: &mut TaskEnvironment, child: &mut Child) -> Result<()> {
     if let Err(error) = env.register_process(child.id() as i32) {
         let _ = child.kill();
@@ -281,13 +260,7 @@ fn server_command(
     spec: &J,
     permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
-    if spec["adapter"] != "codex" {
-        ensure(
-            spec.get("namespace_launcher").is_none(),
-            "namespace launcher is only supported for Codex",
-        )?;
-        return configured_permitted_command(env, root, binary, permit);
-    }
+    ensure(spec["adapter"] == "codex", "only Codex is supported")?;
     // Codex 0.163 uses an absolute /tmp/codex-daemon-UID fallback even with
     // CODEX_HOME/TMPDIR/XDG_RUNTIME_DIR redirected. A private mount is required.
     let launcher = launcher::resolve(spec)?;
@@ -334,28 +307,11 @@ fn namespace_environment(
     )
 }
 
-fn configure_server(cmd: &mut Command, root: &Path, spec: &J, adapter: &str) -> Result<()> {
+fn configure_server(cmd: &mut Command, root: &Path, adapter: &str) -> Result<()> {
     match adapter {
         "codex" => {
             cmd.args(["app-server", "--listen"])
                 .arg(format!("unix://{}", root.join("server.sock").display()));
-        }
-        "opencode" => {
-            let port = model::u64_field(spec, "port").unwrap_or(0);
-            ensure(
-                (1..=65535).contains(&port),
-                "explicit OpenCode loopback port required",
-            )?;
-            cmd.args([
-                "--print-logs",
-                "--log-level",
-                "DEBUG",
-                "serve",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-            ])
-            .arg(port.to_string());
         }
         _ => return Err(FlowError::guard("unsupported runtime adapter")),
     }
@@ -386,6 +342,10 @@ fn verify_environment(env: &TaskEnvironment, root: &Path) -> Result<()> {
 }
 
 fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
+    ensure(
+        record["adapter"] == "codex",
+        "unsupported runtime adapter; only Codex is supported",
+    )?;
     verify_owner_record(env, record)?;
     ensure(
         record["instance"] == env.instance_id && record["root"] == json!(root),
@@ -436,6 +396,10 @@ pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     let mut record = util::read_state_json(root, "runtime.json")?;
+    ensure(
+        record["adapter"] == "codex",
+        "unsupported runtime adapter; only Codex is supported",
+    )?;
     verify_owner_record(env, &record)?;
     ensure(
         record["instance"] == env.instance_id && record["root"] == json!(root),

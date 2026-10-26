@@ -1,5 +1,8 @@
 # Task handoff
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 Store outside the checkout in a private path whose ancestors pass the existing
 directory ownership/write-permission checks. A conventional `~/.local/state/`
 path is suitable only if its ancestors pass; do not relax the checks or change

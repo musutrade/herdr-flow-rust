@@ -2,10 +2,11 @@
 
 以任务为生命周期单位编排 issue 开发，复用任务交接、受管执行与独立 CI 监控；Herdr 是可选适配。
 
-**认证与任务资源边界（#130）**：登录、provider、订阅和计费由既有 Codex／OpenCode
+**支持范围：仅 Codex，明确不支持 OpenCode。** OpenCode 适配器、命令入口、HTTP 会话接入及混合验收驱动已移除。旧 OpenCode 注册会被拒绝，不会自动转成 Codex；已有用户文件、登录、配置、服务和队列不做迁移或清理。历史验收记录保留，不代表当前支持。
+
+**认证与任务资源边界（#130）**：登录、provider、订阅和计费由既有 Codex
 管理。新的隔离队列可连接已有 Codex app-server，复用其认证并按任务登记、删除会话；
-不复制配置或凭据，不改变代理。OpenCode 的新任务清理接入仍未完成，禁止以临时登录
-绕过。独立队列已验证真实 Codex 快照审查、自动通知、模型 ACK／结果应用、本地 Git 交付和任务回收；
+不复制配置或凭据，不改变代理。独立队列已验证真实 Codex 快照审查、自动通知、模型 ACK／结果应用、本地 Git 交付和任务回收；
 候选提交由验收驱动准备，尚不代表从 issue 开发到远端发布的完整验收。
 详见[上游配置与资源回收](references/upstream-configuration.md)。
 
@@ -17,7 +18,7 @@ Herdr 只接入可核验归属且可释放的展示、会话和通信能力；�
 Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr 交接也是单独证据。
 证据分类和下一步验收入口见 [Herdr 工作流边界](references/herdr-workflow.md)。
 
-本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。legacy 状态与 fresh isolated authority 是不同支持域；不能凭 JSON 形状复用旧目录或自动迁移。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
+本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。legacy 状态与 fresh isolated authority 是不同支持域；不能凭 JSON 形状复用旧目录或自动迁移。当前自动编排仅支持 Linux 上的 Codex app-server。
 
 ## 实现与验收进度（2026-10-26）
 
@@ -44,7 +45,6 @@ Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr �
 - 按 issue 和稳定阶段轮换会话，保留已有授权和有效验证证据。
 - 启动前探测 Linux `/proc`、Unix domain socket 和 app-server 方法；缺少所需能力时明确失败，不静默降级。
 - 本地安全边界：Herdr 参数拒绝 shell 元字符；batch Git 只允许白名单命令、拒绝全局配置覆盖并设置超时；状态与交接文件原子写入、权限 0600、拒绝符号链接父目录；app-server socket 校验同用户且非全局可写；JSON 消息限制大小与嵌套深度；子进程错误输出脱敏。
-- OpenCode 1.19.x >= 1.19.3（操作级 schema 校验后）原生接入：显式绑定会话/模型/目录，检查忙碌和待审批状态，持久化派发与恢复记录，接续结果 signal、投递、ACK 和任务应用。保留 pane/shell 只读诊断；精确上下文遥测、运行时恢复和自动换班仍不支持。
 - 使用任务编号、epoch 和明确的写入归属协调开发、审计与发布。
 - 独立观察 GitHub Actions，绑定完整 SHA、workflow、事件和 run attempt；外部 Checks 需要固定 App、精确 run/head 与基线。
 - 可显式按必需 job 判定，保留 advisory 详情；取消、缺失等结果进入待决策而非代码修复失败。
@@ -80,7 +80,7 @@ cargo build --release --locked
 install -m 0755 target/release/herdr-flow ~/.local/bin/herdr-flow
 ```
 
-任务专属 Codex worker 的启动适配已合入 PR #103。已验证的组合为 Codex
+**历史验收（已移除对应混合驱动）**：任务专属 Codex worker 的启动适配合入 PR #103 时，组合为 Codex
 0.163.0 worker 与 OpenCode 1.19.4 coordinator/reviewer；宿主须支持外层与
 Codex 内层 sandbox 的嵌套执行。需要专用外层启动器的宿主，应在每个任务的
 launch spec 中显式指定已获授权的 `namespace_launcher` 路径和 SHA-256。
@@ -98,7 +98,7 @@ mkdir -p ~/.codex/skills
 ln -s /absolute/path/to/herdr-flow-rust ~/.codex/skills/herdr-issue-flow
 ```
 
-Claude 可同样链接至 `~/.claude/skills/herdr-issue-flow`；OpenCode 使用 `~/.config/opencode/skills/herdr-issue-flow`。已安装旧副本时，先核对链接目标、源码提交和实际二进制；在另行批准的安装切换中处理，避免覆盖本地改动。文档 PR 不自动更新现有技能链接。
+已安装旧副本时，先核对链接目标、源码提交和实际二进制；在另行批准的安装切换中处理，避免覆盖本地改动。文档 PR 不自动更新现有技能链接。
 
 在新会话中使用：`使用 herdr-issue-flow 处理这些 issues`。
 
@@ -127,7 +127,7 @@ herdr-flow advisor --help
 - [V1 结果应用、后继接手与中断恢复](references/task-progress.md)
 - [CI 配置、后台运行与恢复](references/ci-monitor.md)
 - [V1 本地 PR 来源登记、同 PR 修复意图与恢复](references/pr-ledger.md)
-- [OpenCode 1.19.3 接入与限制（暂不接入 2.0）](references/opencode-v2.md)
+- [OpenCode 历史记录（已移除、不支持）](references/opencode-v2.md)
 - [V1 基础循环验收与后续边界](references/v1-acceptance.md)
 - [V2 有界合批、整合与恢复](references/batching.md)
 - [现有 GitHub Actions 驱动的有界发布](references/actions-batching.md)
@@ -158,7 +158,7 @@ herdr-flow queue readiness --state-dir /absolute/queue
 ```
 
 无模型角色检查使用同一入口加 `--spec /absolute/role-spec.json`，须从实际角色
-工具上下文运行。当前只探测所选 OpenCode receiver HTTP 或 producer 结果文件
+工具上下文运行。当前只探测 Codex producer 结果文件
 通道；沙箱等价性与仓库信任证据不足时仍为 unknown。参数、退出码和实际 writer
 盘点见[角色就绪检查](references/role-readiness.md)。
 
@@ -264,7 +264,7 @@ tests/                     集成测试
 references/                行为契约与操作文档
 ```
 
-Task-owned native Codex / OpenCode sessions, adapter-qualified producer identities
+Task-owned native Codex sessions, adapter-qualified producer identities
 and development output collection: [runtime contract](references/task-runtime.md).
 
 Fixed-version independent acceptance and four-outcome continuation:

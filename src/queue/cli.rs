@@ -671,7 +671,7 @@ fn action_readiness(root: &Path, args: &Args, factory: &ReceiverFactory) -> Resu
         let result = runtime::role::check(root, &util::read_json(path)?)?;
         return action_readiness_print(result);
     }
-    let session = crate::opencode::session::receiver_session(root)?;
+    let session = crate::identity::receiver_session(root)?;
     let result = runtime::readiness(root, session.as_deref(), factory)?;
     action_readiness_report(root, result)
 }
@@ -795,8 +795,7 @@ fn action_resolve(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Resul
 }
 
 fn action_ack(root: &Path, args: &Args, _factory: &ReceiverFactory) -> Result<Outcome> {
-    let Some(session) =
-        crate::opencode::session::receiver_session(root)?.filter(|value| !value.is_empty())
+    let Some(session) = crate::identity::receiver_session(root)?.filter(|value| !value.is_empty())
     else {
         return Err(queue_error(
             "ACK requires the registered receiving session and --delivery",
@@ -851,7 +850,7 @@ fn task_action_state(
         let identity = json!({"adapter":op.get("adapter").cloned().unwrap_or(json!("codex")),"session":op["session"]});
         Some(crate::identity::environment(&identity)?)
     } else {
-        crate::opencode::session::receiver_session(root)?
+        crate::identity::receiver_session(root)?
     };
     let state =
         super::finalization::task_action(root, &args.action, spec, session.as_deref(), factory)?;

@@ -2,13 +2,7 @@
 use super::*;
 pub mod receiver;
 mod rollout;
-use crate::opencode::http::HttpApi;
-use crate::{
-    codex::rpc::Client,
-    identity,
-    opencode::session::{Api, SessionAdapter},
-    progress, queue,
-};
+use crate::{codex::rpc::Client, identity, progress, queue};
 
 /// The packet contains current requirement references, specifications, an
 /// explicit instruction and evidence. No session transcript/fork is accepted.
@@ -128,38 +122,17 @@ fn base_state(root: &Path, runtime: &J, journal: &J) -> J {
     json!({"version":2,"adapter":runtime["adapter"],"state_dir":root,"cwd":runtime["cwd"],
         "model":runtime["model"],"approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),"auto_rotate":false,"task":journal["packet"]["binding"]["task"],
         "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":null,
-        "endpoint":format!("http://127.0.0.1:{}",runtime["port"]),"phase":"monitoring"})
+        "phase":"monitoring"})
 }
 
 fn create_native(root: &Path, runtime: &J, journal: &J) -> Result<J> {
     let mut state = base_state(root, runtime, journal);
     match runtime["adapter"].as_str() {
-        Some("opencode") => create_opencode(&mut state)?,
         Some("codex") => create_codex(root, &mut state)?,
         _ => return Err(FlowError::guard("unsupported native adapter")),
     }
     util::atomic_write_json(&root.join("state.json"), &state)?;
     Ok(state)
-}
-
-fn create_opencode(state: &mut J) -> Result<()> {
-    let api = HttpApi::from_state(state)?;
-    let health = healthy_opencode(&api)?;
-    let server_version = crate::opencode::session::health_version(&health)?;
-    state["server_version"] = json!(server_version);
-    let created = api
-        .post(
-            "/session",
-            &json!({"title":"Independent task activity","model":state["model"]}),
-        )
-        .map_err(|e| FlowError::guard(format!("native session creation: {e}")))?;
-    state["session"] = created["id"].clone();
-    SessionAdapter::new(state)?.verify_binding()?;
-    let rows = api.get(&format!("/session/{}/message", required(state, "session")?))?;
-    ensure(
-        rows.as_array().is_some_and(|r| r.is_empty()),
-        "new OpenCode session contains prior conversation",
-    )
 }
 
 pub(super) struct DirectClient {
@@ -405,10 +378,6 @@ pub(super) fn validate_queue_control(env: &TaskEnvironment, path: &Path) -> Resu
 }
 
 fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
-    if state["adapter"] == "opencode" {
-        let observed = SessionAdapter::new(state)?.server_version()?;
-        state["server_version"] = json!(observed);
-    }
     // Codex metadata was observed while verifying this thread on the broker's
     // existing connection; persist only after queue/Owner validation above.
     util::atomic_write_json(&root.join("state.json"), state)
@@ -432,18 +401,16 @@ fn recovered_state(root: &Path, journal: &J) -> Result<J> {
 }
 
 fn verify_native(root: &Path, state: &J) -> Result<J> {
-    if state["adapter"] == "opencode" {
-        SessionAdapter::new(state)?
-            .verify_binding()
-            .map(|_| J::Null)
-    } else {
-        let response = client(root)?.call_observed(
-            "thread/read",
-            &json!({"threadId":state["session"],"includeTurns":false}),
-        )?;
-        verify_thread(state, &response.result["thread"])?;
-        Ok(response.server_version)
-    }
+    ensure(
+        state["adapter"] == "codex",
+        "unsupported native adapter; only Codex is supported",
+    )?;
+    let response = client(root)?.call_observed(
+        "thread/read",
+        &json!({"threadId":state["session"],"includeTurns":false}),
+    )?;
+    verify_thread(state, &response.result["thread"])?;
+    Ok(response.server_version)
 }
 
 fn verify_queue(q: &J, journal: &J, state: &J) -> Result<()> {
@@ -564,8 +531,7 @@ fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
     ensure(diff.is_empty(), "runtime snapshot tracked contents changed")
 }
 
-/// Dispatch the immutable packet once. OpenCode's existing durable collector is
-/// reused; Codex retains a turn journal and never resumes an uncertain send.
+/// Dispatch once; retain the Codex turn journal without replaying uncertain sends.
 pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
@@ -578,9 +544,6 @@ pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
 fn dispatch_record(root: &Path, journal: &J, state: &J) -> Result<J> {
     let queue_root = PathBuf::from(required(journal, "queue_dir")?);
     let prompt = dispatch_packet(&queue_root, journal, state)?;
-    if state["adapter"] == "opencode" {
-        return dispatch_opencode(root, journal, state);
-    }
     dispatch_codex_in_queue(root, &queue_root, journal, state, &prompt)
 }
 
@@ -616,54 +579,6 @@ fn dispatch_packet(queue_root: &Path, journal: &J, state: &J) -> Result<String> 
     )?;
     Ok(prompt)
 }
-fn dispatch_opencode(root: &Path, journal: &J, state: &J) -> Result<J> {
-    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
-    ensure_receiver(&queue_root, &queue::load_queue(&queue_root)?)?;
-    let _lock = crate::guard::locked(root)?;
-    ensure(
-        !root.join("dispatch.json").exists(),
-        "native dispatch already attempted; reconcile without replay",
-    )?;
-    util::atomic_write_json(
-        &root.join("dispatch.json"),
-        &json!({"phase":"sending","session":state["session"],"packet_sha256":journal["packet_sha256"]}),
-    )?;
-    let path = root.join("input.txt");
-    util::atomic_write_bytes(&path, serde_json::to_string(&journal["packet"])?.as_bytes())?;
-    // Keep this runtime's guard lock while retrying only pre-submission lock
-    // contention. The adapter durably writes submission.json before its POST;
-    // once that file exists, even a StateBusy error must never trigger a resend.
-    retry_unsent(root, std::time::Duration::from_secs(15), || {
-        crate::opencode::session::dispatch(
-            root,
-            &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path,"lifecycle_owner":journal["lifecycle_owner"]}),
-        )
-    })
-}
-
-fn retry_unsent(
-    root: &Path,
-    timeout: std::time::Duration,
-    mut send: impl FnMut() -> Result<J>,
-) -> Result<J> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match send() {
-            Err(error) if unsent_contention(root, &error, deadline) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
-}
-
-fn unsent_contention(root: &Path, error: &FlowError, deadline: std::time::Instant) -> bool {
-    error.kind == crate::error::ErrorKind::StateBusy
-        && std::time::Instant::now() < deadline
-        && matches!(std::fs::symlink_metadata(root.join("submission.json")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-}
-
 fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J> {
     let _lock = crate::guard::locked(root)?;
     ensure(
@@ -709,11 +624,6 @@ pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let creation = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &creation)?;
     let state = util::read_state_json(root, "state.json")?;
-    if state["adapter"] == "opencode" {
-        let creation = util::read_state_json(root, "creation.json")?;
-        verify_state(&creation, &state)?;
-        return crate::opencode::session::collect(root);
-    }
     collect_codex(root, &state)
 }
 
@@ -905,21 +815,9 @@ fn ensure_receiver(root: &Path, q: &J) -> Result<()> {
     )
 }
 
-fn healthy_opencode(api: &dyn Api) -> Result<J> {
-    // The supported OpenCode 1.19.x family can accept TCP before its first HTTP handler is ready.
-    // Only this read-only readiness probe is retried, never session creation.
-    let mut last = None;
-    for _ in 0..3 {
-        match api.get("/global/health") {
-            Ok(value) => return Ok(value),
-            Err(error) => last = Some(error),
-        }
-    }
-    Err(last.unwrap())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
     fn shared_history_rejects_foreign_thread_before_reading_turns() {
         use std::io::{BufRead, BufReader, Write};
@@ -1032,66 +930,12 @@ mod tests {
         assert!(super::verify_queue_owner(&q, &changed).is_err());
     }
     #[test]
-    fn dispatch_retries_only_before_the_submission_journal() {
-        use crate::error::ErrorKind;
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("dispatch.json"), "sending").unwrap();
-        let mut calls = 0;
-        let value = retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            if calls == 1 {
-                return Err(FlowError::new(ErrorKind::StateBusy, "queue busy"));
-            }
-            std::fs::write(dir.path().join("submission.json"), "sending").unwrap();
-            Ok(json!({"sent":true}))
-        })
-        .unwrap();
-        assert_eq!(value["sent"], true);
-        assert_eq!(calls, 2);
-        assert_eq!(
-            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
-            b"sending"
-        );
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            Err(FlowError::new(
-                ErrorKind::StateBusy,
-                "busy after possible send",
-            ))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        std::fs::remove_file(dir.path().join("submission.json")).unwrap();
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            Err(FlowError::io("transport outcome unknown"))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::ZERO, || {
-            calls += 1;
-            Err(FlowError::new(ErrorKind::StateBusy, "queue busy"))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        assert_eq!(
-            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
-            b"sending"
-        );
-    }
-
-    use super::*;
-    #[test]
     fn native_development_claims_one_writer_and_recovers_only_that_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let mut q = json!({"tasks":{"d":{"writer":null}},"waits":{"w":{"task":"d","assignment":"a","lineage":{"role":"development"},"producer":{"adapter":"opencode","session":"sesdev"}}}});
+        let mut q = json!({"tasks":{"d":{"writer":null}},"waits":{"w":{"task":"d","assignment":"a","lineage":{"role":"development"},"producer":{"adapter":"codex","session":"sesdev"}}}});
         let state = json!({"cwd":dir.path(),"session":"sesdev"});
         reserve_developer(&mut q, "w", &state).unwrap();
-        assert_eq!(q["tasks"]["d"]["writer"]["producer"]["adapter"], "opencode");
+        assert_eq!(q["tasks"]["d"]["writer"]["producer"]["adapter"], "codex");
         reserve_developer(&mut q, "w", &state).unwrap();
         q["tasks"]["d"]["writer"]["producer"]["session"] = json!("other");
         assert!(reserve_developer(&mut q, "w", &state).is_err());

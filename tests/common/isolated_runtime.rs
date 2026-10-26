@@ -1,19 +1,68 @@
 //! Synthetic native protocol over real isolated queue/instance ownership.
 use super::*;
-use std::net::TcpListener;
-
-#[path = "runtime_http.rs"]
-mod http;
-
 #[test]
-#[ignore = "subprocess-only HTTP fixture; no model"]
-fn http_child() {
-    let root = PathBuf::from(std::env::var_os("HERDR_ISOLATED_HTTP_FIXTURE").unwrap());
-    let config = util::read_json(&root.join("fixture.json")).unwrap();
-    let listener =
-        TcpListener::bind(("127.0.0.1", config["port"].as_u64().unwrap() as u16)).unwrap();
+#[ignore = "subprocess-only Codex protocol fixture; no model"]
+fn rpc_child() {
+    use std::os::unix::net::UnixListener;
+    let root = PathBuf::from(std::env::var_os("HERDR_ISOLATED_RPC_FIXTURE").unwrap());
+    let config: J =
+        serde_json::from_slice(&fs::read(root.join("tmp/fixture.json")).unwrap()).unwrap();
+    let listener = UnixListener::bind(root.join("server.sock")).unwrap();
+    fs::set_permissions(root.join("server.sock"), fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(root.join("ready"), b"ready").unwrap();
-    http::serve(listener, Path::new(config["cwd"].as_str().unwrap()));
+    let session = if root.ends_with("coordinator") {
+        "22222222-2222-2222-2222-222222222222"
+    } else {
+        "11111111-1111-1111-1111-111111111111"
+    };
+    let mut turns = json!([]);
+    for stream in listener.incoming() {
+        let mut peer = rpc_server::Peer {
+            stream: stream.unwrap(),
+        };
+        peer.initialize();
+        loop {
+            use std::os::fd::AsRawFd;
+            let mut byte = [0u8];
+            // SAFETY: the stream owns its fd and byte is a live output buffer.
+            if unsafe {
+                libc::recv(
+                    peer.stream.as_raw_fd(),
+                    byte.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_PEEK,
+                )
+            } <= 0
+            {
+                break;
+            }
+            let (opcode, bytes) = peer.frame();
+            if opcode == 8 {
+                break;
+            }
+            let request: J = serde_json::from_slice(&bytes).unwrap();
+            let thread = json!({"id":session,"cwd":config["cwd"],"modelProvider":"openai","model":"fixture","turns":turns,
+                "status":{"type":"idle"},"canAcceptDirectInput":true});
+            if request["method"] == "thread/turns/list" {
+                peer.json(&json!({"id":request["id"],"error":{"code":-32601,"message":"use native events"}}));
+                continue;
+            }
+            let result = match request["method"].as_str().unwrap() {
+                "thread/start" | "thread/read" => {
+                    json!({"thread":thread,"model":"fixture","modelProvider":"openai"})
+                }
+                "turn/start" => {
+                    turns = json!([{"id":"fixture-turn","status":"completed","items":[{"type":"agentMessage","text":"synthetic review"}]}]);
+                    json!({"turn":{"id":"fixture-turn"}})
+                }
+                method => panic!("unexpected method {method}"),
+            };
+            peer.json(&json!({"id":request["id"],"result":result}));
+            if request["method"] == "turn/start" {
+                peer.json(&json!({"method":"turn/completed","params":{"threadId":session,"turn":turns[0]}}));
+            }
+        }
+    }
 }
 
 pub(super) fn linked(f: &Fixture) -> task_env::TaskEnvironment {
@@ -78,15 +127,12 @@ pub(super) fn runtime_at(
     review: Option<&str>,
 ) -> (PathBuf, FixtureChild) {
     let root = task_runtime::prepare(env, assignment).unwrap();
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    util::atomic_write_json(&root.join("fixture.json"), &json!({"cwd":cwd,"port":port})).unwrap();
+    util::atomic_write_json(&root.join("tmp/fixture.json"), &json!({"cwd":cwd})).unwrap();
     let binary = root.join("fixture-server");
-    fs::write(&binary, format!("#!/bin/sh\nexport HERDR_ISOLATED_HTTP_FIXTURE='{}'\nexec '{}' --exact isolated_runtime::http_child --ignored --nocapture\n",
+    fs::write(&binary, format!("#!/bin/sh\nexport HERDR_ISOLATED_RPC_FIXTURE='{}'\nexec '{}' --exact isolated_runtime::rpc_child --ignored --nocapture\n",
         root.display(), std::env::current_exe().unwrap().display())).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":port,
+    let mut spec = json!({"adapter":"codex","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
         "model":{"providerID":"openai","id":"fixture"}});
     if let Some(key) = review {
         spec["review_snapshot"] = json!(key);
@@ -94,7 +140,11 @@ pub(super) fn runtime_at(
     let mut child = FixtureChild(task_runtime::launch(env, &root, &spec).unwrap());
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !root.join("ready").exists() {
-        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "fixture exited: {}",
+            fs::read_to_string(root.join("server.log")).unwrap_or_default()
+        );
         assert!(
             std::time::Instant::now() < until,
             "fixture startup timed out"
@@ -208,6 +258,9 @@ fn replaced_bound_queue_is_never_adopted_or_recreated() {
     let mut env = linked(&f);
     let (root, _child) = runtime(&mut env);
     task_runtime::native::create(&env, &root, &create_spec(&f)).unwrap();
+    let broker_pid = util::read_state_json(&root, "broker-owner.json").unwrap()["pid"]
+        .as_i64()
+        .unwrap() as i32;
     let original = f.state();
     let moved = f.temp.path().join("original-queue");
     fs::rename(&f.queue, &moved).unwrap();
@@ -221,9 +274,28 @@ fn replaced_bound_queue_is_never_adopted_or_recreated() {
     );
     assert!(!f.queue.join("queue.lock").exists());
     assert!(!f.queue.join("queue.json").exists());
+    // Losing the bound queue stops the Codex broker. Reap our child before
+    // restoring the queue and restarting it; a zombie still owns its PID.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // SAFETY: this is our recorded broker child and no status pointer is used.
+        let reaped = unsafe { libc::waitpid(broker_pid, std::ptr::null_mut(), libc::WNOHANG) };
+        if reaped == broker_pid {
+            break;
+        }
+        assert_eq!(reaped, 0, "broker child could not be reaped");
+        assert!(std::time::Instant::now() < deadline, "broker did not stop");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     fs::remove_file(f.queue.join("sentinel")).unwrap();
     fs::remove_dir(&f.queue).unwrap();
     fs::rename(&moved, &f.queue).unwrap();
     assert_eq!(f.state(), original);
+    task_runtime::start_broker(&mut env, &root, &json!({})).unwrap_or_else(|error| {
+        panic!(
+            "{error}: {}",
+            fs::read_to_string(root.join("broker.log")).unwrap_or_default()
+        )
+    });
     task_runtime::native::recover(&env, &root).unwrap();
 }

@@ -120,7 +120,7 @@ fn review_snapshot_and_runtime_are_removed_by_existing_terminal_cleanup() {
         "temporary",
     )
     .unwrap();
-    f.finalize("failure").unwrap();
+    upstream_runtime::finalize_with_retry(&f);
     let report = queue::finalization::drive(&f.queue).unwrap();
     assert_eq!(report.completed, 1, "{:?}", report);
     assert!(child.0.try_wait().unwrap().is_some());
@@ -141,7 +141,7 @@ fn review_registration_refuses_arbitrary_cwd_foreign_wait_and_existing_directory
     review_activity(&f, &env);
     let root = task_runtime::prepare(&env, "review-a1").unwrap();
     let path = env.workspace_root.join("reviews/review-a1");
-    let spec = json!({"adapter":"opencode","binary":"/bin/true","cwd":path,"port":1,
+    let spec = json!({"adapter":"codex","binary":"/bin/true","cwd":path,"port":1,
         "model":{"providerID":"openai","id":"fixture"},"review_snapshot":"review-a1"});
     assert!(task_runtime::launch(&mut env, &root, &spec).is_err());
     assert!(!root.join("runtime.json").exists());
@@ -238,7 +238,7 @@ fn review_selection_never_borrows_a_developer_runtime_or_foreign_owner() {
     let request = json!({"queue_dir":f.queue,"wait":"review"});
     task_runtime::review::prepare(&mut env, &root, &request).unwrap();
     let path = env.review_workspaces["review-a1"].path.clone();
-    let base = json!({"adapter":"opencode","binary":"/bin/true","port":1,
+    let base = json!({"adapter":"codex","binary":"/bin/true","port":1,
         "model":{"providerID":"openai","id":"fixture"},"cwd":path,"review_snapshot":"review-a1"});
     for (key, value) in [
         ("cwd", json!(env.workspace_root.join("checkout"))),
@@ -315,4 +315,72 @@ fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation
     let error = observed.unwrap_err();
     assert!(error.message.contains("still running"), "{error}");
     task_runtime::review::prepare(&mut env, &root, &request).unwrap();
+}
+
+#[test]
+fn codex_review_dispatch_collect_and_duplicate_refusal() {
+    let f = Fixture::new();
+    let mut env = isolated_runtime::linked(&f);
+    review_activity(&f, &env);
+    let root = task_runtime::prepare(&env, "review-a1").unwrap();
+    let review = task_runtime::review::prepare(
+        &mut env,
+        &root,
+        &json!({"queue_dir":f.queue,"wait":"review"}),
+    )
+    .unwrap();
+    let cwd = PathBuf::from(review["cwd"].as_str().unwrap());
+    let (root, _worker) =
+        isolated_runtime::runtime_at(&mut env, "review-a1", &cwd, Some("review-a1"));
+    let created = task_runtime::native::create(
+        &env,
+        &root,
+        &json!({"queue_dir":f.queue,"wait":"review","instruction":"synthetic independent review"}),
+    )
+    .unwrap();
+    assert!(task_runtime::native::dispatch(&env, &root).is_err());
+    let coordinator_cwd = env.workspace_root.join("checkout");
+    let (coordinator, _server) =
+        isolated_runtime::runtime_at(&mut env, "coordinator", &coordinator_cwd, None);
+    let guard_root = coordinator.join("guard");
+    task_runtime::native::receiver::bootstrap(
+        &env,
+        &coordinator,
+        &json!({"guard_dir":guard_root,"task":"task","role":"coordinator"}),
+    )
+    .unwrap();
+    task_runtime::native::receiver::active::activate(
+        &mut env,
+        &coordinator,
+        &json!({"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")}),
+    )
+    .unwrap();
+    let active = util::read_state_json(&guard_root, "state.json").unwrap();
+    assert_ne!(active["session"], created["session"]);
+    let mut q = f.state();
+    q["guard_dir"] = json!(guard_root);
+    q["receiver"] = guard::scope(&active);
+    q["notify"] = json!(true);
+    queue::save(&f.queue, &mut q).unwrap();
+    let artifacts = queue::artifacts(&f.queue).unwrap();
+    util::atomic_write_json(&artifacts.join("watch.json"), &json!({"status":"running","pid":std::process::id(),"start_ticks":util::process_start_ticks(std::process::id()),"heartbeat_at":util::now(),"max_age":600})).unwrap();
+    let _watch = util::FileLock::acquire(&artifacts.join("watch.lock"), false)
+        .unwrap()
+        .unwrap();
+    let turn = task_runtime::native::dispatch(&env, &root).unwrap();
+    assert_eq!(turn["phase"], "submitted");
+    assert!(task_runtime::native::dispatch(&env, &root).is_err());
+    fs::write(cwd.join(".herdr-verdict.json"), serde_json::to_vec(&json!({"conclusion":"passed","scope":"fixed snapshot","checks":[{"id":"content","criterion":"goal","source":"fixture","status":"passed","evidence":"protocol fixture"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap()).unwrap();
+    let result = task_runtime::native::collect(&env, &root).unwrap();
+    assert_eq!(result["phase"], "signalled");
+    assert_eq!(result["outcome"], "complete");
+    assert_eq!(
+        f.state()["tasks"]["review"]["verdict"]["envelope"]["reviewer"]["adapter"],
+        "codex"
+    );
+    assert!(f.state()["tasks"]["task"]["approved"].is_null());
+    assert_eq!(
+        task_runtime::native::collect(&env, &root).unwrap()["outcome"],
+        "complete"
+    );
 }

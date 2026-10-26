@@ -67,6 +67,11 @@ pub struct Herdr {
 
 impl Herdr {
     pub fn new(state: &J) -> Result<Self> {
+        if state.get("adapter").is_some_and(|value| value != "codex") {
+            return Err(FlowError::guard(
+                "unsupported receiver adapter; only Codex is supported",
+            ));
+        }
         validate_herdr_environment()?;
         Self::from_validated_state(state)
     }
@@ -1732,9 +1737,6 @@ pub fn receiver_factory(state: &J) -> Result<Box<dyn ReceiverAdapter>> {
         ));
     }
     match model::string(state, "adapter").as_deref() {
-        Some("opencode") => Ok(Box::new(crate::opencode::session::SessionAdapter::new(
-            state,
-        )?)),
         None | Some("codex") => Ok(Box::new(Herdr::new(state)?)),
         _ => Err(FlowError::guard("unsupported receiver adapter")),
     }

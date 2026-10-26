@@ -1,5 +1,8 @@
 # Codex 原生运行启动适配
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 日期：2026-10-23。实现提交 `8e833854956b1fa0ce143be4affa697a9848fc91`，
 调查与验证基线为 `70bd58b87e5234d35211f1a4d4c81e34d1ad9e33`。
 [PR #103](https://github.com/musutrade/herdr-flow-rust/pull/103) 已合入主分支

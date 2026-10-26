@@ -141,7 +141,6 @@ fn omitted_authorization_recovery_allows_exact_frozen_lane_begin_once() {
             .arg(&root)
             .arg("--spec")
             .arg(&input_path)
-            .env_remove("OPENCODE_SESSION_ID")
             .env("CODEX_THREAD_ID", "fixture-session")
             .env("PATH", &path)
             .env("AUTH_RESPONSE", &response)

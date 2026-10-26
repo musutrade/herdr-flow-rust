@@ -1,5 +1,8 @@
 # V1 basic single-PR loop
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 > **Evidence caveat (2026-10-19 Rust audit):** the live observations below were
 > produced on 2026-10-17 by the upstream **Python** implementation, before the
 > Rust port existed. They are retained as historical reference and do **not**

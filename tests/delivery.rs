@@ -36,9 +36,9 @@ fn accepted(artifact: J) -> J {
     );
     mutate(
         &mut s,
-        json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"opencode","session":"independent"}}}),
+        json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"codex","session":"independent"}}}),
     );
-    let verdict=acceptance::submit(&mut s,"review",&json!({"adapter":"opencode","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"request","status":"passed","evidence":"checked A"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
+    let verdict=acceptance::submit(&mut s,"review",&json!({"adapter":"codex","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"request","status":"passed","evidence":"checked A"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
     let mut e = json!({"id":"result","task":"review","wait":"review","acknowledged":true,"outcome":"complete"});
     let w = s["waits"]["review"].clone();
     progress::attach(&mut s, &mut e, &w, 2.0).unwrap();

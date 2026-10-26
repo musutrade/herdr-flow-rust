@@ -1,8 +1,7 @@
 //! Upstream account configuration is not disposable task state.
 //!
 //! Do not turn a missing integration capability into a request to provision
-//! credentials. Codex connects to an existing service; OpenCode still requires
-//! its own session-resource reclamation adapter.
+//! credentials. Only Codex is supported, through an existing service.
 use super::*;
 
 pub fn status(adapter: &str) -> Result<J> {
@@ -14,22 +13,18 @@ pub fn status(adapter: &str) -> Result<J> {
                 "requires an isolated task Owner and upstream thread/delete support",
             ],
         ),
-        "opencode" => (
-            "1.19.4",
-            vec![
-                "XDG_DATA_HOME/opencode combines authentication and task data",
-                "OPENCODE_DB relocates the database, not logs, snapshots or tool output",
-                "--print-logs retains the file logger",
-            ],
-        ),
-        _ => return Err(FlowError::guard("unsupported native adapter")),
+        _ => {
+            return Err(FlowError::guard(
+                "unsupported native adapter; only Codex is supported",
+            ))
+        }
     };
     Ok(json!({
         "adapter":adapter,"inspected_version":baseline,
-        "configuration_owner":"upstream","supported":adapter == "codex",
-        "connection":if adapter == "codex" {"existing-unix-app-server"} else {"not-implemented"},
+        "configuration_owner":"upstream","supported":true,
+        "connection":"existing-unix-app-server",
         "real_task_acceptance":false,
-        "reason":if adapter == "codex" {"explicit_endpoint_required"} else {"session_cleanup_adapter_missing"},
+        "reason":"explicit_endpoint_required",
         "blockers":blockers,
         "account_observed":false,"model_request_sent":false,
         "fixture_is_acceptance":false
@@ -53,11 +48,10 @@ pub(super) fn validate_launch(spec: &J) -> Result<()> {
     status(&adapter)?;
     match spec.get("configuration") {
         None => require_upstream(&adapter),
-        Some(J::String(mode)) if mode == "upstream" && adapter == "codex" => {
+        Some(J::String(mode)) if mode == "upstream" => {
             required(spec, "socket")?;
             Ok(())
         },
-        Some(J::String(mode)) if mode == "upstream" => require_upstream(&adapter),
         Some(J::String(mode)) if mode == "isolated-fixture" => Ok(()),
         _ => Err(FlowError::guard(
             "configuration must be upstream or isolated-fixture; credentials are not launch configuration",
@@ -71,7 +65,8 @@ mod tests {
 
     #[test]
     fn unsupported_modes_never_fall_back_to_a_private_login() {
-        for adapter in ["codex", "opencode"] {
+        {
+            let adapter = "codex";
             let report = status(adapter).unwrap();
             assert_eq!(report["supported"], adapter == "codex");
             assert_eq!(report["account_observed"], false);

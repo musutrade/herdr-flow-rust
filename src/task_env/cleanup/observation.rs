@@ -20,7 +20,7 @@ fn observe(record: &ProcessRecord) -> io::Result<bool> {
         Ok(stat) => matches_identity(record, &stat),
         // A hidden/missing proc mount is not proof of exit. Require the kernel
         // to confirm absence; a live pidfd leaves the original error intact.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        Err(error) if missing_proc(&error) => {
             if super::signals::open(record.pid)?.is_none() {
                 Ok(false)
             } else {
@@ -29,6 +29,12 @@ fn observe(record: &ProcessRecord) -> io::Result<bool> {
         }
         Err(error) => Err(error),
     }
+}
+
+// procfs can return ESRCH after opening a stat file whose process exits.
+// Neither this error nor ENOENT alone proves absence: callers check pidfd_open.
+pub(super) fn missing_proc(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 fn read_stat(pid: i32) -> io::Result<String> {
@@ -146,6 +152,7 @@ mod tests {
             StatFault::Read(libc::EACCES),
             StatFault::Read(libc::EIO),
             StatFault::Read(libc::ENOENT),
+            StatFault::Read(libc::ESRCH),
             StatFault::Text("malformed stat".into()),
         ]
     }

@@ -576,8 +576,8 @@ fn managed_fixture_spawn_registers_under_permit_and_closing_refuses_new_spawn() 
     fs::write(&binary, b"#!/bin/sh\nexec sleep 30\n").unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     // This synthetic executable ignores server arguments; no model or HTTP server.
-    let spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,
-        "cwd":env.workspace_root.join("checkout"),"port":1,
+    let spec = json!({"adapter":"codex","configuration":"isolated-fixture","binary":binary,
+        "cwd":env.workspace_root.join("checkout"),"driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
         "model":{"providerID":"fixture","id":"no-model"}});
     let mut child = FixtureChild(task_runtime::launch(&mut env, &root, &spec).unwrap());
     let owner = task_env::isolation::owner(&env).unwrap();

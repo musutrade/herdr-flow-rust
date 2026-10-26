@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-activate|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-activate|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -124,7 +124,8 @@ mod tests {
             );
         }
         assert_eq!(cli(&["--help".into()]), 0);
-        for adapter in ["codex", "opencode"] {
+        {
+            let adapter = "codex";
             let report = run(&[
                 "configuration-status".into(),
                 "--adapter".into(),

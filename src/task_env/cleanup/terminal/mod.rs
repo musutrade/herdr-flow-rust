@@ -777,6 +777,26 @@ mod tests {
     }
 
     #[test]
+    fn transient_marker_denial_rechecks_identity_and_preserves_foreign_processes() {
+        for marked in [false, true] {
+            let f = Fixture::new();
+            let owner = f.create();
+            let mut worker = ReadyWorker::new(marked.then_some(owner.instance_id.as_str()));
+            f.record(&owner);
+            let _fault = super::process::faults::inject_times(worker.pid(), true, libc::EACCES, 2);
+            let report = queue::finalization::drive(&f.queue).unwrap();
+            assert_eq!(super::process::faults::remaining(), 0);
+            assert_eq!(report.completed, 1, "{report:?}");
+            if marked {
+                worker.0.wait().unwrap();
+            } else {
+                assert!(worker.0.try_wait().unwrap().is_none());
+            }
+            f.clean(&owner);
+        }
+    }
+
+    #[test]
     fn precreation_process_exclusion_never_applies_to_known_or_equal_tick_records() {
         let worker = ReadyWorker::new(None);
         // Ensure the unrelated worker is strictly older than the captured floor.
@@ -1614,10 +1634,10 @@ fi
         );
         lineage_step(
             f,
-            json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"opencode","session":"independent"}}}),
+            json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"codex","session":"independent"}}}),
         );
         let mut s = f.state();
-        let verdict = acceptance::submit(&mut s,"review",&json!({"adapter":"opencode","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"fixture request","status":"passed","evidence":"protocol fixture only"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
+        let verdict = acceptance::submit(&mut s,"review",&json!({"adapter":"codex","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"fixture request","status":"passed","evidence":"protocol fixture only"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
         let mut event = json!({"id":"result","task":"review","wait":"review","acknowledged":true,"outcome":"complete"});
         let wait = s["waits"]["review"].clone();
         event["epoch"] = wait["epoch"].clone();

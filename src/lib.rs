@@ -18,7 +18,6 @@ pub mod lint_policy;
 pub mod logging;
 pub mod metrics;
 pub mod model;
-pub mod opencode;
 pub mod pr;
 pub mod progress;
 pub mod queue;

@@ -22,8 +22,11 @@ fn exercise(lost_reply: bool) {
     let server_cwd = cwd.clone();
     let server_queue = f.queue.clone();
     let mut index = 0;
-    let server = rpc_server::Server::start_connections(
+    // The shared service must survive all durable cleanup phases before the
+    // next deletion/retry connection; it is not a 15-second one-shot RPC peer.
+    let server = rpc_server::Server::start_connections_with_timeout(
         if lost_reply { 4 } else { 3 },
+        std::time::Duration::from_secs(60),
         move |mut peer| {
             peer.initialize();
             let request = peer.request();
@@ -32,7 +35,7 @@ fn exercise(lost_reply: bool) {
                 peer.json(&json!({"id":request["id"],"result":{
                 "thread":{"id":OWNED,"cwd":server_cwd,"modelProvider":"openai","turns":[]},
                 "model":"fixture","modelProvider":"openai"}}));
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 while wait.try_recv().is_err() {
                     assert!(std::time::Instant::now() < deadline);
                     if !readable(&peer) {
@@ -165,7 +168,10 @@ fn exercise(lost_reply: bool) {
         let _lock = queue::locked(&f.queue, false).unwrap();
         queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Four durable tool transactions share CPU/IO with process-lifecycle tests.
+    // Keep a bounded deadline below the server's, and require every real reply.
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(15);
     let mut responses = vec![];
     while responses.len() < 4 {
         {
@@ -173,9 +179,19 @@ fn exercise(lost_reply: bool) {
             queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
         }
         responses.extend(received.try_iter());
-        assert!(std::time::Instant::now() < deadline, "tool bridge timeout");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tool bridge timeout after {:?}: {} of 4 replies; journal: {:?}",
+            started.elapsed(),
+            responses.len(),
+            util::read_state_json(&root, "broker-tools.json")
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    eprintln!(
+        "fixture received all four tool replies after {:?}",
+        started.elapsed()
+    );
     assert_eq!(responses[0]["id"], 100);
     assert_eq!(responses[0]["result"]["success"], true);
     assert_eq!(responses[1]["id"], 101);
@@ -210,7 +226,8 @@ fn exercise(lost_reply: bool) {
         assert_eq!(report.pending, 1, "{report:?}");
         assert!(root.exists());
         assert!(task_env::is_registered("task").unwrap());
-        assert_eq!(queue::finalization::drive(&f.queue).unwrap().pending, 0);
+        let retry = queue::finalization::drive(&f.queue).unwrap();
+        assert_eq!(retry.pending, 0, "{retry:?}");
     } else {
         assert_eq!(report.pending, 0, "{report:?}");
     }

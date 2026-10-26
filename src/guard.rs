@@ -75,9 +75,6 @@ pub fn scope(g: &J) -> J {
         "socket": g.get("socket").cloned().unwrap_or(Value::Null),
         "cwd": g.get("cwd").cloned().unwrap_or(Value::Null)
     });
-    if crate::opencode::session::is_registered(g) {
-        scope["opencode"] = json!({"endpoint":g["endpoint"],"session":g["session"],"model":g["model"],"server_version":g["server_version"]});
-    }
     if crate::task_runtime::native::receiver::is_task_owned(g) {
         scope["codex_runtime"] = json!({"adapter":g["adapter"],"session":g["session"],
             "runtime":g["runtime"],"instance":g["instance"],"cwd":g["cwd"],"model":g["model"]});

@@ -104,51 +104,6 @@ fn local(spec: &J) -> Result<J> {
     executable(spec)
 }
 
-fn receiver(queue: &J, spec: &J) -> Result<J> {
-    let root = PathBuf::from(text(queue, "guard_dir")?);
-    let _lock = crate::guard::locked_existing(&root)?;
-    let state = util::read_state_json(&root, "state.json")?;
-    receiver_identity(queue, spec, &state)?;
-    receiver_channel(&state)
-}
-
-fn receiver_identity(queue: &J, spec: &J, state: &J) -> Result<()> {
-    require(
-        crate::runtime::scope(state) == queue["receiver"],
-        "identity_mismatch",
-    )?;
-    require(
-        state["session"] == spec["identity"]["session"],
-        "identity_mismatch",
-    )?;
-    require(state["cwd"] == spec["cwd"], "cwd_mismatch")?;
-    require(state["adapter"] == "opencode", "unsupported_channel")?;
-    require(spec["model"].is_object(), "missing_configuration")?;
-    require(state["model"] == spec["model"], "identity_mismatch")?;
-    require(
-        state["endpoint"] == text(spec, "endpoint")?,
-        "endpoint_mismatch",
-    )?;
-    Ok(())
-}
-
-fn receiver_channel(state: &J) -> Result<J> {
-    let adapter = crate::opencode::session::SessionAdapter::new(state)?;
-    adapter.verify_binding()?;
-    Ok(json!({"status":"ready","path":"opencode_http",
-        "endpoint":state["endpoint"],"protocol":"health_and_exact_session_read",
-        "authentication_source":authentication_source(),
-        "model_execution":"not_probed","permission_to_prompt":"unknown"}))
-}
-
-fn authentication_source() -> &'static str {
-    if std::env::var_os("OPENCODE_SERVER_PASSWORD").is_some() {
-        "OPENCODE_SERVER_PASSWORD"
-    } else {
-        "none"
-    }
-}
-
 fn producer(root: &Path, queue: &J, spec: &J) -> Result<J> {
     let wait = text(spec, "wait")?;
     let record = &queue["waits"][wait];
@@ -181,13 +136,6 @@ fn probe_write(dir: &Path) -> Result<()> {
 
 fn channel(root: &Path, queue: &J, spec: &J) -> Result<J> {
     match text(spec, "role")? {
-        "receiver" => {
-            require(
-                spec["identity"]["adapter"] == "opencode",
-                "unsupported_channel",
-            )?;
-            receiver(queue, spec)
-        }
         "producer" => producer(root, queue, spec),
         _ => Err(FlowError::usage("unsupported_channel")),
     }
@@ -195,11 +143,8 @@ fn channel(root: &Path, queue: &J, spec: &J) -> Result<J> {
 
 fn category(error: &FlowError) -> &str {
     match error.kind {
-        ErrorKind::Authentication => "authentication_failed",
         ErrorKind::PolicyDenied => "policy_denied",
-        ErrorKind::Transport => "transport_failure",
-        ErrorKind::Timeout | ErrorKind::RpcTimeout => "timeout",
-        ErrorKind::IdentityMismatch => "identity_mismatch",
+        ErrorKind::Timeout => "timeout",
         ErrorKind::Usage => usage_category(&error.message),
         _ => "unknown",
     }

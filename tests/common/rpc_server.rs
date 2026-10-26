@@ -22,7 +22,15 @@ impl Server {
         Self::start_connections(1, move |peer| run.take().unwrap()(peer))
     }
 
-    pub fn start_connections(count: usize, mut run: impl FnMut(Peer) + Send + 'static) -> Self {
+    pub fn start_connections(count: usize, run: impl FnMut(Peer) + Send + 'static) -> Self {
+        Self::start_connections_with_timeout(count, Duration::from_secs(15), run)
+    }
+
+    pub fn start_connections_with_timeout(
+        count: usize,
+        accept_timeout: Duration,
+        mut run: impl FnMut(Peer) + Send + 'static,
+    ) -> Self {
         let directory = super::common::tempdir().unwrap();
         let path = directory.path().join("rpc.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -30,7 +38,7 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let task = thread::spawn(move || {
             for _ in 0..count {
-                let deadline = Instant::now() + Duration::from_secs(15);
+                let deadline = Instant::now() + accept_timeout;
                 let stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,

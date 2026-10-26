@@ -36,7 +36,6 @@ fn readiness_report(
         "context_telemetry": false,
         "safe_rotation": false,
         "role_context": "unknown",
-        "opencode_safe_rotation": "unsupported",
         "gaps": gaps.clone(),
         "next_steps": next_steps.clone(),
         "producer_channels": producer_channels,
@@ -214,7 +213,7 @@ fn level_known(state: &J) -> bool {
 }
 
 fn context_telemetry(state: &J) -> bool {
-    if crate::opencode::session::is_registered(state) {
+    if state.get("adapter").is_some_and(|value| value != "codex") {
         return false;
     }
     model::get(state, "usage")
@@ -385,7 +384,7 @@ fn push_session_gap(session: Option<&str>, gaps: &mut Vec<String>, next_steps: &
     if session.is_none() {
         gaps.push("current receiver session is required".to_string());
         next_steps.push(
-            "run from the exact receiving session (CODEX_THREAD_ID for Codex; OPENCODE_SESSION_ID for OpenCode); do not borrow another pane"
+            "run from the exact receiving session (CODEX_THREAD_ID for Codex); do not borrow another pane"
                 .to_string(),
         );
     }

@@ -860,7 +860,13 @@ fn retiring_receiver_fixture_at_checkpoint(
         "state_version":version,"outcome":"failure","reason":"receiver owner explicitly retired"}),
     )
     .unwrap();
-    assert!(f.state()["tasks"][&b.task_id].is_null());
+    assert!(
+        f.state()["tasks"][&b.task_id].is_null(),
+        "pending receiver cleanup: {:?}",
+        task_env::cleanup_state_path(&b.task_id)
+            .ok()
+            .and_then(|path| util::read_json(&path).ok())
+    );
     assert!(!receiver.exists());
     assert!(!task_env::is_registered(&b.task_id).unwrap());
     assert!(!queue::artifacts(&f.queue)

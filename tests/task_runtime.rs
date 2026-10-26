@@ -4,24 +4,6 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path, process::Command};
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-const UNAVAILABLE_DEPENDENCY: &str = "required-dependency-fixture";
-const UNAVAILABLE_DEPENDENCY_SOURCE: &str = "Operator-provided acceptance validation requires executable ./required-dependency-fixture --check; it is not part of the developer artifact.";
-const AMBIGUOUS_ORIGINAL: &str =
-    "Original requirement reference: the delivered file must contain exactly version A.";
-const AMBIGUOUS_CHANGE: &str = "Confirmed change reference: the delivered file must contain exactly version B; this reference does not state that it supersedes or takes precedence over the original.";
-const AMBIGUOUS_SPECIFICATION: &str = "Project specification: both conflicting content statements above remain binding, and no precedence or resolution between them is stated.";
-const AMBIGUOUS_CONFIRMATION: &str = "Operator confirmation identifies both content references as current but does not choose between version A and version B.";
-const AMBIGUOUS_AUTHORIZATION_SOURCE: &str =
-    "Existing operator authorization for independent acceptance review of the fixed artifact.";
-const CONFIRMED_REVISION_DEVELOP_AUTHORIZATION_SOURCE: &str =
-    "Newly configured disposable fixture authority derived from the user's standing authorization to implement this confirmed-revision scenario; it is not historical phase-1 authority.";
-const CONFIRMED_REVISION_USER_CHOICE: &str =
-    "User explicitly accepted the recommendation on 2026-10-23: for the disposable conflicting fixture, the subsequent version B change overrides the original version A requirement.";
-const CONFIRMED_REVISION_PRECEDENCE: &str =
-    "Confirmed revision precedence: the subsequent confirmed version B change overrides the original version A reference for this disposable fixture.";
-const CONFIRMED_REVISION_SPECIFICATION: &str =
-    "Confirmed revision specification: the user's version B decision supersedes the earlier no-precedence confirmation for this disposable fixture.";
-
 struct OwnedEnvironment {
     env: Option<TaskEnvironment>,
     cleanup_on_drop: bool,
@@ -126,9 +108,6 @@ impl HandoffGuard {
             }
         }
     }
-    fn disarm(mut self) {
-        self.armed = false;
-    }
 }
 impl Drop for HandoffGuard {
     fn drop(&mut self) {
@@ -152,13 +131,6 @@ fn environment_with(root: &Path, task_id: &str, targets: Vec<DeliveryTarget>) ->
 }
 fn environment(root: &Path) -> OwnedEnvironment {
     environment_with(root, "runtime-test", vec![])
-}
-fn environment_project(root: &Path, target: &Path) -> OwnedEnvironment {
-    environment_with(
-        root,
-        "project",
-        vec![DeliveryTarget::new(target.to_path_buf(), "git".into())],
-    )
 }
 fn temp() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -189,31 +161,12 @@ fn setup_in_queue(
     role: &str,
     q: &Path,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
-    setup_in_queue_inner(env, role, q, None, None)
-}
-fn setup_in_queue_with_apply_timeout(
-    env: &TaskEnvironment,
-    role: &str,
-    q: &Path,
-    apply_timeout_seconds: Option<f64>,
-) -> (std::path::PathBuf, std::path::PathBuf) {
-    setup_in_queue_inner(env, role, q, apply_timeout_seconds, None)
-}
-fn setup_in_queue_with_unavailable_dependency(
-    env: &TaskEnvironment,
-    role: &str,
-    q: &Path,
-    dependency: &str,
-    apply_timeout_seconds: Option<f64>,
-) -> (std::path::PathBuf, std::path::PathBuf) {
-    setup_in_queue_inner(env, role, q, apply_timeout_seconds, Some(dependency))
+    setup_in_queue_inner(env, role, q)
 }
 fn setup_in_queue_inner(
     env: &TaskEnvironment,
     role: &str,
     q: &Path,
-    apply_timeout_seconds: Option<f64>,
-    unavailable_dependency: Option<&str>,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = env.workspace_root.join("source");
     common::create_dir_all(&source).unwrap();
@@ -245,15 +198,11 @@ fn setup_in_queue_inner(
         ("reviewer", "review")
     };
     let mut state = queue::load_queue(q).unwrap();
-    let mut original = vec![json!(if role == "development" {
+    let original = vec![json!(if role == "development" {
         "change file to version B and commit locally"
     } else {
         "file must contain version A"
     })];
-    if let Some(dependency) = unavailable_dependency {
-        assert_eq!(dependency, UNAVAILABLE_DEPENDENCY);
-        original.push(json!(UNAVAILABLE_DEPENDENCY_SOURCE));
-    }
     let plan = json!({"kind":"plan","task":"project","goal":"verify file",
         "basis":{"original":original,"changes":[],"specifications":[],"endpoint":"user delivery","confirmation":"user"},
         "authorization":[{"id":"verify","action":"review","source":"user"}]});
@@ -267,11 +216,8 @@ fn setup_in_queue_inner(
         state["tasks"]["project"]["requirements"]["1"]["authorization"]["develop"] =
             json!({"action":"development","source":"explicit disposable native development test"});
     }
-    let mut activity = json!({"kind":"activity","activity":"review","role":role,"input":sha,"session_epoch":1,
+    let activity = json!({"kind":"activity","activity":"review","role":role,"input":sha,"session_epoch":1,
         "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":wait_owner,"reason":wait_reason,"condition":"report","timeout_seconds":600}});
-    if let Some(timeout) = apply_timeout_seconds {
-        activity["apply_timeout_seconds"] = json!(timeout);
-    }
     for spec in [
         json!({"kind":"artifact","artifact":{"id":sha,"adapter":"git","location":source}}),
         json!({"kind":"candidate","candidate":sha,"reason":"review"}),
@@ -284,124 +230,6 @@ fn setup_in_queue_inner(
     }
     queue::save(q, &mut state).unwrap();
     (q.to_path_buf(), cwd)
-}
-
-fn setup_in_queue_with_confirmed_revision_fixture(env: &TaskEnvironment, q: &Path) -> J {
-    let source = env.workspace_root.join("source");
-    common::create_dir_all(&source).unwrap();
-    git(&source, &["init", "-q"]);
-    git(&source, &["config", "user.name", "Test"]);
-    git(&source, &["config", "user.email", "test@example.invalid"]);
-    fs::write(source.join("file"), "version A").unwrap();
-    git(&source, &["add", "file"]);
-    git(&source, &["commit", "-qm", "A"]);
-    let sha = git(&source, &["rev-parse", "HEAD"]);
-    let now = herdr_flow::util::now();
-    let mut state = queue::load_queue(q).unwrap();
-    let plan = json!({
-        "kind":"plan", "task":"project",
-        "goal":"Review the fixed file against all current requirement references",
-        "basis":{
-            "original":[AMBIGUOUS_ORIGINAL],
-            "changes":[AMBIGUOUS_CHANGE],
-            "specifications":[AMBIGUOUS_SPECIFICATION],
-            "endpoint":"disposable acceptance endpoint",
-            "confirmation":AMBIGUOUS_CONFIRMATION
-        },
-        "authorization":[
-            {"id":"verify","action":"review","source":AMBIGUOUS_AUTHORIZATION_SOURCE},
-            {"id":"develop","action":"development","source":CONFIRMED_REVISION_DEVELOP_AUTHORIZATION_SOURCE}
-        ]
-    });
-    progress::lineage::action(&mut state, &plan, now).unwrap();
-    let artifact = json!({"id":sha,"adapter":"git","location":source});
-    let mut spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
-    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
-    progress::lineage::action(&mut state, &spec, now).unwrap();
-    queue::save(q, &mut state).unwrap();
-    artifact
-}
-
-fn setup_in_queue_with_ambiguous_requirement(env: &TaskEnvironment, q: &Path) -> J {
-    let source = env.workspace_root.join("source");
-    common::create_dir_all(&source).unwrap();
-    git(&source, &["init", "-q"]);
-    git(&source, &["config", "user.name", "Test"]);
-    git(&source, &["config", "user.email", "test@example.invalid"]);
-    fs::write(source.join("file"), "version A").unwrap();
-    git(&source, &["add", "file"]);
-    git(&source, &["commit", "-qm", "A"]);
-    let sha = git(&source, &["rev-parse", "HEAD"]);
-    let now = herdr_flow::util::now();
-    let mut state = queue::load_queue(q).unwrap();
-    let plan = json!({
-        "kind":"plan", "task":"project",
-        "goal":"Review the fixed file against all current requirement references",
-        "basis":{
-            "original":[AMBIGUOUS_ORIGINAL],
-            "changes":[AMBIGUOUS_CHANGE],
-            "specifications":[AMBIGUOUS_SPECIFICATION],
-            "endpoint":"disposable acceptance endpoint",
-            "confirmation":AMBIGUOUS_CONFIRMATION
-        },
-        "authorization":[{"id":"verify","action":"review","source":AMBIGUOUS_AUTHORIZATION_SOURCE}]
-    });
-    progress::lineage::action(&mut state, &plan, now).unwrap();
-    let artifact = json!({"id":sha,"adapter":"git","location":source});
-    let mut spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
-    spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
-    progress::lineage::action(&mut state, &spec, now).unwrap();
-    queue::save(q, &mut state).unwrap();
-    artifact
-}
-
-fn setup_in_queue_with_concurrent_activities(env: &TaskEnvironment, q: &Path) -> J {
-    let source = env.workspace_root.join("source");
-    common::create_dir_all(&source).unwrap();
-    git(&source, &["init", "-q"]);
-    git(&source, &["config", "user.name", "Test"]);
-    git(&source, &["config", "user.email", "test@example.invalid"]);
-    fs::write(source.join("file"), "version A").unwrap();
-    git(&source, &["add", "file"]);
-    git(&source, &["commit", "-qm", "A"]);
-    let sha = git(&source, &["rev-parse", "HEAD"]);
-    let now = herdr_flow::util::now();
-    let mut state = queue::load_queue(q).unwrap();
-    let plan = json!({
-        "kind":"plan", "task":"project",
-        "goal":"Verify fixed version A while development may produce a successor",
-        "basis":{"original":["file must contain version A"],"changes":[],"specifications":[],
-            "endpoint":"disposable acceptance endpoint","confirmation":"user"},
-        "authorization":[
-            {"id":"verify","action":"review","source":"operator verification authorization"},
-            {"id":"develop","action":"development","source":"operator development authorization"}
-        ]
-    });
-    progress::lineage::action(&mut state, &plan, now).unwrap();
-    let artifact = json!({"id":sha,"adapter":"git","location":source});
-    let mut artifact_spec = json!({"kind":"artifact","task":"project","artifact":artifact.clone()});
-    artifact_spec["state_version"] = state["tasks"]["project"]["state_version"].clone();
-    progress::lineage::action(&mut state, &artifact_spec, now).unwrap();
-    let mut candidate =
-        json!({"kind":"candidate","task":"project","candidate":sha,"reason":"fixed A"});
-    candidate["state_version"] = state["tasks"]["project"]["state_version"].clone();
-    progress::lineage::action(&mut state, &candidate, now).unwrap();
-    for (name, role, owner, assignment) in [
-        ("accept-a", "acceptance", "reviewer", "accept-a-a1"),
-        ("develop-b", "development", "developer", "develop-b-a1"),
-    ] {
-        let mut activity = json!({
-            "kind":"activity", "task":"project", "activity":name, "role":role,
-            "input":sha, "session_epoch":1,
-            "result_wait":{"id":name,"task":name,"kind":"signal","epoch":1,
-                "assignment":assignment,"owner":owner,"reason":"native role result",
-                "condition":"terminal report","timeout_seconds":600}
-        });
-        activity["state_version"] = state["tasks"]["project"]["state_version"].clone();
-        progress::lineage::action(&mut state, &activity, now).unwrap();
-    }
-    queue::save(q, &mut state).unwrap();
-    artifact
 }
 
 #[test]
@@ -445,7 +273,7 @@ fn native_launch_does_not_silently_replace_upstream_authentication() {
     let temp = temp();
     let mut env = environment(temp.path());
     let root = task_runtime::prepare(&env, "configuration-policy").unwrap();
-    let spec = json!({"adapter":"opencode","binary":"/bin/true",
+    let spec = json!({"adapter":"codex","binary":"/bin/true",
         "cwd":env.workspace_root,"port":1,"model":{"providerID":"fixture","id":"fixture"}});
     let outcome = task_runtime::launch(&mut env, &root, &spec);
     let rejected = match outcome {
@@ -552,139 +380,11 @@ fn input_packet_pins_current_requirements_and_excludes_developer_transcript() {
     destroy_environment(&env).unwrap();
 }
 
-#[test]
-#[ignore = "requires installed Codex and OpenCode 1.19.3; creates and deletes real dedicated sessions"]
-fn installed_fresh_sessions_are_bound_and_entirely_destroyed() {
-    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    for adapter in ["opencode", "codex"] {
-        if std::env::var("HERDR_LIVE_ADAPTER").is_ok_and(|v| v != adapter) {
-            continue;
-        }
-        let temp = temp();
-        let mut env = environment(temp.path());
-        let role = std::env::var("HERDR_LIVE_ROLE").unwrap_or("acceptance".into());
-        let (q, cwd) = setup(&env, &role);
-        git(&cwd, &["config", "user.name", "Native fixture"]);
-        git(&cwd, &["config", "user.email", "native@example.invalid"]);
-
-        let root = task_runtime::prepare(&env, "review-a1").unwrap();
-        task_runtime::configuration::require_upstream(adapter).unwrap();
-        let binary =
-            std::env::var(format!("HERDR_LIVE_{}_BINARY", adapter.to_uppercase())).unwrap();
-        let model: J = serde_json::from_str(
-            &std::env::var(format!("HERDR_LIVE_{}_MODEL", adapter.to_uppercase())).unwrap(),
-        )
-        .unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let spec = json!({"adapter":adapter,"approval_policy":if role=="development" {"on-request"} else {"untrusted"},"driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),"binary":binary,"cwd":cwd,"model":model,"port":port});
-        let mut child = task_runtime::launch(&mut env, &root, &spec).unwrap();
-        let result = (|| -> herdr_flow::Result<()> {
-            // Startup observation is bounded; creation itself is never retried.
-            for _ in 0..100 {
-                if adapter == "codex" && fs::symlink_metadata(root.join("server.sock")).is_ok() {
-                    break;
-                }
-                if adapter == "opencode"
-                    && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-                {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let state = task_runtime::native::create(
-                &env,
-                &root,
-                &json!({"queue_dir":q,"wait":"review","instruction":if role=="development" {"In this temporary repository, replace file with exactly version B and create one local Git commit. You are authorized to edit and commit here. Do not contact external services or change global configuration. Report the resulting commit."} else {"Describe the requirement and propose independent acceptance checks using only the supplied packet. Do not use tools or ask questions. Do not claim acceptance passed."}}),
-            )?;
-            assert_eq!(state["adapter"], adapter);
-            assert!(state["session"].as_str().is_some_and(|s| !s.is_empty()));
-            assert!(task_runtime::native::create(
-                &env,
-                &root,
-                &json!({"queue_dir":q,"wait":"review","instruction":"duplicate"})
-            )
-            .is_err());
-            task_runtime::native::recover(&env, &root)?;
-            if std::env::var("HERDR_LIVE_INFERENCE").as_deref() == Ok("1") {
-                let coord_root = task_runtime::prepare(&env, "coordinator-fixture")?;
-                let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-                let coord_port = listener.local_addr()?.port();
-                drop(listener);
-                let binary = fixture_binary(&coord_root, &cwd, coord_port);
-                let _coord_child = task_runtime::launch(
-                    &mut env,
-                    &coord_root,
-                    &json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":coord_port,"model":{"providerID":"openai","id":"fixture"}}),
-                )?;
-                for _ in 0..100 {
-                    if coord_root.join("server.sock").exists() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                let (_g, _q) = receiver(&env, &q, &cwd, coord_port);
-                task_runtime::native::dispatch(&env, &root)?;
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-                loop {
-                    let result = task_runtime::native::collect(&env, &root)?;
-                    if result["phase"] == "signalled" {
-                        if result["outcome"] != "complete" {
-                            return Err(herdr_flow::FlowError::guard(format!(
-                                "native response was not complete: {}",
-                                result
-                            )));
-                        }
-                        if role == "development" {
-                            assert_ne!(result["output"]["id"], result["output"]["input"]);
-                            assert_eq!(result["output"]["id"], git(&cwd, &["rev-parse", "HEAD"]));
-                            assert_eq!(fs::read_to_string(cwd.join("file"))?.trim(), "version B");
-                            println!("live {adapter}: native tool execution created a new Git output commit");
-                        }
-                        println!("live {adapter}: actual model response collected, coordinator is a protocol fixture");
-                        break;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(herdr_flow::FlowError::guard(format!(
-                            "native response unresolved: {}",
-                            result["phase"]
-                        )));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            }
-            let queue = queue::load_queue(&q)?;
-            assert_eq!(
-                queue["waits"]["review"]["producer"]["session"],
-                state["session"]
-            );
-            Ok(())
-        })();
-        if result.is_err() {
-            eprintln!(
-                "{adapter}: {:?}; log: {}",
-                result,
-                fs::read_to_string(root.join("server.log")).unwrap_or_default()
-            );
-        }
-        destroy_environment(&env).unwrap();
-        let _ = child.wait();
-        assert!(!root.exists());
-        assert!(!is_registered("runtime-test").unwrap());
-        result.unwrap();
-        println!("live {adapter}: fresh session, exact binding, recovery and whole environment destruction passed");
-    }
-}
-
 pub mod common;
 #[path = "common/receiver_bootstrap.rs"]
 mod receiver_bootstrap;
 #[path = "common/rpc_server.rs"]
 mod rpc_fixture;
-#[path = "common/runtime_http.rs"]
-mod runtime_http;
 
 #[test]
 #[ignore = "subprocess-only protocol fixture, not a real agent"]
@@ -692,15 +392,9 @@ fn native_fixture_worker() {
     use std::os::unix::net::UnixListener;
     let root = std::path::PathBuf::from(std::env::var("HERDR_RUNTIME_FIXTURE").unwrap());
     let config: J = serde_json::from_slice(&fs::read(root.join("fixture.json")).unwrap()).unwrap();
-    let http = std::net::TcpListener::bind(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
-        .unwrap();
-    let port = http.local_addr().unwrap().port();
-    let cwd = std::path::PathBuf::from(config["cwd"].as_str().unwrap());
-    std::thread::spawn(move || runtime_http::serve(http, &cwd));
     let listener = UnixListener::bind(root.join("server.sock")).unwrap();
     fs::set_permissions(root.join("server.sock"), fs::Permissions::from_mode(0o600)).unwrap();
-    herdr_flow::util::atomic_write_json(&root.join("fixture-ready.json"), &json!({"port":port}))
-        .unwrap();
+    fixture_write(&root.join("fixture-ready.json"), &json!({"ready":true})).unwrap();
     let thread = json!({"id":"11111111-1111-1111-1111-111111111111","cwd":config["cwd"],"modelProvider":"openai","model":"fixture","turns":[]});
     let mut saved = thread;
     for stream in listener.incoming() {
@@ -733,24 +427,26 @@ fn native_fixture_worker() {
                 break;
             }
             let request: J = serde_json::from_slice(&payload).unwrap();
-            if let Ok(control) = herdr_flow::util::read_json(&root.join("receiver-fixture.json")) {
-                let mut calls = herdr_flow::util::read_json(&root.join("receiver-calls.json"))
-                    .unwrap_or(json!([]));
+            if let Ok(control) = fixture_read(&root.join("receiver-fixture.json")) {
+                let mut calls =
+                    fixture_read(&root.join("receiver-calls.json")).unwrap_or(json!([]));
                 calls.as_array_mut().unwrap().push(request.clone());
-                herdr_flow::util::atomic_write_json(&root.join("receiver-calls.json"), &calls)
-                    .unwrap();
+                fixture_write(&root.join("receiver-calls.json"), &calls).unwrap();
                 assert_eq!(
                     request["method"], "thread/start",
                     "bootstrap must not send turns"
                 );
-                let journal = herdr_flow::util::read_json(&root.join("receiver.json")).unwrap();
+                let journal = fixture_read(&root.join("receiver.json")).unwrap();
                 assert_eq!(journal["phase"], "creating", "intent must precede request");
                 for lock_root in [&root, Path::new(journal["guard_dir"].as_str().unwrap())] {
-                    assert!(
-                        herdr_flow::util::FileLock::acquire(&lock_root.join("guard.lock"), false)
-                            .unwrap()
-                            .is_none(),
-                        "bootstrap must retain both locks during the request"
+                    let file = fs::File::open(lock_root.join("guard.lock")).unwrap();
+                    // SAFETY: file owns a live descriptor. Probe only; never wait.
+                    let result =
+                        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                    assert_eq!(result, -1, "bootstrap must retain both locks");
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EWOULDBLOCK)
                     );
                 }
                 assert!(!root.join("creation.json").exists());
@@ -784,7 +480,7 @@ fn native_fixture_worker() {
                     json!({"thread":saved,"model":"fixture","modelProvider":"openai"})
                 }
                 "thread/read" | "thread/resume" => {
-                    json!({"thread":herdr_flow::util::read_json(&root.join("thread-override.json")).unwrap_or_else(|_| saved.clone())})
+                    json!({"thread":fixture_read(&root.join("thread-override.json")).unwrap_or_else(|_| saved.clone())})
                 }
                 "thread/turns/list" => json!({"data":saved["turns"],"nextCursor":null}),
                 "turn/start" => {
@@ -824,7 +520,7 @@ fn fixture_log(root: &Path) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn fixture_ready(root: &Path, child: &mut std::process::Child) -> u16 {
+fn fixture_ready(root: &Path, child: &mut std::process::Child) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let status = child.try_wait().unwrap();
@@ -834,9 +530,8 @@ fn fixture_ready(root: &Path, child: &mut std::process::Child) -> u16 {
             fixture_log(root)
         );
         if let Ok(ready) = herdr_flow::util::read_json(&root.join("fixture-ready.json")) {
-            let port = ready["port"].as_u64().unwrap();
-            assert!((1..=65535).contains(&port));
-            return port as u16;
+            assert_eq!(ready["ready"], true);
+            return;
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -848,7 +543,33 @@ fn fixture_ready(root: &Path, child: &mut std::process::Child) -> u16 {
 }
 
 #[test]
-fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
+fn fixture_transport_rejects_an_unexpected_response_shape() {
+    let server = rpc_fixture::Server::start(|mut peer| {
+        peer.initialize();
+        let request = peer.request();
+        peer.json(
+            &json!({"id":request["id"],"error":{"code":-32602,"message":"invalid native binding"}}),
+        );
+    });
+    let mut client = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
+    assert!(client
+        .call("thread/read", &json!({"threadId":"missing"}))
+        .is_err());
+    server.finish();
+}
+
+// These files belong only to the synthetic peer. Its user namespace maps host
+// root-owned ancestors to nobody; production trusted-path checks stay unchanged.
+fn fixture_read(path: &Path) -> herdr_flow::Result<J> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+fn fixture_write(path: &Path, value: &J) -> herdr_flow::Result<()> {
+    fs::write(path, serde_json::to_vec(value)?)?;
+    Ok(())
+}
+
+#[test]
+fn codex_native_creation_recovery_and_version_are_bound() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     for (adapter, initialization, expected_version) in [
         (
@@ -860,7 +581,6 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         ("codex", json!({"serverInfo":{"version":null}}), J::Null),
         ("codex", json!({"serverInfo":{"version":123}}), J::Null),
         ("codex", json!({"serverInfo":{"version":"  "}}), J::Null),
-        ("opencode", json!({}), json!("1.19.4")),
     ] {
         let temp = temp();
         let mut env = environment(temp.path());
@@ -871,32 +591,12 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         let binary = fixture_binary(&root, &cwd, 0);
         let config = json!({"cwd":cwd,"port":0,"initialization":initialization});
         herdr_flow::util::atomic_write_json(&root.join("fixture.json"), &config).unwrap();
-        // Synthetic process exposes both protocols. Launch via the OpenCode path
-        // so CI does not need user namespaces merely to exercise RPC fixtures.
-        // The synthetic binary ignores launch argv; replace the placeholder
-        // runtime port with the readiness handshake before any HTTP client.
-        let spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":1,"model":{"providerID":"openai","id":"fixture"}});
+        let spec = json!({"adapter":"codex","configuration":"isolated-fixture",
+            "binary":binary,"cwd":cwd,"driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
+            "model":{"providerID":"openai","id":"fixture"}});
         let mut child = task_runtime::launch(&mut env, &root, &spec)
             .unwrap_or_else(|error| panic!("{error}; fixture log: {}", fixture_log(&root)));
-        let port = fixture_ready(&root, &mut child);
-        let mut runtime = herdr_flow::util::read_json(&root.join("runtime.json")).unwrap();
-        runtime["adapter"] = json!(adapter);
-        runtime["port"] = json!(port);
-        herdr_flow::util::atomic_write_json(&root.join("runtime.json"), &runtime).unwrap();
-        if adapter == "codex" {
-            task_runtime::start_broker(
-                &mut env,
-                &root,
-                &json!({"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")}),
-            )
-            .unwrap();
-            for _ in 0..100 {
-                if root.join("broker.sock").exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
+        fixture_ready(&root, &mut child);
         let request =
             json!({"queue_dir":q,"wait":"review","instruction":"independent verification"});
         let result = (|| -> herdr_flow::Result<()> {
@@ -972,50 +672,6 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
                 expected_version
             );
             assert!(task_runtime::native::dispatch(&env, &root).is_err()); // no coordinator readiness
-            let (_g, _q) = receiver(&env, &q, &cwd, port);
-            let turn = task_runtime::native::dispatch(&env, &root)?;
-            assert_eq!(turn["phase"], "submitted");
-            if adapter == "opencode" {
-                let submission_before = fs::read(root.join("submission.json"))?;
-                let dispatch_before = fs::read(root.join("dispatch.json"))?;
-                let observed = task_runtime::status::status(&env, &root)?;
-                assert_eq!(observed["collect_available"], true, "{observed}");
-                assert_eq!(observed["safe_to_retry"], false);
-                assert_eq!(fs::read(root.join("submission.json"))?, submission_before);
-                assert_eq!(fs::read(root.join("dispatch.json"))?, dispatch_before);
-            }
-            assert!(task_runtime::native::dispatch(&env, &root).is_err());
-            std::fs::write(
-                cwd.join(".herdr-verdict.json"),
-                serde_json::to_vec(
-                    &json!({"conclusion":"passed","scope":"file","checks":[{"id":"content","criterion":"goal","source":"file must contain version A","status":"passed","evidence":"fixture check"}],"gaps":[],"reuses":[],"resolutions":[]}),
-                )?,
-            )?;
-            let result = task_runtime::native::collect(&env, &root)?;
-            assert_eq!(result["phase"], "signalled");
-            if adapter == "opencode" {
-                let observed = task_runtime::status::status(&env, &root)?;
-                assert_eq!(
-                    observed["operator_action"], "already_published",
-                    "{observed}"
-                );
-                assert_eq!(observed["collect_available"], false);
-                assert_eq!(observed["safe_to_retry"], false);
-            }
-            let collected = queue::load_queue(&q)?;
-            assert_eq!(
-                collected["tasks"]["review"]["verdict"]["envelope"]["reviewer"]["adapter"],
-                adapter
-            );
-            assert!(collected["tasks"]["project"]["approved"].is_null());
-            assert_eq!(
-                task_runtime::native::collect(&env, &root)?["outcome"],
-                "complete"
-            );
-            let mut journal = herdr_flow::util::read_json(&root.join("creation.json"))?;
-            journal["session"] = json!("different-session");
-            herdr_flow::util::atomic_write_json(&root.join("creation.json"), &journal)?;
-            assert!(task_runtime::native::recover(&env, &root).is_err());
             Ok(())
         })();
         destroy_environment(&env).unwrap();
@@ -1023,142 +679,3 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         result.unwrap();
     }
 }
-
-fn receiver(
-    env: &TaskEnvironment,
-    q: &Path,
-    cwd: &Path,
-    port: u16,
-) -> (herdr_flow::util::FileLock, herdr_flow::util::FileLock) {
-    let g = env.temp_root.join("coordinator");
-    herdr_flow::util::ensure_private_dir(&g, true).unwrap();
-    let state = json!({"adapter":"opencode","version":2,"server_version":"1.19.3","state_dir":g,"endpoint":format!("http://127.0.0.1:{port}"),
-        "session":"sescoordinator","cwd":cwd,"model":{"providerID":"openai","id":"fixture"},"auto_rotate":false,"phase":"monitoring"});
-    herdr_flow::util::atomic_write_json(&g.join("state.json"), &state).unwrap();
-    let watch = |p: &Path| {
-        herdr_flow::util::atomic_write_json(&p.join("watch.json"),&json!({"status":"running","pid":std::process::id(),"start_ticks":herdr_flow::util::process_start_ticks(std::process::id()),"heartbeat_at":herdr_flow::util::now(),"max_age":60})).unwrap();
-        herdr_flow::util::FileLock::acquire(&p.join("watch.lock"), false)
-            .unwrap()
-            .unwrap()
-    };
-    let locks = (watch(&g), watch(q));
-    let mut state = queue::load_queue(q).unwrap();
-    state["guard_dir"] = json!(g);
-    state["receiver"] =
-        herdr_flow::guard::scope(&herdr_flow::util::read_json(&g.join("state.json")).unwrap());
-    queue::enable(q, &mut state, &herdr_flow::herdr::receiver_factory).unwrap();
-    locks
-}
-
-#[test]
-fn fixture_transport_rejects_an_unexpected_response_shape() {
-    let server = rpc_fixture::Server::start(|mut peer| {
-        peer.initialize();
-        let request = peer.request();
-        peer.json(
-            &json!({"id":request["id"],"error":{"code":-32602,"message":"invalid native binding"}}),
-        );
-    });
-    let mut client = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
-    assert!(client
-        .call("thread/read", &json!({"threadId":"missing"}))
-        .is_err());
-    server.finish();
-}
-
-#[path = "common/acceptance_live.rs"]
-mod acceptance_live;
-
-fn owned_foreground_watcher(
-    env: &mut TaskEnvironment,
-    kind: &str,
-    root: &Path,
-) -> std::process::Child {
-    let log = fs::File::create(root.join("foreground.log")).unwrap();
-    let mut child = env
-        .command(env!("CARGO_BIN_EXE_herdr-flow"))
-        .args([kind, "watch", "--state-dir"])
-        .arg(root)
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    if let Err(error) = env.register_process(child.id() as i32) {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("watcher registration: {error}");
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    loop {
-        let status = child.try_wait().unwrap();
-        assert!(status.is_none(), "watcher exited: {status:?}");
-        let health = herdr_flow::watch_service::health(root);
-        if health["healthy"] == true {
-            assert_eq!(health["pid"], child.id());
-            return child;
-        }
-        assert!(std::time::Instant::now() < deadline, "{health}");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-#[test]
-fn production_foreground_watchers_are_owned_and_reclaimed() {
-    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let temp = temp();
-    let mut env = environment(temp.path());
-    let cwd = env.workspace_root.join("receiver");
-    fs::create_dir(&cwd).unwrap();
-    let root = task_runtime::prepare(&env, "receiver-server").unwrap();
-    let binary = fixture_binary(&root, &cwd, 0);
-    let mut server = task_runtime::launch(
-        &mut env,
-        &root,
-        &json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":1,
-            "model":{"providerID":"openai","id":"fixture"}}),
-    )
-    .unwrap();
-    let port = fixture_ready(&root, &mut server);
-    let guard = env.temp_root.join("guard");
-    // Real registration and watcher processes; only the native HTTP peer is synthetic.
-    herdr_flow::opencode::session::register(
-        &guard,
-        &json!({"endpoint":format!("http://127.0.0.1:{port}"),"cwd":cwd,
-            "session":"sescoordinator","model":{"providerID":"openai","id":"fixture"}}),
-    )
-    .unwrap();
-    let mut guard_child = owned_foreground_watcher(&mut env, "opencode", &guard);
-    let q = env.temp_root.join("queue");
-    let mut state = queue::init(&q, Some(&guard), 10).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    loop {
-        match queue::enable(&q, &mut state, &herdr_flow::herdr::receiver_factory) {
-            Ok(()) => break,
-            Err(error) if error.kind == herdr_flow::error::ErrorKind::StateBusy => {
-                assert!(std::time::Instant::now() < deadline, "{error}");
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(error) => panic!("enable failed: {error}"),
-        }
-    }
-    let mut queue_child = owned_foreground_watcher(&mut env, "queue", &q);
-    for child in [&server, &guard_child, &queue_child] {
-        assert!(env.owns_process(child.id() as i32));
-    }
-    destroy_environment(&env).unwrap();
-    for child in [&mut server, &mut guard_child, &mut queue_child] {
-        assert!(!child.wait().unwrap().success());
-    }
-    assert!(!env.workspace_root.exists());
-    assert!(!env.temp_root.exists());
-    assert!(!is_registered(&env.task_id).unwrap());
-    assert_eq!(occupied_slots().unwrap(), 0);
-}
-
-#[path = "common/receiver_live.rs"]
-mod receiver_live;
-
-#[path = "common/native_inventory.rs"]
-mod native_inventory;
-#[path = "common/resource_inventory.rs"]
-mod resource_inventory;

@@ -1,5 +1,8 @@
 # Task Environment Lifecycle (Issue #33)
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 `src/task_env/` implements the first of the six #32 implementation steps: every
 task owns one disposable environment, formal deliveries live outside it, and
 destruction releases the environment as a whole.
