@@ -1,36 +1,46 @@
 ---
 name: herdr-issue-flow
-description: Coordinate issue development through Herdr with bounded agent sessions, durable handoffs, and an independent GitHub Actions observer. Use for Herdr issue orchestration or resuming its saved task state.
+description: Coordinate task-owned issue development with bounded agent sessions, durable handoffs, and an independent GitHub Actions observer. Herdr is an optional communication/display adapter. Use for issue orchestration or resuming its saved task state.
 ---
 
 # Herdr Issue Flow
 
-Keep agent/session communication and lifecycle in Herdr. Reuse the existing
-guard, queue delivery journal, ACK, task application and delivery commands.
-Task-owned native app-server / OpenCode serve tests are backend evidence, not
-Herdr-managed workflow acceptance: their roles have no Herdr pane agents.
-Do not replace this workflow with an independent controller, process supervisor
-or parallel authority/ACK transaction system. The task-owned Codex receiver
-bootstrap remains inactive. Follow the [workflow boundary and acceptance
-steps](references/herdr-workflow.md) before selecting a transport or claiming a
-full-chain result.
+Use herdr-flow as the authority for task/epoch/instance, dedicated Git worktrees,
+managed Agent/child processes and finalization. Reuse the existing task runtime,
+guard, queue, ACK, task application and delivery commands; do not build another
+runtime, scheduler, controller or permanent evidence store.
+Herdr is optional display/session/communication integration. Attach only objects
+with verifiable ownership and release; otherwise report that capability unsupported.
+Do not wait for Herdr upstream to implement the core lifecycle, guess ownership of
+shared resources or label a native backend run as Herdr-visible acceptance.
 
-Control Codex threads, runtime settings and task submission through the app-server
-adapter; use Herdr for panes and frontend processes. Register native workers through
-the protocol bridge in [context rotation](references/context-rotation.md), never UI
-text recognition.
+PR #131–#136 deliver the lifecycle slices on main `5645b695`. Preserve their fresh
+format-3 / initialized protected queue / per-transfer same-mount boundary; do not
+migrate legacy or old isolated objects. Read [task creation](references/task-instance.md)
+and [task lifecycle](references/task-lifecycle.md). Follow the ordered remaining
+work in [readiness](references/end-to-end-readiness.md#current-execution-order-2026-10-26):
+documentation, adapter version fix, actual-role no-model channels and all-writer
+installation checks, one real task, failure/recovery/parallel cases, then at least
+20 consecutive tasks with no residue. A docs update is not implementation; a green
+CI or process fixture is not real-role or power-loss acceptance. Do not redo the
+merged slices or close #130/#112/#38/#32 on partial evidence.
+
+The Codex identity-only receiver bootstrap remains inactive. Select only supported
+roles/transports, and distinguish implementation, regression and actual integration
+evidence using [workflow boundaries](references/herdr-workflow.md).
 
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
 `herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
-`herdr-flow task-runtime`, `herdr-flow delivery` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
+`herdr-flow task-env`, `herdr-flow task-runtime`, `herdr-flow delivery` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
 use `herdr-flow <command> --help` for the exact options. Run
 `cargo test --all-targets --locked` after changing the implementation.
 
 This automated path is for local Codex sessions. The OpenCode baseline is
 1.19.3; at the user's direction, 2.0 integration is deferred because of reported
 bugs. Do not upgrade to 2.0 or use its API workflow for this integration.
-The native 1.19.3 adapter supports exact session/model/directory binding, HTTP
+The native adapter supports 1.19.x >= 1.19.3 after operation-level schema checks,
+with exact session/model/directory binding, HTTP
 submission/status, durable result collection and queue delivery/ACK/application.
 Use `opencode register` and its independent `opencode watch`; OpenCode receiver
 commands use `OPENCODE_SESSION_ID`, never a fabricated `CODEX_THREAD_ID`.
@@ -48,7 +58,7 @@ Before assigning asynchronous work, establish the coordinator's notification rec
 
 For new managed Codex workers, use [native Auto-review](references/auto-review.md) at registration with `herdr-flow guard init --auto-review` unless the resolved task configuration disables it. Verify the actual sandbox and reviewer before assigning work. Existing sessions require a disabled, quiescent guard and explicit `herdr-flow guard review-enable`; installation does not change their permissions. Auto-review evaluates eligible action approvals, while independent source review and CI retain their own completion gates. Never replace a denial with a Luna verdict or replay an action automatically.
 
-Read the repository instructions and the current Herdr skill (`herdr --skill`, or its installed SKILL.md). Check `HERDR_ENV=1` before accessing Herdr. Use the installed CLI help for lifecycle commands; never guess reset/new-session commands or treat an idle agent as a completed task.
+Read the repository instructions. When enabling Herdr, also read its current skill (`herdr --skill`, or its installed SKILL.md) and check `HERDR_ENV=1` before accessing Herdr. Use the installed CLI help for lifecycle commands; never guess reset/new-session commands or treat an idle agent as a completed task.
 
 Before dispatch, record the task contract outside the checkout using [the handoff format](references/handoff.md): goal, authorized actions and their source, completion conditions, baseline, workspace owner, and next action. Reuse existing authorization without asking again. Only the coordinator changes phase, epoch, or write ownership; reviewer feedback does not revoke a developer's active assignment. Every assignment and result carries task ID and epoch. Ignore old-epoch control messages while preserving their evidence.
 
@@ -103,7 +113,25 @@ intents once; use existing authorization, and revise requirements only for confi
 changes. Passing prepares delivery without granting permission or claiming delivery.
 All reports and runtime state remain disposable with the task environment.
 
-## Correct delivery and final destruction
+## Final outcome and unified cleanup
+
+For fresh isolated owners use the existing [lifecycle entry](references/task-lifecycle.md):
+`queue task-finalize` commits final success (confirmed delivery under the existing
+contract) or explicit final failure, then drives the same finalizer. The high-level
+library entry owns the transaction/drive; the documented locked primitive only
+records it. Owner cancellation maps to final failure; a child activity completion,
+intermediate command/CI failure, pause or uncertain delivery does not finalize the
+owner. No extra project-content or manual occupancy decision is a business trigger.
+
+The system fences new/late writes, stops owned execution, verifies identities and
+removes the whole exclusive worktree plus temporary associations and recovery state.
+A cleanup error keeps the original outcome and recoverable obligation, not a false
+release or a replay. Only agreed formal deliverables persist; no permanent task
+archive is created. Shared services, unknown old workspaces and user assets are
+outside inferred ownership. Do not deploy or exercise production cleanup merely
+because these commands or their CI exist.
+
+### Legacy confirmed-delivery path
 
 Follow [delivery and destruction](references/delivery.md) after independent
 acceptance passes. Prepare a fixed-object delivery intent against the existing
@@ -112,7 +140,7 @@ actual delivery; normal exits, ACKs and claims do not establish it. On unknown
 results query the existing operation; never blindly repeat push, merge or upload.
 Keep the existing project PR/batch/CI/Gate prerequisites where applicable.
 
-After confirmed delivery, the external lifecycle supervisor runs `delivery finish`.
+For the separate legacy owned-environment path, after confirmed delivery the external lifecycle supervisor runs `delivery finish`; it is not the isolated owner final-failure API.
 It freezes writes, terminates task-exclusive sessions/processes, removes shared
 task associations and destroys both roots. Cleanup failure keeps the task and slot
 open, and retries only cleanup. Do not archive completed tasks, retain queue backups

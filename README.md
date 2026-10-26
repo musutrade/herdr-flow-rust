@@ -1,21 +1,43 @@
 # herdr-issue-flow（纯 Rust）
 
-通过 Herdr 编排 issue 开发，以任务交接和独立 CI 监控减少 agent 长会话。
+以任务为生命周期单位编排 issue 开发，复用任务交接、受管执行与独立 CI 监控；Herdr 是可选适配。
 
-**工作流范围**：Herdr 管理可见 agent、会话、终端和 worktree；herdr-flow
-复用现有 guard、队列、ACK、任务应用及交付。此前 task-owned 原生测试直接启动
+**工作流范围**：herdr-flow 权威管理 task/epoch/instance、专属 Git worktree、
+受管 Agent/子进程及终态收尾，复用现有 guard、队列、ACK、任务应用及交付。
+Herdr 只接入可核验归属且可释放的展示、会话和通信能力；不支持的适配明确标明，
+不作为核心生命周期的前置依赖，也不接管未知共享资源。此前 task-owned 原生测试直接启动
 后台 Codex app-server / OpenCode serve，没有创建 Herdr pane agent，不能作为
 Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr 交接也是单独证据。
 证据分类和下一步验收入口见 [Herdr 工作流边界](references/herdr-workflow.md)。
 
-本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。持久化 JSON 文档继续使用原有字段形状，便于在检查后复用已有状态目录。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
+本仓库是 [musutrade/herdr-issue-flow](https://github.com/musutrade/herdr-issue-flow) 的纯 Rust 重写：没有 Python 运行时、没有 `.py` 脚本，所有命令由同一个可执行文件 `herdr-flow` 提供。legacy 状态与 fresh isolated authority 是不同支持域；不能凭 JSON 形状复用旧目录或自动迁移。当前自动编排仍以 Linux 上的本地 Codex app-server 为准；OpenCode 接入基线为 1.19.3，提供原生 HTTP 会话绑定、派发、结果回收与队列接续。按用户当前决定，因 2.0 存在较多 BUG，暂不接入或为此升级到 2.0。
+
+## 实现与验收进度（2026-10-26）
+
+基线 `5645b695`（PR #136）：PR #131–#136 已交付实例/创建归属、终态写入屏障、
+统一收尾、跨模块恢复和固定槽原子移交，并补同队列 seed 根预留竞争。沿用这些
+实现，不重做 #33–#37，不另造 runtime、scheduler 或永久证据库。
+
+新创建协议限 fresh format-3、已初始化 protected queue、逐次同挂载原子移交；
+不迁移 legacy/旧 isolated 实例，不提供跨队列预留或任意同 UID 隔离。
+参见[任务创建](references/task-instance.md)与[终态生命周期](references/task-lifecycle.md)。
+最终成功（依既有交付契约）或显式最终失败进入同一自动收尾；中间测试/CI失败、
+修复和结果不明不等于终态。系统停止所属执行者、核验身份并删除整个专属根，
+不按项目类型或 dirty/untracked/build 内容挑选文件。清理故障只续做收尾，不改业务结果。
+只有约定正式交付物长期保留；临时日志、证据、关联及恢复登记随任务收尾清除。
+
+**代码合并、局部回归、真实接入分别记证据。** 当前 CI/SIGKILL fixture 通过不证明
+本机安装及全 writer 切换、断电恢复、真实 Agent 闭环或连续任务总验收。
+按[当前验收顺序](references/end-to-end-readiness.md#current-execution-order-2026-10-26)
+先同步文档、修版本元数据，再核实际角色通道及全部 writer；之后单任务、故障/并行、
+至少 20 个连续任务及根内外无残留。#130/#112/#38/#32 均保持开放。
 
 ## 当前功能
 
 - 按 issue 和稳定阶段轮换会话，保留已有授权和有效验证证据。
 - 启动前探测 Linux `/proc`、Unix domain socket 和 app-server 方法；缺少所需能力时明确失败，不静默降级。
 - 本地安全边界：Herdr 参数拒绝 shell 元字符；batch Git 只允许白名单命令、拒绝全局配置覆盖并设置超时；状态与交接文件原子写入、权限 0600、拒绝符号链接父目录；app-server socket 校验同用户且非全局可写；JSON 消息限制大小与嵌套深度；子进程错误输出脱敏。
-- OpenCode 1.19.3 原生接入：显式绑定会话/模型/目录，检查忙碌和待审批状态，持久化派发与恢复记录，接续结果 signal、投递、ACK 和任务应用。保留 pane/shell 只读诊断；精确上下文遥测、运行时恢复和自动换班仍不支持。
+- OpenCode 1.19.x >= 1.19.3（操作级 schema 校验后）原生接入：显式绑定会话/模型/目录，检查忙碌和待审批状态，持久化派发与恢复记录，接续结果 signal、投递、ACK 和任务应用。保留 pane/shell 只读诊断；精确上下文遥测、运行时恢复和自动换班仍不支持。
 - 使用任务编号、epoch 和明确的写入归属协调开发、审计与发布。
 - 独立观察 GitHub Actions，绑定完整 SHA、workflow、事件和 run attempt；外部 Checks 需要固定 App、精确 run/head 与基线。
 - 可显式按必需 job 判定，保留 advisory 详情；取消、缺失等结果进入待决策而非代码修复失败。
@@ -37,7 +59,7 @@ Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr �
 - Rust 1.85+ 与 Cargo（CI 独立验证最低版本 1.85.0）
 - 已认证的 GitHub CLI `gh`
 - 自动编排需要运行中的本地 Codex app-server 与同版本原生 TUI（已验证 0.162.1）
-- Herdr 编排需在 Herdr 管理的会话中进行
+- 仅启用 Herdr 适配时需要匹配的 Herdr 会话/能力；核心生命周期不依赖 Herdr
 
 CI 分别在 stable 和最低版本 1.85.0 上使用锁文件构建、测试。第三方 Actions
 固定到完整 commit SHA，由 Dependabot 每周提出 Actions 与 Cargo 更新；更新需要
@@ -69,7 +91,7 @@ mkdir -p ~/.codex/skills
 ln -s /absolute/path/to/herdr-flow-rust ~/.codex/skills/herdr-issue-flow
 ```
 
-Claude 可同样链接至 `~/.claude/skills/herdr-issue-flow`；OpenCode 使用 `~/.config/opencode/skills/herdr-issue-flow`。已安装旧副本时，先确认并迁移，避免覆盖本地改动。
+Claude 可同样链接至 `~/.claude/skills/herdr-issue-flow`；OpenCode 使用 `~/.config/opencode/skills/herdr-issue-flow`。已安装旧副本时，先核对链接目标、源码提交和实际二进制；在另行批准的安装切换中处理，避免覆盖本地改动。文档 PR 不自动更新现有技能链接。
 
 在新会话中使用：`使用 herdr-issue-flow 处理这些 issues`。
 
@@ -117,6 +139,8 @@ herdr-flow ci --config /absolute/config.json --state-dir /absolute/ci-state --on
 herdr-flow ci --config /absolute/config.json --state-dir /absolute/ci-state --background
 ```
 
+以下为 legacy 等待队列示例，不创建 format-3 任务生命周期；fresh isolated 配置见[生命周期](references/task-lifecycle.md)。
+
 初始化等待队列并启动 watcher：
 
 ```bash
@@ -133,9 +157,13 @@ herdr-flow queue metrics --state-dir /absolute/queue
 herdr-flow queue metrics --state-dir /absolute/queue --json
 ```
 
-配置、状态、凭据和运行证据应保存在仓库外。后台模式脱离终端运行，不提供崩溃自动重启；可按监控说明使用 systemd 用户服务托管。
+配置、状态、凭据和运行证据应保存在仓库外；任务临时状态仍须在收尾时清除，不因放在根外而永久保留。后台模式脱离终端运行，不提供崩溃自动重启；可按监控说明使用 systemd 用户服务托管。
 
 ## 状态目录与兼容性
+
+以下文件布局为 legacy。fresh format-3 使用 protected authority 和显式 queue-owned control，
+见[创建协议](references/task-instance.md#fresh-isolated-allocation-protocol)；旧队列及旧环境不自动升级。
+安装/技能链接不证明实际进程、PATH 和后续启动入口已切换，须逐 writer 核验后才启用。
 
 - 队列：`queue.json`、`results/`、`deliveries/`、`commands/`、`queue.lock`
 - 上下文守护：`state.json`、`handoff.json`、`tui.json`、`review-events.json`、`history/`、`guard.lock`
@@ -143,7 +171,7 @@ herdr-flow queue metrics --state-dir /absolute/queue --json
 - 顾问：`advisor/<job>/job.json`、`result.json`、`launch.json`、`worker.log`
 - 合批：`<workspace_root>/<batch-id>/objects.git`、`snapshot/`、`integration.index`
 
-字段形状与旧实现保持一致；但它是独立实现，启用自动化前应在新的状态目录完成一次 `readiness`、一次结果投递/ACK 和一次只读 CI 观察。不要直接让新二进制接管存在未决 `*_sending` 相位的旧状态；先按文档检查并 `reconcile`。
+legacy 的兼容说明不能用于 isolated 迁移；启用所选拓扑前应在新的状态目录完成一次 `readiness`、一次结果投递/ACK 和一次只读 CI 观察。不要直接让新二进制接管存在未决 `*_sending` 相位的旧状态；先按文档检查并 `reconcile`。
 
 P2 修复后的升级规则：
 
@@ -230,5 +258,5 @@ and development output collection: [runtime contract](references/task-runtime.md
 Fixed-version independent acceptance and four-outcome continuation:
 [acceptance contract](references/independent-acceptance.md).
 
-Correct delivery, uncertain-operation recovery and final destruction:
-[delivery contract](references/delivery.md).
+Confirmed-delivery legacy finish: [delivery contract](references/delivery.md).
+Fresh isolated final success/failure and unified cleanup: [task lifecycle](references/task-lifecycle.md).
