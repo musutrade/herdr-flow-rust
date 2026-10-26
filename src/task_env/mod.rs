@@ -15,6 +15,7 @@ pub(crate) mod discovery;
 mod env;
 pub mod instance;
 pub mod isolation;
+pub mod review;
 pub(crate) use env::PreparedConfinement;
 pub use isolation::restore_for_terminal;
 mod registry;

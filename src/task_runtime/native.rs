@@ -102,6 +102,7 @@ fn creation_input(env: &TaskEnvironment, runtime: &J, q: &J, wait: &J, spec: &J)
 
 fn validate_creation_input(env: &TaskEnvironment, runtime: &J, q: &J, binding: &J) -> Result<()> {
     progress::environment::runtime_owner(q, env, binding)?;
+    super::review::binding(env, runtime, binding)?;
     verify_snapshot(runtime, binding)?;
     verify_acceptance_workspace(q, runtime, binding)?;
     fresh_report_path(runtime, binding)
@@ -349,9 +350,10 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    super::verify(env, root)?;
+    let runtime = super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &journal)?;
+    super::review::binding(env, &runtime, &journal["packet"]["binding"])?;
     let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
     validate_queue_control(env, &queue_root)?;
     let mut state = recovered_state(root, &journal)?;
@@ -377,7 +379,7 @@ fn recover_binding(
 // Control authority is not a workspace or a deliverable. Only the durable
 // isolated Owner grants this exact path; callers retain mutation/runtime permits
 // and still check the current queue/task/epoch/instance before any queue save.
-fn validate_queue_control(env: &TaskEnvironment, path: &Path) -> Result<()> {
+pub(super) fn validate_queue_control(env: &TaskEnvironment, path: &Path) -> Result<()> {
     match crate::task_env::isolation::owner(env) {
         Some(owner) => ensure(
             path == owner.queue_root && util::resolve_path(path) == owner.queue_root,
@@ -821,7 +823,7 @@ fn update_codex(journal: &mut J, actual: Option<&J>, state: &J) -> Result<()> {
     Ok(())
 }
 
-fn verify_acceptance_workspace(q: &J, runtime: &J, binding: &J) -> Result<()> {
+pub(super) fn verify_acceptance_workspace(q: &J, runtime: &J, binding: &J) -> Result<()> {
     if binding["lineage"]["role"] != "acceptance" {
         return Ok(());
     }

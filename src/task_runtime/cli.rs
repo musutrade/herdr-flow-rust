@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
 
 fn run(args: &[String]) -> Result<J> {
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
@@ -40,6 +40,7 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &st
 fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     match action {
         "prepare" => Ok(json!({"root":prepare(env,&required(spec,"assignment")?)?})),
+        "review-snapshot" => review::prepare(env, root, spec),
         "launch" => {
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }

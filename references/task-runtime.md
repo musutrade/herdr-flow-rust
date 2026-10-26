@@ -43,9 +43,64 @@ Regression tests first reproduced external-control rejection and an unwanted
 foreign queue-directory creation. Synthetic native HTTP then verifies exact
 create/recovery, foreign/alias refusal and stale/closing owner refusal. These are
 protocol/ownership regressions, not real-model ACK/application or deployment.
-The independent registered reviewer snapshot entry remains the next #130
+The independent registered reviewer snapshot entry below is the second #130
 integration slice; #112, #38 and #32 depend on both slices before their pending
-single-task and broader acceptance. No issue is completed by this change.
+single-task and broader acceptance. No issue is completed by these changes.
+
+### Registered acceptance snapshot (#130 integration)
+
+An isolated instance's developer retains `workspace_root/checkout`. A reviewer
+uses a separately registered, fixed-commit Git clone at
+`workspace_root/reviews/ASSIGNMENT`, with its own `.git` and no shared object
+alternates/hardlinks. This is an additional disposable workspace of the **same**
+Owner, not a second environment or arbitrary-cwd exception.
+
+First register the current acceptance activity and its result wait, then use the
+existing runtime prepare and the new resource entry (placeholders, not a script):
+
+```text
+herdr-flow task-runtime prepare --task OWNER --state-dir UNUSED --spec PREPARE_SPEC
+herdr-flow task-runtime review-snapshot --task OWNER --state-dir TEMP/rt/ASSIGNMENT --spec SNAPSHOT_SPEC
+```
+
+`PREPARE_SPEC` is `{"assignment":"ASSIGNMENT"}`. `SNAPSHOT_SPEC` has exactly
+`{"queue_dir":"/absolute/bound-queue","wait":"acceptance-result-wait"}`.
+The command derives the path and full candidate from that current, same-Owner
+acceptance binding; it does not accept `cwd`, a different commit or an owner
+override. It journals reservation before directory/Git work and records directory
+and Git identities. Unknown pre-existing directories are not adopted.
+
+Launch through `task-runtime launch` with the returned `cwd` and
+`"review_snapshot":"ASSIGNMENT"` in the normal launch spec. Only that registered
+ready snapshot may replace the instance's developer cwd. Native create/recover
+also require the exact acceptance binding; a reviewer runtime cannot execute a
+development activity. Launch, observation and recovery recheck the current Owner,
+activity/wait, candidate, inode identities, HEAD and tracked contents. The existing
+source/active-writer overlap check remains required. Register a fresh snapshot for
+a new assignment; do not repoint an old one.
+
+Repeat `review-snapshot` with the identical request to verify or resume its saved
+resource intent. Completed-but-uncheckpointed clone/checkout results can be
+reconciled. An incomplete/unknown clone or mismatching checkout is refused rather
+than repeated, overwritten or deleted; retain it for inspection/terminal cleanup.
+An uncheckpointed directory without its inode proof is likewise not adopted.
+An in-flight marked snapshot Git command blocks reconciliation. Git commands use
+the existing bounded executor, instance/task/epoch/queue markers and direct-child
+parent-death protection. These are process-crash boundaries, not power-loss proof.
+
+Snapshots, dirty/untracked files, private Git data and registration metadata are
+inside the existing environment's disposable ownership. The existing terminal
+finalizer stops its registered native processes, removes both roots and the
+environment document; no extra scheduler or cleanup journal is introduced.
+The coordinator still ACKs/applies results and records the business final outcome.
+An external cleanup driver only resumes an already recorded terminal obligation.
+
+Regression-first tests cover the missing entry, independent fixed contents,
+launch/native recovery, role/path/Owner/wait mismatch, active-writer overlap,
+lost-checkpoint reconciliation, unknown-clone non-replay and actual cleanup before
+fixture destruction. Native HTTP is synthetic; real-role tools, model permission,
+ACK/application and one genuine task remain pending for #112/#38/#32. No login,
+model choice, old queue, default CLI or global skill is changed.
 
 ## Owned environment and fresh activity
 
