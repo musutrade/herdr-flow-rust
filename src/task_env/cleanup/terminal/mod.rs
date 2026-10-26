@@ -40,6 +40,8 @@ pub struct TerminalState {
     pub environment_digest: String,
     pub registry: Option<registry::RegistryEntry>,
     pub targets: Vec<ProcessRecord>,
+    #[serde(default)]
+    pub upstream_sessions: Vec<J>,
 }
 
 fn require(ok: bool, message: &str) -> Result<()> {
@@ -99,6 +101,7 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
             environment_digest: environment_digest(env.state_file())?,
             registry: entry,
             targets: vec![],
+            upstream_sessions: crate::task_runtime::upstream::obligations(&env)?,
         }),
         task_id: owner.task_id.clone(),
         instance_id: owner.instance_id.clone(),
@@ -169,6 +172,7 @@ pub fn resume_terminal(owner: &Owner, permit: &Permit) -> Result<()> {
 }
 fn resources(plan: &mut CleanupState) -> Result<()> {
     process::quiesce(plan)?;
+    reclaim_upstream(plan)?;
     storage::verify_pending_roots(plan)?;
     remove_git_registration(plan)?;
     // Files and runtime journals are part of the whole owned roots, not a
@@ -178,6 +182,22 @@ fn resources(plan: &mut CleanupState) -> Result<()> {
     storage::verify_absent(plan)?;
     plan.terminal.as_mut().unwrap().phase = Phase::ResourcesRemoved;
     storage::save(plan)
+}
+
+fn reclaim_upstream(plan: &mut CleanupState) -> Result<()> {
+    let count = terminal(plan)?.upstream_sessions.len();
+    for index in 0..count {
+        let journal = &mut plan.terminal.as_mut().unwrap().upstream_sessions[index];
+        if journal["phase"] == "created" {
+            journal["phase"] = serde_json::json!("deleting");
+            storage::save(plan)?;
+        }
+        crate::task_runtime::upstream::reclaim(
+            &mut plan.terminal.as_mut().unwrap().upstream_sessions[index],
+        )?;
+        storage::save(plan)?;
+    }
+    Ok(())
 }
 
 /// Retain the plan until the queue has persisted its removal proof.

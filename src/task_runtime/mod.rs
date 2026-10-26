@@ -17,6 +17,7 @@ mod launcher;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
 pub mod status;
+pub(crate) mod upstream;
 
 fn ensure(ok: bool, message: &str) -> Result<()> {
     if ok {
@@ -157,6 +158,9 @@ fn launch_owned(
         !root.join("runtime.json").exists(),
         "runtime launch already attempted; inspect/recover, do not replay",
     )?;
+    if upstream::selected(spec) {
+        return upstream::attach(env, root, spec, permit);
+    }
     let mut cmd = launch_command_permitted(env, root, spec, permit)?;
     let record = starting_record(env, root, spec)?;
     util::atomic_write_json(&root.join("runtime.json"), &record)?;
@@ -424,17 +428,31 @@ pub(super) fn required(value: &J, key: &str) -> Result<String> {
 pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    // The child owns the exclusive broker lock and validates any stale socket.
-    // Existing creation/turn journals remain untouched during transport restart.
+    broker_child(env, root, spec, permit.as_deref()).map(|_| ())
+}
+fn broker_child(
+    env: &mut TaskEnvironment,
+    root: &Path,
+    spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Child> {
     let binary = model::string(spec, "driver_binary")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
-    let mut cmd = configured_permitted_command(env, root, &binary, permit.as_deref())?;
+    let mut cmd = if upstream::selected(spec) {
+        // Inherit the existing environment; the broker never needs a private
+        // HOME or copies of upstream credentials. Landlock still confines writes.
+        env.permitted_command(binary.as_os_str(), true, permit)?
+    } else {
+        configured_permitted_command(env, root, &binary, permit)?
+    };
     cmd.args(["task-runtime-broker", "--state-dir"]).arg(root);
     let mut child = spawn_broker(root, cmd)?;
     register_child(env, &mut child)?;
-    await_broker(root, &mut child)
+    await_broker(root, &mut child)?;
+    Ok(child)
 }
+
 fn await_broker(root: &Path, child: &mut Child) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

@@ -149,7 +149,11 @@ fn execute(
         *connection = Some(super::native::direct_client(root)?);
     }
     let client = connection.as_mut().unwrap();
+    super::upstream::before(root, &method, &request["params"])?;
     let result = client.call(&method, &request["params"]);
+    if let Ok(value) = &result {
+        super::upstream::after(root, &method, value)?;
+    }
     observe(root, client)?;
     result
 }

@@ -51,6 +51,10 @@ pub(super) fn validate_launch(spec: &J) -> Result<()> {
     status(&adapter)?;
     match spec.get("configuration") {
         None => require_upstream(&adapter),
+        Some(J::String(mode)) if mode == "upstream" && adapter == "codex" => {
+            required(spec, "socket")?;
+            Ok(())
+        },
         Some(J::String(mode)) if mode == "upstream" => require_upstream(&adapter),
         Some(J::String(mode)) if mode == "isolated-fixture" => Ok(()),
         _ => Err(FlowError::guard(

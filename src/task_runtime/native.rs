@@ -228,6 +228,13 @@ pub fn socket_present(root: &Path) -> bool {
 }
 
 fn native_socket(root: &Path) -> Result<PathBuf> {
+    if let Some(runtime) =
+        util::read_state_json_bounded_if_exists(root, "runtime.json", 1024 * 1024)?
+    {
+        if super::upstream::selected(&runtime) {
+            return super::upstream::endpoint(&runtime);
+        }
+    }
     let socket = root.join("server.sock");
     if !std::fs::symlink_metadata(&socket)?.file_type().is_symlink() {
         return Ok(socket);
@@ -721,7 +728,17 @@ fn read_codex_turn(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
             if let Some(actual) = super::broker::turn(root, state, turn)? {
                 return Ok(Some(actual));
             }
-            rollout::read(root, state, turn)
+            let runtime = util::read_state_json(root, "runtime.json")?;
+            if super::upstream::selected(&runtime) {
+                let result = client(root)?.call(
+                    "thread/read",
+                    &json!({"threadId":state["session"],"includeTurns":true}),
+                )?;
+                verify_thread(state, &result["thread"])?;
+                find_turn(&json!({"data":result["thread"]["turns"]}), turn)
+            } else {
+                rollout::read(root, state, turn)
+            }
         }
         Err(error) => Err(error),
     }

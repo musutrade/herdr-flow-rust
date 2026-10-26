@@ -14,7 +14,7 @@ pub fn require_adapter(state: &J) -> Result<()> {
 }
 
 /// Even a dangling symlink or an unreadable marker reserves the attempt.
-pub(super) fn ensure_absent(path: &Path) -> Result<()> {
+pub(in crate::task_runtime) fn ensure_absent(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
