@@ -26,6 +26,27 @@ write/spawn permits, followed by PR3 automatic finalization of fresh isolated
 owners. That path stops proved managed resources and deletes dedicated roots;
 it does not migrate these legacy entries or infer shared session ownership.
 
+### Queue-control access (#130 integration)
+
+Native `create` and `recover` treat queue authority separately from workspace
+paths. A fresh isolated runtime accepts only its durable Owner's exact canonical
+`queue_root`, with the existing current queue/task/epoch/instance and lifecycle
+permit checks. This permits the protected queue/control skeleton to remain
+outside both disposable roots. It neither makes that control directory a formal
+delivery target nor grants ordinary model tools permission to write it.
+Aliases, child paths and foreign queues are refused before opening a queue lock
+or creating directories. Legacy runtimes retain the ordinary managed-boundary
+check; no old environment gains isolated authority. General `validate_path`
+continues to refuse the external control path.
+
+Regression tests first reproduced external-control rejection and an unwanted
+foreign queue-directory creation. Synthetic native HTTP then verifies exact
+create/recovery, foreign/alias refusal and stale/closing owner refusal. These are
+protocol/ownership regressions, not real-model ACK/application or deployment.
+The independent registered reviewer snapshot entry remains the next #130
+integration slice; #112, #38 and #32 depend on both slices before their pending
+single-task and broader acceptance. No issue is completed by this change.
+
 ## Owned environment and fresh activity
 
 ### Preparatory environment entry
@@ -101,13 +122,14 @@ explicitly here, while the generic lineage API still supports its own adapters.
 
 1. Create/restore a task environment. Create the linked requirement, input artifact
    and activity through `task-lineage`. Its signal wait initially has no producer.
-   Put the queue and coordinator state inside the disposable environment.
+   Legacy environments put their queue and coordinator state inside the disposable
+   boundary. Fresh isolated owners keep queue/control outside the disposable
+   roots, using only the exact bound authority described above.
 2. `task_runtime::prepare(&environment, assignment)` creates disposable storage.
-   It does not establish upstream configuration support. Never provision a new
-   login, copy auth/token or provider configuration, or change a billing route
-   to make this directory usable. Check `task-runtime configuration-status
-   --adapter codex` (or `opencode`) first; the current native integration reports
-   `supported=false`. See [the configuration boundary](upstream-configuration.md).
+   Never provision a new login, copy auth/token or provider configuration, or
+   change a billing route to make this directory usable. Upstream configuration
+   remains with the existing service; see [the configuration boundary](upstream-configuration.md).
+
 3. `task_runtime::launch(&mut environment, &root, &spec)` starts a dedicated native
    protocol fixture and records the marked process. Explicit
    `configuration: "isolated-fixture"` is required for credential-free fixtures;
