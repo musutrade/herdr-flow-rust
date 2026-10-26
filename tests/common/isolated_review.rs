@@ -102,6 +102,12 @@ fn review_snapshot_and_runtime_are_removed_by_existing_terminal_cleanup() {
         task_runtime::native::recover(&env, &runtime).unwrap()["session"],
         created["session"]
     );
+    task_runtime::review::prepare(
+        &mut env,
+        &runtime,
+        &json!({"queue_dir":f.queue,"wait":"review"}),
+    )
+    .unwrap();
     let original = util::read_json(&runtime.join("runtime.json")).unwrap();
     let mut changed = original.clone();
     changed.as_object_mut().unwrap().remove("review_snapshot");
@@ -258,4 +264,48 @@ fn review_selection_never_borrows_a_developer_runtime_or_foreign_owner() {
     q["tasks"]["review"]["assignment"] = json!("replacement");
     queue::save(&f.queue, &mut q).unwrap();
     assert!(task_runtime::review::prepare(&mut env, &root, &request).is_err());
+}
+
+#[test]
+fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation() {
+    let f = Fixture::new();
+    let mut env = isolated_runtime::linked(&f);
+    let candidate = review_activity(&f, &env);
+    let root = task_runtime::prepare(&env, "review-a1").unwrap();
+    let request = json!({"queue_dir":f.queue,"wait":"review"});
+    task_runtime::review::prepare(&mut env, &root, &request).unwrap();
+    let path = env.review_workspaces["review-a1"].path.clone();
+    git(&path, &["checkout", "--detach", &f.commit]);
+    assert!(task_runtime::review::prepare(&mut env, &root, &request).is_err());
+    git(&path, &["checkout", "--detach", &candidate]);
+    let common = path.join(".git/commondir");
+    fs::write(&common, f.temp.path().join("repo/.git").to_str().unwrap()).unwrap();
+    assert!(task_runtime::review::prepare(&mut env, &root, &request).is_err());
+    fs::remove_file(common).unwrap();
+    let ready = env.temp_root.join("operation-ready");
+    let mut options = util::process::CommandOptions::default();
+    options
+        .env
+        .insert(task_env::MARKER_ENV.into(), env.instance_id.clone());
+    options
+        .env
+        .insert("HERDR_REVIEW_SNAPSHOT".into(), "review-a1".into());
+    options.kill_on_parent_death = true;
+    let argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf ready > \"$1\"; sleep 2".into(),
+        "fixture".into(),
+        ready.to_str().unwrap().into(),
+    ];
+    let child = std::thread::spawn(move || util::process::run_command(&argv, &options).unwrap());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(std::time::Instant::now() < until);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let error = task_runtime::review::prepare(&mut env, &root, &request).unwrap_err();
+    assert!(error.message.contains("still running"), "{error}");
+    assert!(child.join().unwrap().success());
+    task_runtime::review::prepare(&mut env, &root, &request).unwrap();
 }

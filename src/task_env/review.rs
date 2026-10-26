@@ -82,26 +82,39 @@ pub(crate) fn materialize(
     let _permit = super::isolation::mutation_permit(env)?;
     validate(env, &record)?;
     quiescent(&record)?;
+    materialize_directory(env, &mut record)?;
+    materialize_git(env, &mut record)?;
+    verify(&record)?;
+    finish(env, &mut record)?;
+    Ok(record)
+}
+
+fn materialize_directory(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
     if record.phase == Phase::Reserved {
-        directory(env, &mut record)?;
+        directory(env, record)?;
     }
-    verify_directory(&record)?;
+    verify_directory(record)
+}
+
+fn materialize_git(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
     if record.phase == Phase::Directory {
-        clone_once(env, &mut record)?;
+        clone_once(env, record)?;
     }
     if record.phase == Phase::Cloning {
-        finish_clone(env, &mut record)?;
+        finish_clone(env, record)?;
     }
     if record.phase == Phase::Cloned {
-        checkout_once(env, &mut record)?;
+        checkout_once(env, record)?;
     }
-    verify(&record)?;
+    Ok(())
+}
+
+fn finish(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
     if record.phase == Phase::CheckingOut {
         record.phase = Phase::Ready;
-        save(env, &record)?;
+        save(env, record)?;
     }
-    require(record.phase == Phase::Ready, "review snapshot is not ready")?;
-    Ok(record)
+    require(record.phase == Phase::Ready, "review snapshot is not ready")
 }
 
 fn directory(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
@@ -148,28 +161,40 @@ fn clone_once(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result
 
 fn finish_clone(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
     verify_directory(record)?;
-    let git = record.path.join(".git");
-    let git_id = identity(&git)?;
+    let git_id = clone_identity(record)?;
+    verify_candidate_object(record)?;
+    record.git_identity = Some(git_id);
+    record.phase = Phase::Cloned;
+    save(env, record)
+}
+
+fn clone_identity(record: &ReviewWorkspace) -> Result<RootIdentity> {
+    let git_id = identity(&record.path.join(".git"))?;
     if let Some(expected) = record.git_identity {
         require(git_id == expected, "review Git identity changed")?;
     }
+    verify_common(record)?;
+    Ok(git_id)
+}
+
+fn verify_common(record: &ReviewWorkspace) -> Result<()> {
     let common = run(
         record,
         &record.path,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     require(
-        Path::new(&common) == git,
+        Path::new(&common) == record.path.join(".git"),
         "review must have its own Git repository",
-    )?;
+    )
+}
+
+fn verify_candidate_object(record: &ReviewWorkspace) -> Result<()> {
     let object = format!("{}^{{commit}}", candidate(record)?);
     require(
         run(record, &record.path, &["rev-parse", "--verify", &object])? == candidate(record)?,
         "review commit missing",
-    )?;
-    record.git_identity = Some(git_id);
-    record.phase = Phase::Cloned;
-    save(env, record)
+    )
 }
 
 fn checkout_once(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Result<()> {
@@ -185,23 +210,27 @@ fn checkout_once(env: &mut TaskEnvironment, record: &mut ReviewWorkspace) -> Res
 
 pub(crate) fn verify(record: &ReviewWorkspace) -> Result<()> {
     verify_directory(record)?;
+    verify_git_identity(record)?;
+    verify_common(record)?;
+    verify_head(record)?;
+    verify_contents(record)
+}
+
+fn verify_git_identity(record: &ReviewWorkspace) -> Result<()> {
     require(
         Some(identity(&record.path.join(".git"))?) == record.git_identity,
         "review Git identity changed",
-    )?;
-    let common = run(
-        record,
-        &record.path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    require(
-        Path::new(&common) == record.path.join(".git"),
-        "review Git repository changed",
-    )?;
+    )
+}
+
+fn verify_head(record: &ReviewWorkspace) -> Result<()> {
     require(
         run(record, &record.path, &["rev-parse", "HEAD"])? == candidate(record)?,
         "review snapshot HEAD changed",
-    )?;
+    )
+}
+
+fn verify_contents(record: &ReviewWorkspace) -> Result<()> {
     require(
         run(record, &record.path, &["diff", "--exit-code", "HEAD", "--"])?.is_empty(),
         "review snapshot tracked contents changed",
