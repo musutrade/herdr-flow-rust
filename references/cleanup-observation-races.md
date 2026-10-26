@@ -92,3 +92,9 @@ fixtures because the runner lacked `/usr/bin/bwrap`. Both Rust and coverage
 workflows now install bubblewrap and probe user-namespace launch in the disposable
 runner. No test is skipped and no host security restriction is disabled. Local
 passing results above remain distinct from the remote CI outcome.
+
+The runner's namespace probe then exposed Ubuntu's `uid map: Permission denied`
+restriction. CI installs and loads the distribution's `bwrap-userns-restrict`
+profile from `apparmor-profiles` for bubblewrap. It does not disable AppArmor or
+change a global user-namespace sysctl; production Flow and the local host remain
+unchanged. The dependency probe must succeed before any Rust test runs.

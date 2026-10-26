@@ -19,7 +19,8 @@ jobs:
       - name: Install isolated Codex fixture dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
           /usr/bin/bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
