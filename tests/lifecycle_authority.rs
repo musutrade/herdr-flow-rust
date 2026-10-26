@@ -1,4 +1,11 @@
 //! Instance admission and crash checkpoints over isolated Git/queue fixtures.
+pub mod common;
+#[path = "common/rpc_server.rs"]
+pub mod rpc_server;
+#[path = "common/upstream_live_review.rs"]
+mod upstream_live_review;
+#[path = "common/upstream_runtime.rs"]
+mod upstream_runtime;
 use herdr_flow::{guard, lifecycle, model::J, progress, queue, task_env, task_runtime, util};
 use serde_json::json;
 use std::{

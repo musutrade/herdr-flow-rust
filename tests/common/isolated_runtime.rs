@@ -17,10 +17,14 @@ fn http_child() {
 }
 
 pub(super) fn linked(f: &Fixture) -> task_env::TaskEnvironment {
+    linked_goal(f, "fixture")
+}
+
+pub(super) fn linked_goal(f: &Fixture, goal: &str) -> task_env::TaskEnvironment {
     let mut q = f.state();
     q["tasks"].as_object_mut().unwrap().remove("task");
-    progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":"fixture",
-        "basis":{"original":["fixture"],"changes":[],"specifications":[],"endpoint":"local","confirmation":"fixture"},
+    progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":goal,
+        "basis":{"original":[goal],"changes":[],"specifications":[],"endpoint":"local","confirmation":"fixture"},
         "authorization":[{"id":"develop","action":"development","source":"fixture"},
             {"id":"verify","action":"review","source":"fixture"}]}), util::now()).unwrap();
     for mut spec in [
@@ -64,7 +68,7 @@ pub(super) fn runtime_at(
     fs::write(&binary, format!("#!/bin/sh\nexport HERDR_ISOLATED_HTTP_FIXTURE='{}'\nexec '{}' --exact isolated_runtime::http_child --ignored --nocapture\n",
         root.display(), std::env::current_exe().unwrap().display())).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,
+    let mut spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":port,
         "model":{"providerID":"openai","id":"fixture"}});
     if let Some(key) = review {
         spec["review_snapshot"] = json!(key);

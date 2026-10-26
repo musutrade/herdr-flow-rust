@@ -1,5 +1,8 @@
 # Task-owned Codex and OpenCode runtimes (#35)
 
+Current upstream configuration and cleanup rules take precedence over historical
+dedicated-runtime examples below: see [upstream configuration](upstream-configuration.md).
+
 The linked task model is described in [task-lineage.md](task-lineage.md).
 A producer is now an explicit `{ "adapter": "codex" | "opencode", "session": "..." }`
 object on its result wait. Legacy `producer_session` remains Codex-only. Supplying

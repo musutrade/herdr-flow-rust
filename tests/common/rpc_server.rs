@@ -18,30 +18,37 @@ pub struct Server {
 
 impl Server {
     pub fn start(run: impl FnOnce(Peer) + Send + 'static) -> Self {
+        let mut run = Some(run);
+        Self::start_connections(1, move |peer| run.take().unwrap()(peer))
+    }
+
+    pub fn start_connections(count: usize, mut run: impl FnMut(Peer) + Send + 'static) -> Self {
         let directory = super::common::tempdir().unwrap();
         let path = directory.path().join("rpc.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let task = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "client did not connect");
-                        thread::sleep(Duration::from_millis(2));
+            for _ in 0..count {
+                let deadline = Instant::now() + Duration::from_secs(15);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "client did not connect");
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(e) => panic!("accept: {e}"),
                     }
-                    Err(e) => panic!("accept: {e}"),
-                }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            run(Peer { stream });
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                run(Peer { stream });
+            }
         });
         Self {
             path,

@@ -675,7 +675,7 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
         "turn/start",
         &json!({"threadId":state["session"],
         "input":[{"type":"text","text":prompt,"text_elements":[]}],"model":state["model"]["id"],
-        "sandboxPolicy":{"type":"externalSandbox","networkAccess":"enabled"}}),
+        "sandboxPolicy":turn_sandbox(root, state)?}),
     )?;
     turn["turn"] = result["turn"]["id"].clone();
     ensure(
@@ -685,6 +685,18 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
     turn["phase"] = json!("submitted");
     util::atomic_write_json(&root.join("turn.json"), &turn)?;
     Ok(turn)
+}
+
+fn turn_sandbox(root: &Path, state: &J) -> Result<J> {
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    if super::upstream::selected(&runtime) {
+        Ok(
+            json!({"type":"workspaceWrite","writableRoots":[state["cwd"]],
+            "networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}),
+        )
+    } else {
+        Ok(json!({"type":"externalSandbox","networkAccess":"enabled"}))
+    }
 }
 
 pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
@@ -1078,7 +1090,7 @@ mod tests {
     #[test]
     fn private_tmp_socket_mapping_rejects_escape_and_keeps_long_paths_usable() {
         use std::os::unix::{fs::symlink, net::UnixListener};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::util::fs::test_tempdir();
         let root = dir.path();
         let target = root.join("tmp/codex-daemon-1000");
         assert!(!socket_present(root));

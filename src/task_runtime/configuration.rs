@@ -1,8 +1,8 @@
 //! Upstream account configuration is not disposable task state.
 //!
 //! Do not turn a missing integration capability into a request to provision
-//! credentials. The dedicated-runtime adapter does not yet implement verified
-//! existing-login reuse together with complete task-state reclamation.
+//! credentials. Codex connects to an existing service; OpenCode still requires
+//! its own session-resource reclamation adapter.
 use super::*;
 
 pub fn status(adapter: &str) -> Result<J> {
@@ -10,8 +10,8 @@ pub fn status(adapter: &str) -> Result<J> {
         "codex" => (
             "0.164.0",
             vec![
-                "CODEX_HOME combines account configuration and persistent thread storage",
-                "sqlite_home and log_dir do not relocate every task-owned artifact",
+                "requires an existing same-user Unix app-server socket",
+                "requires an isolated task Owner and upstream thread/delete support",
             ],
         ),
         "opencode" => (
@@ -26,8 +26,10 @@ pub fn status(adapter: &str) -> Result<J> {
     };
     Ok(json!({
         "adapter":adapter,"inspected_version":baseline,
-        "configuration_owner":"upstream","supported":false,
-        "reason":"upstream_configuration_task_storage_coupled",
+        "configuration_owner":"upstream","supported":adapter == "codex",
+        "connection":if adapter == "codex" {"existing-unix-app-server"} else {"not-implemented"},
+        "real_task_acceptance":false,
+        "reason":if adapter == "codex" {"explicit_endpoint_required"} else {"session_cleanup_adapter_missing"},
         "blockers":blockers,
         "account_observed":false,"model_request_sent":false,
         "fixture_is_acceptance":false
@@ -38,7 +40,7 @@ pub fn status(adapter: &str) -> Result<J> {
 pub fn require_upstream(adapter: &str) -> Result<()> {
     let report = status(adapter)?;
     Err(FlowError::guard(format!(
-        "upstream configuration reuse with complete task cleanup is unsupported for {} (inspected {}); do not copy credentials or change login/provider/billing; inspect task-runtime configuration-status",
+        "upstream launch requires an explicit supported service endpoint for {} (inspected {}); do not copy credentials or change login/provider/billing; inspect task-runtime configuration-status",
         report["adapter"].as_str().unwrap_or_default(),
         report["inspected_version"].as_str().unwrap_or_default(),
     )))
@@ -71,7 +73,7 @@ mod tests {
     fn unsupported_modes_never_fall_back_to_a_private_login() {
         for adapter in ["codex", "opencode"] {
             let report = status(adapter).unwrap();
-            assert_eq!(report["supported"], false);
+            assert_eq!(report["supported"], adapter == "codex");
             assert_eq!(report["account_observed"], false);
             assert!(validate_launch(&json!({"adapter":adapter})).is_err());
             assert!(

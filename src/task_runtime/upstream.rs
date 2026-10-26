@@ -45,10 +45,11 @@ pub(super) fn attach(
         env.creation.is_some(),
         "upstream attachment requires an isolated queue instance",
     )?;
+    validate_spec(spec)?;
     verify_instance_owner(env)?;
     crate::task_env::validate_path(env, root)?;
     let cwd = PathBuf::from(required(spec, "cwd")?);
-    validate_launch_cwd(env, &cwd)?;
+    validate_launch_cwd(env, root, &cwd, spec)?;
     let socket = PathBuf::from(required(spec, "socket")?);
     ensure(
         !crate::task_env::paths_overlap(&socket, &env.temp_root)
@@ -66,6 +67,41 @@ pub(super) fn attach(
     record["phase"] = json!("started");
     util::atomic_write_json(&root.join("runtime.json"), &record)?;
     Ok(child)
+}
+
+fn validate_spec(spec: &J) -> Result<()> {
+    let fields = spec
+        .as_object()
+        .ok_or_else(|| FlowError::guard("upstream spec must be an object"))?;
+    ensure(
+        fields.keys().all(|key| {
+            [
+                "adapter",
+                "configuration",
+                "socket",
+                "cwd",
+                "model",
+                "driver_binary",
+                "approval_policy",
+                "review_snapshot",
+            ]
+            .contains(&key.as_str())
+        }),
+        "unsupported upstream launch field; account configuration is not accepted",
+    )?;
+    let model = spec["model"]
+        .as_object()
+        .ok_or_else(|| FlowError::guard("configured model required"))?;
+    ensure(
+        model.len() == 2
+            && model
+                .keys()
+                .all(|key| ["providerID", "id"].contains(&key.as_str())),
+        "model selection only accepts providerID and id",
+    )?;
+    required(&spec["model"], "id")?;
+    required(&spec["model"], "providerID")?;
+    Ok(())
 }
 
 /// Persist creation intent before sending, and restrict all later operations to
@@ -185,10 +221,7 @@ fn reclaim_with(
         Err(error)
             if journal["phase"] == "deleting"
                 && error.rpc_code == Some(-32600)
-                && error.message == format!("thread not found: {id}") =>
-        {
-            ()
-        }
+                && error.message == format!("thread not found: {id}") => {}
         Err(error) => return Err(error),
     }
     journal["phase"] = json!("deleted");

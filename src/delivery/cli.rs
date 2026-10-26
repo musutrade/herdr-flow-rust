@@ -34,8 +34,8 @@ fn route(
 }
 fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &str>> {
     let mut options = std::collections::BTreeMap::new();
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = args.as_chunks::<2>();
+    for pair in pairs {
         ensure(
             ["--task", "--queue", "--spec"].contains(&pair[0].as_str()),
             USAGE,
@@ -45,7 +45,7 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &st
             USAGE,
         )?;
     }
-    ensure(pairs.remainder().is_empty(), USAGE)?;
+    ensure(remainder.is_empty(), USAGE)?;
     Ok(options)
 }
 fn prepare_cli(

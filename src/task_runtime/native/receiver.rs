@@ -1,6 +1,7 @@
 //! A fresh coordinator thread is an identity, not an activated receiver.
 //! No queue mutation, model turn, approval response or implicit recovery.
 use super::*;
+pub mod active;
 
 pub fn is_task_owned(state: &J) -> bool {
     state["adapter"] == "codex" && state["receiver_kind"] == "task-runtime"

@@ -2,11 +2,11 @@
 
 以任务为生命周期单位编排 issue 开发，复用任务交接、受管执行与独立 CI 监控；Herdr 是可选适配。
 
-**当前认证接入限制（#130）**：登录、provider、订阅和计费由既有 Codex／OpenCode
-管理。原生任务启动默认要求复用上游配置；现有适配器尚不能同时证明既有登录复用与
-任务资源完整回收，因此在启动前明确拒绝。只有无凭据协议测试可显式选择
-`configuration: "isolated-fixture"`。这不是认证解耦完成，也不是真实任务验收通过；
-参见[具体缺口与只读检查](references/upstream-configuration.md)。
+**认证与任务资源边界（#130）**：登录、provider、订阅和计费由既有 Codex／OpenCode
+管理。新的隔离队列可连接已有 Codex app-server，复用其认证并按任务登记、删除会话；
+不复制配置或凭据，不改变代理。OpenCode 的新任务清理接入仍未完成，禁止以临时登录
+绕过。独立队列上的真实 Codex 快照审查已验证，自动通知／ACK／客户交付尚未完整验收。
+详见[上游配置与资源回收](references/upstream-configuration.md)。
 
 **工作流范围**：herdr-flow 权威管理 task/epoch/instance、专属 Git worktree、
 受管 Agent/子进程及终态收尾，复用现有 guard、队列、ACK、任务应用及交付。

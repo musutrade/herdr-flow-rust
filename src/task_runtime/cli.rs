@@ -1,8 +1,13 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
-
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-activate|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
+    if let [action, option, path] = args {
+        if action == "receiver-watch" && option == "--state-dir" {
+            native::receiver::active::watch(Path::new(path))?;
+            return Ok(json!({"stopped":true}));
+        }
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "configuration-status")
@@ -35,8 +40,8 @@ fn configuration_status(args: &[String]) -> Result<J> {
 }
 fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &str>> {
     let mut options = std::collections::BTreeMap::new();
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = args.as_chunks::<2>();
+    for pair in pairs {
         ensure(
             ["--task", "--state-dir", "--spec"].contains(&pair[0].as_str()),
             USAGE,
@@ -46,7 +51,7 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &st
             "duplicate runtime option",
         )?;
     }
-    ensure(pairs.remainder().is_empty(), USAGE)?;
+    ensure(remainder.is_empty(), USAGE)?;
     Ok(options)
 }
 
@@ -59,6 +64,7 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
         }
         "create" => native::create(env, root, spec),
         "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
+        "receiver-activate" => native::receiver::active::activate(env, root, spec),
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
@@ -113,7 +119,7 @@ mod tests {
                 adapter.into(),
             ])
             .unwrap();
-            assert_eq!(report["supported"], false);
+            assert_eq!(report["supported"], adapter == "codex");
         }
         assert!(run(&["configuration-status".into()]).is_err());
     }

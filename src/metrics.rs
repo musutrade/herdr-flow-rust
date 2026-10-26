@@ -512,7 +512,7 @@ fn segment_summary(values: &[f64], unknown: usize, ongoing: usize) -> J {
         let mut sorted = values.to_vec();
         sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let middle = sorted.len() / 2;
-        Some(round3(if sorted.len() % 2 == 0 {
+        Some(round3(if sorted.len().is_multiple_of(2) {
             (sorted[middle - 1] + sorted[middle]) / 2.0
         } else {
             sorted[middle]

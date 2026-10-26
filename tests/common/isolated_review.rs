@@ -1,7 +1,7 @@
 //! Real Git snapshots and isolated ownership; no model or login changes.
 use super::*;
 
-fn review_activity(f: &Fixture, env: &task_env::TaskEnvironment) -> String {
+pub(super) fn review_activity(f: &Fixture, env: &task_env::TaskEnvironment) -> String {
     let developer = env.workspace_root.join("checkout");
     fs::write(developer.join("file"), "review candidate\n").unwrap();
     git(&developer, &["add", "file"]);
