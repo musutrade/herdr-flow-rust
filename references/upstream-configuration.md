@@ -102,13 +102,63 @@ owned roots/registration and active/archived inventories were absent. No driver
 ACK, verdict, repair, candidate selection or delivery substituted for the models.
 The earlier failed attempts remain separate and are not relabeled as passes.
 
+The first two-queue campaign (`/mnt/dev-ssd/dev-tmp/.tmpvlffJX`) did **not**
+pass: `.tmp7JKTeu` completed automatic local delivery and reclamation in 484.61
+seconds, while `.tmp4Itx1x` exceeded the original 600-second deadline after its
+review passed (600.76 seconds). The latter's existing coordinator turn was still
+in progress, not replayed. A separately recorded bounded watcher resumption
+completed its already-approved delivery (`d28026cf1c9574e9132056c58f8dabb2e2523269`)
+and reclamation. The passed verdict stayed immutable; both queues ended empty
+and both task/review active/archived inventories were empty. This recovery does
+not turn the original failed parallel campaign into a pass, nor prove shared-queue
+claim backpressure. `campaign.json` retains first_success=false/second_success=true;
+`inspected-recovery-verified.json` and `final-upstream-inventory.jsonl` record the
+separate verified recovery and final inventory.
+
+Current code commit `d887265` passed all remote checks:
+[Rust checks](https://github.com/musutrade/herdr-flow-rust/actions/runs/40356035346),
+[CRAP](https://github.com/musutrade/herdr-flow-rust/actions/runs/40356035369), and
+[dependency audit](https://github.com/musutrade/herdr-flow-rust/actions/runs/40356035469).
+
+The sequential campaign (`/mnt/dev-ssd/dev-tmp/.tmpeZ71E2`) stopped at its
+first failure: **2 of 20 requested tasks passed; the campaign did not pass**.
+Rounds 1 and 2 completed in 193.12 and 375.53 seconds. Round 3 (`.tmpxEDvGG`)
+exceeded the unchanged 600-second fixture deadline (600.72 seconds); rounds
+4–20 were not started, and round 3 was not retried to increase the pass count.
+
+Before inspected recovery of round 3, the local delivery was already confirmed
+and its finalize tool response was durably recorded; the queue terminal transaction
+and reclamation had not completed. Restarting only that task's watcher committed
+the existing terminal request and reclaimed resources in approximately 5 seconds.
+The target remained the already-approved `c78176c2c88db430b9098c4044a844fb9ba1d9f0`
+with exact `42\n`; the passed verdict was unchanged. This recovery does not
+retroactively satisfy the original 600-second whole-task test. It is a fixture
+wall-clock budget, not a newly established product performance requirement.
+`campaign.json`, each child log, `inspected-before-recovery.json`,
+`inspected-recovery-verified.json`, and `final-upstream-inventory.jsonl` retain
+that distinction. No model/effort/provider/billing fallback was used.
+
+Final read-only inventory across all twelve real attempt roots from this phase
+returned empty active and archived task/review lists, with no pagination
+(`/mnt/dev-ssd/dev-tmp/recovery-all-owned-inventory.jsonl`). The four inspected
+failure terminations retained their original local output refs. Shared Codex
+service processes remained alive. Seed/output repositories, empty fixture queues
+and bounded evidence remain intentional harness assets, not renamed upstream
+session residues.
+
+Remaining acceptance work includes the unexplained historical Git timeout,
+a passing parallel campaign and twenty consecutive passing tasks. Whole-task
+model latency and terminal reclamation time must be assessed separately before
+changing any test budget; these failures are not waived. Shared-queue claim
+backpressure, remote publication and global migration remain unverified here.
+
 The two-queue and twenty-consecutive-task campaign entrypoints are explicit
 ignored tests in `upstream_live_campaign.rs`. Every child uses a separate process
 and queue. A sequential campaign stops at its first failed task and retains that
 attempt; it never redispatches uncertain work or retries to manufacture twenty
 passes. Two independent queues do not prove shared-queue claim backpressure.
-Results of the remaining live scenarios and campaigns must be recorded before
-claiming them complete. Remote publication and global migration remain outside
+The above campaign failures remain unresolved; test entrypoints alone are not
+completion evidence. Remote publication and global migration remain outside
 these local acceptance scenarios.
 
 The separately reproduced environment-lock race and the still-unexplained

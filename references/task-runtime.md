@@ -1,5 +1,7 @@
 # Task-owned Codex and OpenCode runtimes (#35)
 
+> **故障与恢复实测补充（2026-10-26，优先适用）：** 真实最终失败回收、worker 提交后监督进程重启接续、失败首稿修复与新会话复审分别通过。并行测试一过一超时；连续验收为 2/20，第 3 条超时即停，未计为通过。超时任务另行恢复后完成回收，见[逐次证据和未完成项](upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。
+
 > **真实验收补充（2026-10-26，优先适用）：** 已完成一条 Sol/high 开发、Astra/high 独立评审、协调者自动本地交付及回收的真实任务；修复了上游 Guardian 子会话遗漏回收，见[两次运行记录及边界](upstream-configuration.md#real-continuation-acceptance-and-guardian-cleanup-2026-10-26)。远端发布、故障/并行矩阵和连续 20 条无残留仍未完成。
 
 > **角色模型修正（优先适用）：** coordinator 使用启动 spec 的 `model`，开发/评审分别使用 `role_models.developer` / `role_models.reviewer`。缺失时不继承 coordinator；见[配置示例](upstream-configuration.md#role-model-configuration-2026-10-26-current)。
