@@ -10,8 +10,8 @@ mod http;
 fn http_child() {
     let root = PathBuf::from(std::env::var_os("HERDR_ISOLATED_HTTP_FIXTURE").unwrap());
     let config = util::read_json(&root.join("fixture.json")).unwrap();
-    let listener = TcpListener::bind(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
-        .unwrap();
+    let listener =
+        TcpListener::bind(("127.0.0.1", config["port"].as_u64().unwrap() as u16)).unwrap();
     fs::write(root.join("ready"), b"ready").unwrap();
     http::serve(listener, Path::new(config["cwd"].as_str().unwrap()));
 }
@@ -54,13 +54,22 @@ fn runtime(env: &mut task_env::TaskEnvironment) -> (PathBuf, FixtureChild) {
     fs::write(&binary, format!("#!/bin/sh\nexport HERDR_ISOLATED_HTTP_FIXTURE='{}'\nexec '{}' --exact isolated_runtime::http_child --ignored --nocapture\n",
         root.display(), std::env::current_exe().unwrap().display())).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut child = FixtureChild(task_runtime::launch(env, &root,
-        &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,
-            "model":{"providerID":"openai","id":"fixture"}})).unwrap());
+    let mut child = FixtureChild(
+        task_runtime::launch(
+            env,
+            &root,
+            &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,
+            "model":{"providerID":"openai","id":"fixture"}}),
+        )
+        .unwrap(),
+    );
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !root.join("ready").exists() {
         assert!(child.0.try_wait().unwrap().is_none());
-        assert!(std::time::Instant::now() < until, "fixture startup timed out");
+        assert!(
+            std::time::Instant::now() < until,
+            "fixture startup timed out"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     (root, child)
@@ -80,7 +89,10 @@ fn bound_control_queue_outside_roots_supports_create_and_recover() {
     let before = f.state();
     let recovered = task_runtime::native::recover(&env, &root).unwrap();
     assert_eq!(recovered["session"], state["session"]);
-    assert_eq!(f.state()["waits"]["dev"]["producer"], before["waits"]["dev"]["producer"]);
+    assert_eq!(
+        f.state()["waits"]["dev"]["producer"],
+        before["waits"]["dev"]["producer"]
+    );
     assert!(task_env::validate_path(&env, &f.queue).is_err());
 }
 
@@ -89,7 +101,11 @@ fn control_queue_rejects_foreign_paths_before_creating_authority() {
     let f = Fixture::new();
     let mut env = linked(&f);
     let (root, _child) = runtime(&mut env);
-    for path in [env.temp_root.join("foreign"), f.queue.join("child"), f.temp.path().join("foreign")] {
+    for path in [
+        env.temp_root.join("foreign"),
+        f.queue.join("child"),
+        f.temp.path().join("foreign"),
+    ] {
         let mut spec = create_spec(&f);
         spec["queue_dir"] = json!(path);
         let before = f.state();
@@ -98,4 +114,61 @@ fn control_queue_rejects_foreign_paths_before_creating_authority() {
         assert!(!root.join("creation.json").exists());
         assert_eq!(f.state(), before);
     }
+}
+
+#[test]
+fn control_queue_recovery_rejects_foreign_journal_and_alias() {
+    let f = Fixture::new();
+    let mut env = linked(&f);
+    let (root, _child) = runtime(&mut env);
+    let alias = f.temp.path().join("queue-alias");
+    std::os::unix::fs::symlink(&f.queue, &alias).unwrap();
+    let mut spec = create_spec(&f);
+    spec["queue_dir"] = json!(alias);
+    assert!(task_runtime::native::create(&env, &root, &spec).is_err());
+    assert!(!root.join("creation.json").exists());
+    task_runtime::native::create(&env, &root, &create_spec(&f)).unwrap();
+    let before = f.state();
+    let original = util::read_json(&root.join("creation.json")).unwrap();
+    let state_before = util::read_json(&root.join("state.json")).unwrap();
+    let foreign = env.temp_root.join("foreign");
+    for path in [&foreign, &alias] {
+        let mut journal = original.clone();
+        journal["queue_dir"] = json!(path);
+        util::atomic_write_json(&root.join("creation.json"), &journal).unwrap();
+        assert!(task_runtime::native::recover(&env, &root).is_err());
+        assert_eq!(
+            util::read_json(&root.join("creation.json")).unwrap(),
+            journal
+        );
+        assert_eq!(
+            util::read_json(&root.join("state.json")).unwrap(),
+            state_before
+        );
+        assert_eq!(f.state(), before);
+        assert!(!foreign.exists());
+    }
+    util::atomic_write_json(&root.join("creation.json"), &original).unwrap();
+    task_runtime::native::recover(&env, &root).unwrap();
+}
+
+#[test]
+fn control_queue_never_grants_old_or_closing_owners_access() {
+    let f = Fixture::new();
+    let mut env = linked(&f);
+    let (root, _child) = runtime(&mut env);
+    let old = env.creation.as_ref().unwrap().binding.clone();
+    env.creation.as_mut().unwrap().binding.epoch += 1;
+    assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
+    env.creation.as_mut().unwrap().binding = old;
+    let saved_instance = env.instance_id.clone();
+    env.instance_id = "foreign-instance".into();
+    assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
+    env.instance_id = saved_instance;
+    task_runtime::native::create(&env, &root, &create_spec(&f)).unwrap();
+    drop(env);
+    f.finalize("failure").unwrap();
+    let env = task_env::restore_environment("task").unwrap();
+    assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
+    assert!(task_runtime::native::recover(&env, &root).is_err());
 }

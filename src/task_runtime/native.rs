@@ -58,7 +58,7 @@ pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
 fn create_owned(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let runtime = super::verify(env, root)?;
     let queue_root = PathBuf::from(required(spec, "queue_dir")?);
-    crate::task_env::validate_path(env, &queue_root)?;
+    validate_queue_control(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let _session_lock = crate::guard::locked(root)?;
     validate_unused_runtime(root)?;
@@ -352,20 +352,39 @@ pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &journal)?;
+    let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
+    validate_queue_control(env, &queue_root)?;
     let mut state = recovered_state(root, &journal)?;
-    recover_binding(env, root, &journal, &mut state)?;
+    recover_binding(env, root, &queue_root, &journal, &mut state)?;
     Ok(state)
 }
 
-fn recover_binding(env: &TaskEnvironment, root: &Path, journal: &J, state: &mut J) -> Result<()> {
-    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
-    crate::task_env::validate_path(env, &queue_root)?;
-    let _lock = queue::locked(&queue_root, false)?;
-    let mut q = queue::load_queue(&queue_root)?;
+fn recover_binding(
+    env: &TaskEnvironment,
+    root: &Path,
+    queue_root: &Path,
+    journal: &J,
+    state: &mut J,
+) -> Result<()> {
+    let _lock = queue::locked(queue_root, false)?;
+    let mut q = queue::load_queue(queue_root)?;
     progress::environment::runtime_owner(&q, env, &journal["packet"]["binding"])?;
     verify_queue(&q, journal, state)?;
     bind_created(root, &mut q, journal, state)?;
     refresh_observed_version(root, state)
+}
+
+// Control authority is not a workspace or a deliverable. Only the durable
+// isolated Owner grants this exact path; callers retain mutation/runtime permits
+// and still check the current queue/task/epoch/instance before any queue save.
+fn validate_queue_control(env: &TaskEnvironment, path: &Path) -> Result<()> {
+    match crate::task_env::isolation::owner(env) {
+        Some(owner) => ensure(
+            path == owner.queue_root && util::resolve_path(path) == owner.queue_root,
+            "runtime queue differs from its bound lifecycle authority",
+        ),
+        None => crate::task_env::validate_path(env, path),
+    }
 }
 
 fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
