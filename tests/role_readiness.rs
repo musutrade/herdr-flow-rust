@@ -281,6 +281,30 @@ fn producer_needs_only_its_result_path_and_never_queries_receiver() {
     assert_eq!(channel(&f.run(&spec)), "unsupported_channel");
 }
 
+#[test]
+fn producer_reports_missing_and_unwritable_result_paths_without_publishing() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let mut queue = queue::load_queue(&f.root).unwrap();
+    queue["waits"]["w"] = json!({"kind":"signal","closed":false,
+        "producer":{"adapter":"opencode","session":"sesfixture"}});
+    queue::save(&f.root, &mut queue).unwrap();
+    let mut spec = f.spec.clone();
+    spec["role"] = json!("producer");
+    spec["wait"] = json!("w");
+    let results = f.root.join("results");
+    let saved = f.root.join("saved-results");
+    std::fs::rename(&results, &saved).unwrap();
+    let missing = f.run(&spec);
+    std::fs::rename(&saved, &results).unwrap();
+    assert_eq!(channel(&missing), "missing_configuration");
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let denied = f.run(&spec);
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(channel(&denied), "policy_denied");
+    assert_eq!(std::fs::read_dir(&results).unwrap().count(), 0);
+}
+
 #[cfg(target_os = "linux")]
 fn deny_connect(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;

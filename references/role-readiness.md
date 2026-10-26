@@ -170,3 +170,8 @@ existing results directory. The probe correctly reported unknown; the fixture
 was corrected to create its own directory. This failure is retained here rather
 than replacing it with the later successful run. CI and remaining gate results
 are recorded on the PR for its exact head.
+
+The first head `f26f6c6` also failed [CRAP run 40268860055](https://github.com/musutrade/herdr-flow-rust/actions/runs/40268860055):
+`io_error` had CC=4, coverage=0%, CRAP=20 against the unchanged absolute threshold
+10. Added dedicated missing/unwritable producer-directory regressions to exercise
+the real filesystem error paths. No threshold, baseline or check was relaxed.
