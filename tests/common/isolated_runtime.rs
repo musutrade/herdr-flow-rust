@@ -172,3 +172,29 @@ fn control_queue_never_grants_old_or_closing_owners_access() {
     assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
     assert!(task_runtime::native::recover(&env, &root).is_err());
 }
+
+#[test]
+fn replaced_bound_queue_is_never_adopted_or_recreated() {
+    let f = Fixture::new();
+    let mut env = linked(&f);
+    let (root, _child) = runtime(&mut env);
+    task_runtime::native::create(&env, &root, &create_spec(&f)).unwrap();
+    let original = f.state();
+    let moved = f.temp.path().join("original-queue");
+    fs::rename(&f.queue, &moved).unwrap();
+    fs::create_dir(&f.queue).unwrap();
+    fs::write(f.queue.join("sentinel"), "foreign").unwrap();
+    assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
+    assert!(task_runtime::native::recover(&env, &root).is_err());
+    assert_eq!(
+        fs::read_to_string(f.queue.join("sentinel")).unwrap(),
+        "foreign"
+    );
+    assert!(!f.queue.join("queue.lock").exists());
+    assert!(!f.queue.join("queue.json").exists());
+    fs::remove_file(f.queue.join("sentinel")).unwrap();
+    fs::remove_dir(&f.queue).unwrap();
+    fs::rename(&moved, &f.queue).unwrap();
+    assert_eq!(f.state(), original);
+    task_runtime::native::recover(&env, &root).unwrap();
+}
