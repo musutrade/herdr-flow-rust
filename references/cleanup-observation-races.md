@@ -6,6 +6,19 @@ provider, billing, proxy, installed entrypoint or existing watcher is changed.
 
 ## Additional environment-lock race and unresolved Git timeout (2026-10-26)
 
+The later documentation-only commit `bf1788a` reproduced another fixture race in
+[CI coverage](https://github.com/musutrade/herdr-flow-rust/actions/runs/40363636016):
+`upstream_thread_cleanup_preserves_service_config_and_other_sessions` expected
+one `finalization::drive` call to finish, but received the explicit lifecycle
+permit contention report. The active receiver watcher uses short shared permits;
+the finalizer correctly requires an exclusive permit and leaves cleanup pending.
+The fixture now retries only that exact pre-mutation contention, bounded to ten
+seconds. All other errors, including the deliberately lost deletion reply, still
+reach the original assertions. Both deletion scenarios deliberately hold a
+shared permit, assert unchanged queue state and retained resources, release it,
+then exercise the retry and eventual cleanup. Production locking and deletion
+semantics are unchanged. This is separate from the historical Git timeout below.
+
 A fresh default-concurrency coverage run reproduced a different failure in
 `coordinator_dispatches_collects_and_finalizes_without_driver_task_mutations`:
 the watcher temporarily owned the environment lock while the fixture restored

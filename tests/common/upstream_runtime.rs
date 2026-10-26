@@ -228,12 +228,24 @@ fn exercise(lost_reply: bool) {
     release.send(()).unwrap();
     drop(env);
     finalize_with_retry(&f);
+    // Model a watcher observation holding its shared lifecycle permit. Terminal
+    // cleanup must leave the obligation intact and continue after release.
+    let before = f.state();
+    let owner = lifecycle::task_owner(&before, "task").unwrap().unwrap();
+    let observation = lifecycle::acquire(&owner, false).unwrap();
     let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.pending, 1, "{report:?}");
+    assert_eq!(report.errors, [LIFECYCLE_BUSY]);
+    assert_eq!(f.state(), before);
+    assert!(root.exists());
+    drop(observation);
+    let report = retry_cleanup_contention(&f.queue, report);
     if lost_reply {
         assert_eq!(report.pending, 1, "{report:?}");
         assert!(root.exists());
         assert!(task_env::is_registered("task").unwrap());
-        let retry = queue::finalization::drive(&f.queue).unwrap();
+        let retry =
+            retry_cleanup_contention(&f.queue, queue::finalization::drive(&f.queue).unwrap());
         assert_eq!(retry.pending, 0, "{retry:?}");
     } else {
         assert_eq!(report.pending, 0, "{report:?}");
@@ -254,6 +266,24 @@ fn exercise(lost_reply: bool) {
         FOREIGN
     );
     server.finish();
+}
+
+const LIFECYCLE_BUSY: &str = "lifecycle action busy; release other locks and retry";
+
+// drive() deliberately performs one bounded attempt. Retry only the known
+// pre-mutation permit contention; lost delete replies and other errors must
+// reach the scenario assertions instead of being hidden by this helper.
+fn retry_cleanup_contention(
+    root: &Path,
+    mut report: queue::finalization::CleanupReport,
+) -> queue::finalization::CleanupReport {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while report.pending == 1 && report.errors == [LIFECYCLE_BUSY] {
+        assert!(std::time::Instant::now() < deadline, "{report:?}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        report = queue::finalization::drive(root).unwrap();
+    }
+    report
 }
 
 #[test]
