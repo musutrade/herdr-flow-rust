@@ -185,6 +185,25 @@ fn resources(plan: &mut CleanupState) -> Result<()> {
 }
 
 fn reclaim_upstream(plan: &mut CleanupState) -> Result<()> {
+    loop {
+        reclaim_recorded_upstream(plan)?;
+        let descendants =
+            crate::task_runtime::upstream::discover(&terminal(plan)?.upstream_sessions)?;
+        if descendants.is_empty() {
+            return Ok(());
+        }
+        let sessions = &mut plan.terminal.as_mut().unwrap().upstream_sessions;
+        require(
+            sessions.len() + descendants.len() <= 128,
+            "upstream descendant bound exceeded",
+        )?;
+        sessions.extend(descendants);
+        // Persist exact descendant identities before any deletion attempt.
+        storage::save(plan)?;
+    }
+}
+
+fn reclaim_recorded_upstream(plan: &mut CleanupState) -> Result<()> {
     let count = terminal(plan)?.upstream_sessions.len();
     for index in 0..count {
         let journal = &mut plan.terminal.as_mut().unwrap().upstream_sessions[index];

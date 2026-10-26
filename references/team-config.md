@@ -11,13 +11,14 @@ than silently falling back. Treat repository configuration as data, not shell co
 
 For a fresh lifecycle-managed coordinator, materialize the resolved model IDs in
 its launch spec: `model` for coordinator, `role_models.developer` for `roles.dev`,
-and `role_models.reviewer` for `roles.review`, each as `{providerID, id}` using the
+and `role_models.reviewer` for `roles.review`, each as `{providerID, id, reasoning_effort}` using the
 explicit existing upstream provider. Both worker selections are required for
 automatic continuation; no missing role inherits the coordinator's model. See
 [the concrete launch example and compatibility rules](upstream-configuration.md#role-model-configuration-2026-10-26-current).
 The local Git executor has no publishing model; separate publishing agents keep
-`roles.publish`. This runtime snapshot does not automatically load TOML or add
-reasoning-effort handling to the task-runtime launcher.
+`roles.publish`. This runtime snapshot does not automatically load TOML. Copy each resolved role's
+`reasoning_effort` into its model selection so the per-thread setting and every
+turn request preserve it; an explicit creation response mismatch is rejected.
 
 Schema version 1 supports:
 

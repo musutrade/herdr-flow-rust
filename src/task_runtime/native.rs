@@ -255,7 +255,7 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
     let observed = client(root)?.call_observed("thread/start", &json!({"cwd":state["cwd"],"model":model,
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
         "baseInstructions":instructions,
-        "developerInstructions":"","config":{"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}},
+        "developerInstructions":"","config":super::role_models::thread_config(&state["model"]),
         "dynamicTools":receiver::control::definitions(state),"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
     let result = observed.result;
     state["session"] = result["thread"]["id"].clone();
@@ -270,6 +270,7 @@ fn verify_created_codex(state: &J, result: &J, model: &str, provider: &str) -> R
         result["model"] == model && result["modelProvider"] == provider,
         "Codex selected another model/provider",
     )?;
+    super::role_models::verify_effort(&state["model"], result)?;
     verify_thread(state, &result["thread"])?;
     ensure(
         result["thread"]["turns"]
@@ -592,7 +593,7 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
     let result = connection.call(
         "turn/start",
         &json!({"threadId":state["session"],
-        "input":[{"type":"text","text":prompt,"text_elements":[]}],"model":state["model"]["id"],
+        "input":[{"type":"text","text":prompt,"text_elements":[]}],"model":state["model"]["id"],"effort":state["model"]["reasoning_effort"],
         "sandboxPolicy":turn_sandbox(root, state)?}),
     )?;
     turn["turn"] = result["turn"]["id"].clone();

@@ -1,5 +1,7 @@
 # Task-owned Codex and OpenCode runtimes (#35)
 
+> **真实验收补充（2026-10-26，优先适用）：** 已完成一条 Sol/high 开发、Astra/high 独立评审、协调者自动本地交付及回收的真实任务；修复了上游 Guardian 子会话遗漏回收，见[两次运行记录及边界](upstream-configuration.md#real-continuation-acceptance-and-guardian-cleanup-2026-10-26)。远端发布、故障/并行矩阵和连续 20 条无残留仍未完成。
+
 > **角色模型修正（优先适用）：** coordinator 使用启动 spec 的 `model`，开发/评审分别使用 `role_models.developer` / `role_models.reviewer`。缺失时不继承 coordinator；见[配置示例](upstream-configuration.md#role-model-configuration-2026-10-26-current)。
 
 > **2026-10-26 接续更新：** 新建上游 Codex 接收者使用 queue-tool-v2，由原队列驱动器执行有界开发/评审/本地交付/终态接续。新增 receiver-start、broker-recover、receiver-recover；详见[实现与恢复边界](upstream-configuration.md#coordinator-continuation-implementation-2026-10-26)。下方旧 bootstrap/控制能力限制作为历史保留，本段优先。

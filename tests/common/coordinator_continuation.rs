@@ -4,6 +4,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const COORD: &str = "22222222-2222-2222-2222-222222222222";
+const GUARDIAN: &str = "55555555-5555-5555-5555-555555555555";
 const WORKER: &str = "33333333-3333-3333-3333-333333333333";
 
 #[test]
@@ -39,17 +40,26 @@ fn exercise(success: bool) {
     let (replies, receive) = mpsc::channel::<J>();
     let commands = Arc::new(Mutex::new(commands));
     let server_cwd = cwd.clone();
-    let server = parallel(if success { 6 } else { 5 }, move |peer| {
-        peer_loop(peer, &server_cwd, &commands, &replies);
+    let guardian = f
+        .temp
+        .path()
+        .join(format!("rollout-guardian-{GUARDIAN}.jsonl"));
+    if success {
+        fs::write(&guardian, format!("{}\n",json!({"type":"session_meta","payload":{
+            "id":GUARDIAN,"parent_thread_id":WORKER,"cwd":cwd,"source":{"subagent":{"other":"guardian"}}}}))).unwrap();
+    }
+    let shared_guardian = guardian.clone();
+    let server = parallel(if success { 11 } else { 6 }, move |peer| {
+        peer_loop(peer, &server_cwd, &commands, &replies, &shared_guardian);
     });
     let mut broker = task_runtime::launch(
         &mut env,
         &coord,
         &json!({
             "adapter":"codex","configuration":"upstream","socket":server.path,
-            "cwd":cwd,"model":{"providerID":"openai","id":"fixture"},
-            "role_models":{"developer":{"providerID":"openai","id":"developer-fixture"},
-                "reviewer":{"providerID":"openai","id":"reviewer-fixture"}},
+            "cwd":cwd,"model":{"providerID":"openai","id":"fixture","reasoning_effort":"high"},
+            "role_models":{"developer":{"providerID":"openai","id":"developer-fixture","reasoning_effort":"medium"},
+                "reviewer":{"providerID":"openai","id":"reviewer-fixture","reasoning_effort":"high"}},
             "driver_binary":env!("CARGO_BIN_EXE_herdr-flow")
         }),
     )
@@ -256,6 +266,7 @@ fn exercise(success: bool) {
     assert!(watcher.0.wait().unwrap().success());
     broker.wait().unwrap();
     server.finish();
+    assert!(!guardian.exists());
 }
 
 fn tool(send: &mpsc::Sender<J>, receive: &mpsc::Receiver<J>, id: u64, action: &str, spec: J) -> J {
@@ -279,6 +290,7 @@ fn peer_loop(
     cwd: &Path,
     commands: &Mutex<mpsc::Receiver<J>>,
     replies: &mpsc::Sender<J>,
+    guardian: &Path,
 ) {
     use std::os::fd::AsRawFd;
     peer.initialize();
@@ -348,11 +360,25 @@ fn peer_loop(
         ) {
             assert_eq!(request["params"]["model"], selected_model);
         }
+        let selected_effort = if coordinator || review {
+            "high"
+        } else {
+            "medium"
+        };
+        if request["method"] == "thread/start" {
+            assert_eq!(
+                request["params"]["config"]["model_reasoning_effort"],
+                selected_effort
+            );
+        }
+        if request["method"] == "turn/start" {
+            assert_eq!(request["params"]["effort"], selected_effort);
+        }
         let thread = json!({"id":id,"cwd":cwd,"modelProvider":"openai","model":selected_model,
             "status":{"type":"idle"},"canAcceptDirectInput":true,"turns":turns});
         let result = match request["method"].as_str().unwrap() {
             "thread/start" | "thread/read" => {
-                json!({"thread":thread,"model":selected_model,"modelProvider":"openai"})
+                json!({"thread":thread,"model":selected_model,"modelProvider":"openai","reasoningEffort":selected_effort})
             }
             "turn/start" if coordinator => json!({"turn":{"id":"coordinator-turn"}}),
             "turn/start" if review => {
@@ -383,7 +409,21 @@ fn peer_loop(
                 json!({"turn":{"id":"worker-turn"}})
             }
             "thread/turns/list" => json!({"data":turns,"nextCursor":null}),
+            "thread/list" => {
+                let rows = if guardian.exists()
+                    && request["params"]["cwd"] == json!(cwd)
+                    && request["params"]["archived"] == false
+                {
+                    json!([{"id":GUARDIAN,"cwd":cwd,"path":guardian,"parentThreadId":null,"source":{"subAgent":{"other":"guardian"}}}])
+                } else {
+                    json!([])
+                };
+                json!({"data":rows,"nextCursor":null})
+            }
             "thread/delete" => {
+                if request["params"]["threadId"] == GUARDIAN {
+                    fs::remove_file(guardian).unwrap();
+                }
                 peer.json(&json!({"id":request["id"],"result":{}}));
                 break;
             }

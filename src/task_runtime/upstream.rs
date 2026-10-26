@@ -2,6 +2,8 @@
 //! copied or rewritten, and the shared server is never registered as our child.
 use super::*;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+mod descendants;
+pub(crate) use descendants::discover;
 
 pub(super) fn selected(spec: &J) -> bool {
     spec["configuration"] == "upstream"

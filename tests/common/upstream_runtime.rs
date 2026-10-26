@@ -25,11 +25,18 @@ fn exercise(lost_reply: bool) {
     // The shared service must survive all durable cleanup phases before the
     // next deletion/retry connection; it is not a 15-second one-shot RPC peer.
     let server = rpc_server::Server::start_connections_with_timeout(
-        if lost_reply { 4 } else { 3 },
+        if lost_reply { 5 } else { 4 },
         std::time::Duration::from_secs(60),
         move |mut peer| {
             peer.initialize();
             let request = peer.request();
+            if request["method"] == "thread/list" {
+                peer.json(&json!({"id":request["id"],"result":{"data":[],"nextCursor":null}}));
+                let next = peer.request();
+                assert_eq!(next["method"], "thread/list");
+                peer.json(&json!({"id":next["id"],"result":{"data":[],"nextCursor":null}}));
+                return;
+            }
             if index == 0 {
                 assert_eq!(request["method"], "thread/start");
                 peer.json(&json!({"id":request["id"],"result":{

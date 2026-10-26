@@ -34,6 +34,11 @@ missing worker selections must not inherit the coordinator model. Use the explic
 for the first authorized turn, then let the existing queue watcher collect workers
 and deliver notifications. Follow [continuation and recovery boundaries](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26); do not replay unknown creation/tool/delivery outcomes.
 
+Copy each resolved role's `reasoning_effort` into its model selection when specified;
+the task runtime sends it for thread creation and every turn and verifies the creation
+response. Terminal cleanup must include proven upstream Guardian descendants, not
+just Flow-created threads. See [real local acceptance and its limits](references/upstream-configuration.md#real-continuation-acceptance-and-guardian-cleanup-2026-10-26).
+
 Codex receiver activation requires its task-bound bootstrap, readiness checks and
 explicit activation. Select only supported roles/transports, and distinguish
 implementation, regression and actual integration evidence using

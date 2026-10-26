@@ -3,6 +3,66 @@
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 
+## Real continuation acceptance and Guardian cleanup (2026-10-26)
+
+The configured team uses gpt-6.1-sol/high for coordination and development and
+gpt-6-astra/high for independent review. Read-only inspection of the existing
+Codex 0.164.0 service advertised these models and high effort; its shared default
+remained gpt-6-astra/medium. Explicit per-role effort is therefore now transmitted
+and verified instead of silently accepting the service default.
+
+The first real run developed a new commit, independently reviewed its fixed
+snapshot, applied results, delivered locally, finalized and removed task roots.
+However, additional inventory found a `codex-auto-review` Guardian descendant
+that the original three-thread cleanup omitted. **This run is not an automatic
+no-residue acceptance pass**, even though its original harness passed. Evidence
+and the correction are retained at `/mnt/dev-ssd/dev-tmp/.tmp5mRmfM`, including
+`post-run-audit.json`; no historical result was erased or reclassified as upstream
+owned data. The exact Guardian was recovered through `thread/delete` only after
+its rollout metadata parent matched the retained development-session evidence.
+Activity/archived inventory then returned no sessions for either task cwd.
+
+The fix discovers task descendants after deleting recorded parents, inventories
+active and archived sessions for each recorded cwd with bounded pagination, and
+requires exact rollout ID/cwd/parent metadata. Cwd alone never authorizes deletion;
+foreign-parent sessions are preserved. The installed service omits Guardian parent
+IDs in `thread/list`, so a bounded, canonical, same-user regular rollout's first
+metadata line supplies the missing relationship. No authentication files are read.
+Ambiguous/malformed metadata or inventory errors retain cleanup obligations.
+
+Discovered identities are added to the existing durable cleanup plan before any
+delete, then processed through the existing exact-ID deletion/retry mechanism.
+The scan repeats after deletion before roots are released. Guardian model choice
+belongs to the upstream approval service; it is distinct from the independent
+reviewer role. Approval behavior, accounts, proxies and shared defaults are not
+changed to avoid generating this resource. Protocol integration tests now include
+an actual synthetic Guardian rollout with a missing API parent and assert its
+removal. The live harness additionally requires empty active/archived task-cwd
+inventories before declaring success.
+
+The second fresh real task passed the strengthened harness in 190.42 seconds.
+Evidence: `/mnt/dev-ssd/dev-tmp/.tmpKox0sK`; output commit
+`9ee9e5ce69161e02f52b7893e6aa3a30ae9db6ac` at local `refs/heads/accepted`.
+Sol/high developed `answer.txt` with exactly `42\n`; Astra/high reviewed the fixed
+commit; the real coordinator ACKed/applied results, delivered and finalized.
+The harness supplied the requirement, initial empty repository/registered activity,
+and predeclared local authorization, not the finished candidate or later decisions.
+Some malformed tool arguments were rejected and corrected by the coordinator;
+those are retained as observed usability limitations, not hidden successful calls.
+
+An observed Guardian descendant was automatically removed by the revised cleanup.
+`upstream-inventory-before-cleanup.log` records its identity;
+`upstream-inventory-after-cleanup.log` records empty active and archived inventories,
+and its rollout file is absent. `full-task-result.json` records the exact output
+and removed task workspace/scratch/registration. Retained seed/output repositories,
+empty harness queue and bounded acceptance evidence are test fixtures, not renamed
+upstream task residue. Shared service processes and default settings remained intact.
+
+This is one complete real local-delivery scenario. It does not complete remote
+publication, parallel/failure/restart matrices or 20 consecutive no-residue tasks.
+The inventory implementation covers descendants in recorded task/review cwds;
+this run does not establish arbitrary child-cwd or other upstream-version support.
+
 ## Role model configuration (2026-10-26, current)
 
 Coordinator, developer and reviewer models are independently configurable.
@@ -19,10 +79,10 @@ role models, then pass the resolved snapshot in the coordinator's launch spec:
   "configuration": "upstream",
   "socket": "/absolute/existing/app-server.sock",
   "cwd": "/absolute/owned/checkout",
-  "model": {"providerID": "openai", "id": "COORDINATOR_MODEL"},
+  "model": {"providerID": "openai", "id": "COORDINATOR_MODEL", "reasoning_effort": "high"},
   "role_models": {
-    "developer": {"providerID": "openai", "id": "DEVELOPER_MODEL"},
-    "reviewer": {"providerID": "openai", "id": "REVIEWER_MODEL"}
+    "developer": {"providerID": "openai", "id": "DEVELOPER_MODEL", "reasoning_effort": "high"},
+    "reviewer": {"providerID": "openai", "id": "REVIEWER_MODEL", "reasoning_effort": "high"}
   }
 }
 ```
@@ -51,13 +111,17 @@ Model-issued `run` requests cannot override the model, provider or endpoint.
 
 The local delivery executor is not a publishing Agent and makes no model call;
 `roles.publish` remains the existing separate publishing-role configuration.
-This change does not implement a TOML resolver or change reasoning-effort settings.
+The optional `reasoning_effort` field in each model selection snapshots that
+role's resolved effort. It is passed as a per-thread `model_reasoning_effort`
+setting and as `effort` on every turn, without editing shared configuration.
+An explicit effort must match the thread creation response; omission preserves
+the upstream default. This does not implement a TOML resolver.
 Login, subscription, proxy and billing remain entirely upstream.
 
 The synthetic continuation tests use three distinct model IDs and assert actual
 thread/turn RPC selections, including after coordinator broker recovery. The
 explicit real-task harness additionally requires `HERDR_UPSTREAM_ROLE_MODELS`
-with developer/reviewer selections; no real-model run is claimed here.
+with developer/reviewer selections; see the real-run evidence above.
 
 Validation: the full default-concurrency coverage suite passed (197 library tests
 plus binary/integration suites), as did format, all-target/all-feature Clippy and

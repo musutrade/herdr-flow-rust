@@ -7,14 +7,22 @@ pub(super) fn validate_model(model: &J) -> Result<()> {
         .as_object()
         .ok_or_else(|| FlowError::guard("configured model required"))?;
     ensure(
-        fields.len() == 2
-            && fields
-                .keys()
-                .all(|key| ["providerID", "id"].contains(&key.as_str())),
-        "model selection only accepts providerID and id",
+        fields
+            .keys()
+            .all(|key| ["providerID", "id", "reasoning_effort"].contains(&key.as_str())),
+        "model selection only accepts providerID, id and reasoning_effort",
     )?;
     required(model, "id")?;
     required(model, "providerID")?;
+    if let Some(effort) = model.get("reasoning_effort") {
+        ensure(
+            matches!(
+                effort.as_str(),
+                Some("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")
+            ),
+            "invalid explicit reasoning_effort; no default substitution",
+        )?;
+    }
     Ok(())
 }
 
@@ -54,9 +62,48 @@ pub(super) fn select(runtime: &J, role: &J) -> Result<J> {
     Ok(runtime["role_models"][key].clone())
 }
 
+pub(super) fn thread_config(model: &J) -> J {
+    let mut config = json!({"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}});
+    if let Some(effort) = model.get("reasoning_effort") {
+        config["model_reasoning_effort"] = effort.clone();
+    }
+    config
+}
+
+pub(super) fn verify_effort(model: &J, result: &J) -> Result<()> {
+    if let Some(effort) = model.get("reasoning_effort") {
+        ensure(
+            result["reasoningEffort"] == *effort,
+            "Codex selected another reasoning effort",
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_effort_is_preserved_and_verified() {
+        let model = json!({"providerID":"existing","id":"selected","reasoning_effort":"high"});
+        validate_model(&model).unwrap();
+        assert_eq!(thread_config(&model)["model_reasoning_effort"], "high");
+        verify_effort(&model, &json!({"reasoningEffort":"high"})).unwrap();
+        for result in [json!({}), json!({"reasoningEffort":"medium"})] {
+            assert!(verify_effort(&model, &result).is_err());
+        }
+        for effort in [J::Null, json!("unknown"), json!(true)] {
+            let mut invalid = model.clone();
+            invalid["reasoning_effort"] = effort;
+            assert!(validate_model(&invalid).is_err());
+        }
+        let absent = json!({"providerID":"existing","id":"selected"});
+        assert!(thread_config(&absent)
+            .get("model_reasoning_effort")
+            .is_none());
+        verify_effort(&absent, &json!({})).unwrap();
+    }
 
     #[test]
     fn role_selection_is_explicit_and_never_falls_back() {

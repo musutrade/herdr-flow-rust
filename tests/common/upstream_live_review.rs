@@ -89,6 +89,7 @@ fn live_upstream_coordinator_full_task() {
     broker.wait().unwrap();
     assert!(!workspace.exists() && !scratch.exists());
     assert!(!task_env::is_registered("task").unwrap());
+    assert_upstream_empty(&socket, &[cwd.clone(), workspace.join("reviews/review-a1")]);
     assert_eq!(
         git(&target, &["show", "refs/heads/accepted:answer.txt"]),
         "42"
@@ -109,6 +110,32 @@ fn live_upstream_coordinator_full_task() {
         "global_entrypoint_changed":false,"remote_publication":false}),
     )
     .unwrap();
+}
+
+fn assert_upstream_empty(socket: &str, cwds: &[PathBuf]) {
+    let mut client = herdr_flow::codex::rpc::Client::new(socket);
+    for archived in [false, true] {
+        let result = client
+            .call(
+                "thread/list",
+                &json!({"cwd":cwds,"archived":archived,
+            "sourceKinds":["cli","vscode","exec","appServer","subAgent","subAgentReview",
+                "subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"],
+            "useStateDbOnly":true,"limit":128}),
+            )
+            .unwrap();
+        assert!(
+            result["data"].as_array().unwrap().is_empty() && result["nextCursor"].is_null(),
+            "owned task cwd retains upstream sessions: {}",
+            result["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["id"].clone())
+                .collect::<Vec<_>>()
+                .len()
+        );
+    }
 }
 
 fn bind_coordinator(f: &Fixture, guard: &Path) {

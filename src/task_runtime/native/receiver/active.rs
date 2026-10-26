@@ -85,7 +85,7 @@ impl ReceiverAdapter for Adapter {
         let text = super::control::prompt(&self.state, text);
         let response = client(&self.root)?.call(
             "turn/start",
-            &json!({"threadId":self.state["session"],"model":self.state["model"]["id"],
+            &json!({"threadId":self.state["session"],"model":self.state["model"]["id"],"effort":self.state["model"]["reasoning_effort"],
             "input":[{"type":"text","text":text}],"sandboxPolicy":turn_sandbox(&self.root, &self.state)?}),
         )?;
         let id = required(&response["turn"], "id")?;
