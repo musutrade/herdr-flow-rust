@@ -16,12 +16,13 @@ fn http_child() {
     http::serve(listener, Path::new(config["cwd"].as_str().unwrap()));
 }
 
-fn linked(f: &Fixture) -> task_env::TaskEnvironment {
+pub(super) fn linked(f: &Fixture) -> task_env::TaskEnvironment {
     let mut q = f.state();
     q["tasks"].as_object_mut().unwrap().remove("task");
     progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":"fixture",
         "basis":{"original":["fixture"],"changes":[],"specifications":[],"endpoint":"local","confirmation":"fixture"},
-        "authorization":[{"id":"develop","action":"development","source":"fixture"}]}), util::now()).unwrap();
+        "authorization":[{"id":"develop","action":"development","source":"fixture"},
+            {"id":"verify","action":"review","source":"fixture"}]}), util::now()).unwrap();
     for mut spec in [
         json!({"kind":"artifact","artifact":{"id":f.commit,"adapter":"git","location":f.temp.path().join("repo")}}),
         json!({"kind":"candidate","candidate":f.commit}),
