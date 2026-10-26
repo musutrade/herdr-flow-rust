@@ -19,12 +19,12 @@ property in the initialization spec with this repository's inventory:
   "ci": {
     "kind": "github-actions", "version": 1,
     "workflows": [
-      {"file": "rust.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["test", "msrv"]},
+      {"file": "rust.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["test"]},
       {"file": "audit.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["audit"]},
       {"file": "crap.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["crap"]}
     ],
     "landing_workflows": [
-      {"file": "rust.yml", "event": "push", "decision": "required_jobs", "jobs": ["test", "msrv"]},
+      {"file": "rust.yml", "event": "push", "decision": "required_jobs", "jobs": ["test"]},
       {"file": "audit.yml", "event": "push", "decision": "required_jobs", "jobs": ["audit"]},
       {"file": "crap.yml", "event": "push", "decision": "required_jobs", "jobs": ["crap"]}
     ]
