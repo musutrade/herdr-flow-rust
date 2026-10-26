@@ -34,7 +34,7 @@ No new dependency, feature, CLI command or minimum Rust version is introduced.
 Existing integration tests already import the old public paths: `refactor_c`
 exercises fragmentation, close validation and extended/masked frames;
 `rpc_client`, `tui_bridge` and `task_runtime` cover consumers. Use those existing
-checks plus the complete stable/MSRV suite, rustdoc, Clippy, release builds and
+checks plus the complete stable suite, rustdoc, Clippy, release builds and
 absolute CRAP gate, rather than duplicating implementation-shaped tests.
 Source module/type diagnostic names can change after a move; stable Rust import
 paths are preserved, not an ABI or `type_name` string guarantee.

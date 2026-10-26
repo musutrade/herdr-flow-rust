@@ -56,12 +56,12 @@ Herdr 开发流程全链路验收。当前开发/发布 agent 之间的 Herdr �
 依赖：
 
 - Linux（上下文守护/自动换班依赖 `/proc`、Unix domain socket 与 POSIX `flock`）
-- Rust 1.85+ 与 Cargo（CI 独立验证最低版本 1.85.0）
+- Rust stable 与 Cargo（不再承诺或单独验证固定的最低 Rust 版本）
 - 已认证的 GitHub CLI `gh`
 - 自动编排需要运行中的本地 Codex app-server 与同版本原生 TUI（已验证 0.162.1）
 - 仅启用 Herdr 适配时需要匹配的 Herdr 会话/能力；核心生命周期不依赖 Herdr
 
-CI 分别在 stable 和最低版本 1.85.0 上使用锁文件构建、测试。第三方 Actions
+CI 在 stable 上使用锁文件构建、测试，不再运行独立的 MSRV 作业。第三方 Actions
 固定到完整 commit SHA，由 Dependabot 每周提出 Actions 与 Cargo 更新；更新需要
 通过相同检查。依赖审计在 PR、main 更新和每周定时执行，使用当时的 RustSec
 数据库；历史审计通过不代表之后没有新公告。

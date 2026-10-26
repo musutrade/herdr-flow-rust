@@ -2,7 +2,6 @@
 name = "herdr-flow"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
 description = "Bounded agent sessions, durable handoffs, and read-only CI observation for Herdr"
 readme = "README.md"
 
