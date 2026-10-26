@@ -14,6 +14,7 @@ pub mod broker;
 pub mod cli;
 pub mod configuration;
 mod launcher;
+mod role_models;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
 pub mod review;

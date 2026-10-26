@@ -92,6 +92,7 @@ fn validate_spec(spec: &J) -> Result<()> {
                 "socket",
                 "cwd",
                 "model",
+                "role_models",
                 "driver_binary",
                 "approval_policy",
                 "review_snapshot",
@@ -100,19 +101,8 @@ fn validate_spec(spec: &J) -> Result<()> {
         }),
         "unsupported upstream launch field; account configuration is not accepted",
     )?;
-    let model = spec["model"]
-        .as_object()
-        .ok_or_else(|| FlowError::guard("configured model required"))?;
-    ensure(
-        model.len() == 2
-            && model
-                .keys()
-                .all(|key| ["providerID", "id"].contains(&key.as_str())),
-        "model selection only accepts providerID and id",
-    )?;
-    required(&spec["model"], "id")?;
-    required(&spec["model"], "providerID")?;
-    Ok(())
+    role_models::validate_model(&spec["model"])?;
+    role_models::validate(spec)
 }
 
 /// Persist creation intent before sending, and restrict all later operations to

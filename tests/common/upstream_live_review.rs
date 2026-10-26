@@ -26,7 +26,21 @@ fn live_upstream_coordinator_full_task() {
     let cwd = env.workspace_root.join("checkout");
     let workspace = env.workspace_root.clone();
     let scratch = env.temp_root.clone();
-    let mut broker = attach(&mut env, &coord, &socket, &model, &cwd, None);
+    let role_models: J = serde_json::from_str(
+        &std::env::var("HERDR_UPSTREAM_ROLE_MODELS")
+            .expect("explicit developer/reviewer models required"),
+    )
+    .unwrap();
+    let mut broker = task_runtime::launch(
+        &mut env,
+        &coord,
+        &json!({
+            "adapter":"codex","configuration":"upstream","socket":socket,"cwd":cwd,
+            "model":model,"role_models":role_models,"approval_policy":"on-request",
+            "driver_binary":env!("CARGO_BIN_EXE_herdr-flow")
+        }),
+    )
+    .unwrap();
     let guard = coord.join("guard");
     task_runtime::native::receiver::bootstrap(
         &env,
@@ -90,7 +104,7 @@ fn live_upstream_coordinator_full_task() {
         &f.temp.path().join("full-task-result.json"),
         &json!({
         "scope":"real coordinator/developer/reviewer; new predeclared local Git target only",
-        "candidate_seeded_by_harness":false,"model":model,"task_resources_removed":true,
+        "candidate_seeded_by_harness":false,"model":model,"role_models":role_models,"task_resources_removed":true,
         "commit":git(&target, &["rev-parse","refs/heads/accepted"]),
         "global_entrypoint_changed":false,"remote_publication":false}),
     )

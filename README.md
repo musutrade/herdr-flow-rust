@@ -13,6 +13,8 @@ Linux 协议夹具测试需要 `/usr/bin/bwrap`（bubblewrap）及可用的用�
 详见[上游配置与资源回收](references/upstream-configuration.md)。
 
 新建 Codex 协调者已接通按 Owner 限定的开发派发、自动收集、独立评审、本地 Git 交付和终态回收；
+协调、开发、评审模型可分别配置；自动派发读取任务中固定的角色模型，缺失或不可用时不静默替换。
+[角色配置与启动示例](references/upstream-configuration.md#role-model-configuration-2026-10-26-current)。
 支持任务 broker 重启后对同一空闲接收者恢复绑定。新入口和未知结果的恢复边界见
 [协调者接续说明](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26)。
 协议集成测试与真实模型总验收分别记录，旧接收者不会自动升级控制能力。

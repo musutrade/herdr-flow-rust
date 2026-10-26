@@ -48,6 +48,8 @@ fn exercise(success: bool) {
         &json!({
             "adapter":"codex","configuration":"upstream","socket":server.path,
             "cwd":cwd,"model":{"providerID":"openai","id":"fixture"},
+            "role_models":{"developer":{"providerID":"openai","id":"developer-fixture"},
+                "reviewer":{"providerID":"openai","id":"reviewer-fixture"}},
             "driver_binary":env!("CARGO_BIN_EXE_herdr-flow")
         }),
     )
@@ -140,6 +142,16 @@ fn exercise(success: bool) {
         json!({"wait":"dev","instruction":"fixture","socket":"/foreign"}),
     );
     assert_eq!(bad["success"], false);
+    let model_override = tool(
+        &send,
+        &receive,
+        8,
+        "run",
+        json!({
+            "wait":"dev","instruction":"fixture","model":{"providerID":"other","id":"other"}
+        }),
+    );
+    assert_eq!(model_override["success"], false);
     assert!(!coord.parent().unwrap().join("dev-a1").exists());
     let denied = tool(
         &send,
@@ -323,11 +335,24 @@ fn peer_loop(
         } else {
             WORKER
         };
-        let thread = json!({"id":id,"cwd":cwd,"modelProvider":"openai","model":"fixture",
+        let selected_model = if coordinator {
+            "fixture"
+        } else if review {
+            "reviewer-fixture"
+        } else {
+            "developer-fixture"
+        };
+        if matches!(
+            request["method"].as_str(),
+            Some("thread/start" | "turn/start")
+        ) {
+            assert_eq!(request["params"]["model"], selected_model);
+        }
+        let thread = json!({"id":id,"cwd":cwd,"modelProvider":"openai","model":selected_model,
             "status":{"type":"idle"},"canAcceptDirectInput":true,"turns":turns});
         let result = match request["method"].as_str().unwrap() {
             "thread/start" | "thread/read" => {
-                json!({"thread":thread,"model":"fixture","modelProvider":"openai"})
+                json!({"thread":thread,"model":selected_model,"modelProvider":"openai"})
             }
             "turn/start" if coordinator => json!({"turn":{"id":"coordinator-turn"}}),
             "turn/start" if review => {

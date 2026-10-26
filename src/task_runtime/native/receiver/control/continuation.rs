@@ -176,7 +176,7 @@ fn launch_spec(
     )?;
     let socket = runtime::upstream::endpoint(&upstream)?;
     let mut launch = json!({"adapter":"codex","configuration":"upstream","socket":socket,
-        "cwd":env.workspace_root.join("checkout"),"model":upstream["model"],
+        "cwd":env.workspace_root.join("checkout"),"model":runtime::role_models::select(&upstream, &packet["binding"]["lineage"]["role"] )?,
         "approval_policy":upstream.get("approval_policy").cloned().unwrap_or(json!("untrusted")),
         "driver_binary":upstream.get("driver_binary").cloned().unwrap_or(json!(std::env::current_exe()?))});
     if packet["binding"]["lineage"]["role"] == "acceptance" {

@@ -819,6 +819,20 @@ fn ensure_receiver(root: &Path, q: &J) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn created_model_must_match_selection_without_accepting_substitution() {
+        let state = json!({"session":"12345678-1234-1234-1234-123456789abc",
+            "cwd":"/task","model":{"id":"selected","providerID":"configured"}});
+        let result = json!({"model":"selected","modelProvider":"configured",
+            "thread":{"id":state["session"],"cwd":"/task","modelProvider":"configured","turns":[]}});
+        verify_created_codex(&state, &result, "selected", "configured").unwrap();
+        for key in ["model", "modelProvider"] {
+            let mut wrong = result.clone();
+            wrong[key] = json!("substitute");
+            assert!(verify_created_codex(&state, &wrong, "selected", "configured").is_err());
+        }
+    }
+
+    #[test]
     fn shared_history_rejects_foreign_thread_before_reading_turns() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;

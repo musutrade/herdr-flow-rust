@@ -3,6 +3,68 @@
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 
+## Role model configuration (2026-10-26, current)
+
+Coordinator, developer and reviewer models are independently configurable.
+This corrects the previous continuation implementation, which incorrectly reused
+one coordinator model for every worker. The following selection takes precedence
+over earlier same-model examples; historical evidence remains unchanged.
+
+Use the existing [team configuration](team-config.md) precedence to resolve the
+role models, then pass the resolved snapshot in the coordinator's launch spec:
+
+```json
+{
+  "adapter": "codex",
+  "configuration": "upstream",
+  "socket": "/absolute/existing/app-server.sock",
+  "cwd": "/absolute/owned/checkout",
+  "model": {"providerID": "openai", "id": "COORDINATOR_MODEL"},
+  "role_models": {
+    "developer": {"providerID": "openai", "id": "DEVELOPER_MODEL"},
+    "reviewer": {"providerID": "openai", "id": "REVIEWER_MODEL"}
+  }
+}
+```
+
+These model IDs are placeholders, not availability claims or defaults.
+`roles.coordinator.model` maps to `model.id`, `roles.dev.model` to
+`role_models.developer.id`, and `roles.review.model` to
+`role_models.reviewer.id`. Provider IDs identify the explicitly selected existing
+upstream configuration; they do not configure accounts or billing. As before,
+the coordinating agent resolves TOML; the runtime does not automatically read or
+merge configuration files. This spec is a task snapshot, not another config store.
+
+The persisted activity role selects the worker model: `development` uses developer,
+`acceptance` uses reviewer. Each worker runtime/native creation record captures its
+selection; the returned model/provider must match before dispatch. Coordinator
+turns also explicitly request their recorded model. Missing role configuration,
+unknown roles, malformed selections or a substituted upstream model are errors.
+There is no coordinator-model default or availability fallback. Even when all
+roles intentionally use one model, supply both role entries explicitly.
+
+Standalone runtime launches still need only `model`. Existing coordinators without
+`role_models` can inspect/ACK/apply but cannot auto-dispatch workers; their stored
+configuration is not silently migrated or edited. New defaults take effect in new
+explicitly prepared tasks. Receiver recovery rejects changed role selections.
+Model-issued `run` requests cannot override the model, provider or endpoint.
+
+The local delivery executor is not a publishing Agent and makes no model call;
+`roles.publish` remains the existing separate publishing-role configuration.
+This change does not implement a TOML resolver or change reasoning-effort settings.
+Login, subscription, proxy and billing remain entirely upstream.
+
+The synthetic continuation tests use three distinct model IDs and assert actual
+thread/turn RPC selections, including after coordinator broker recovery. The
+explicit real-task harness additionally requires `HERDR_UPSTREAM_ROLE_MODELS`
+with developer/reviewer selections; no real-model run is claimed here.
+
+Validation: the full default-concurrency coverage suite passed (197 library tests
+plus binary/integration suites), as did format, all-target/all-feature Clippy and
+suppression policy. Absolute CRAP threshold 10 passed without a baseline; selected
+source line coverage is 83.6%, and the role-selection module has 100% line coverage.
+Logs and reports are retained under `/mnt/dev-ssd/dev-tmp/role-model-*`.
+
 ## Implemented support boundary (2026-10-26)
 
 Only Codex is supported. The OpenCode module, CLI dispatch, HTTP/session creation,
@@ -34,8 +96,8 @@ The existing queue watcher executes the coordinator's bounded continuations:
 - `lineage`: existing artifact/candidate/activity/continue operations for
   the same Owner. Creating or revising requirements and authorization is refused.
 - `run`: starts an already registered development or acceptance activity, using
-  its persisted assignment. It inherits the coordinator's pinned upstream socket,
-  configured model/provider and approval policy. The model cannot supply a new
+  its persisted assignment. It uses the coordinator's pinned upstream socket and approval policy,
+  with the operator-configured model/provider for the registered activity role. The model cannot supply a new
   executable, endpoint, credentials or sandbox. Acceptance creates the registered
   fixed Git snapshot through the existing review API.
 - `inspect`: includes collected native results. The watcher collects dispatched

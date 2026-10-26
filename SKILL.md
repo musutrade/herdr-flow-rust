@@ -28,7 +28,9 @@ CI or process fixture is not real-role or power-loss acceptance. Do not redo the
 merged slices or close #130/#112/#38/#32 on partial evidence.
 
 Fresh upstream Codex coordinators use bounded queue-tool-v2 continuations; existing
-v1 receivers remain inspect/ACK/apply only. Use the explicit receiver-start entry
+v1 receivers remain inspect/ACK/apply only. Snapshot the resolved coordinator model
+in `model` and explicit developer/reviewer selections in `role_models` at launch;
+missing worker selections must not inherit the coordinator model. Use the explicit receiver-start entry
 for the first authorized turn, then let the existing queue watcher collect workers
 and deliver notifications. Follow [continuation and recovery boundaries](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26); do not replay unknown creation/tool/delivery outcomes.
 

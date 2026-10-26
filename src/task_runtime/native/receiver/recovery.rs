@@ -317,7 +317,7 @@ mod tests {
         let next = plan(temp.path(), &runtime, &journal, &state).unwrap();
         assert_eq!(next["runtime_pid"], std::process::id());
         assert_eq!(next["session"], state["session"]);
-        for key in ["model", "instance", "socket"] {
+        for key in ["model", "role_models", "instance", "socket"] {
             let mut other = runtime.clone();
             other[key] = json!("foreign");
             assert!(plan(temp.path(), &other, &journal, &state).is_err());
