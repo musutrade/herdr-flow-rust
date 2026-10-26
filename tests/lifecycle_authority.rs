@@ -11,6 +11,8 @@ use std::{
 use tempfile::TempDir;
 
 static LOCK: Mutex<()> = Mutex::new(());
+#[path = "common/isolated_runtime.rs"]
+mod isolated_runtime;
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 
 struct Fixture {
