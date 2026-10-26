@@ -283,7 +283,9 @@ fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation
     assert!(task_runtime::review::prepare(&mut env, &root, &request).is_err());
     fs::remove_file(common).unwrap();
     let ready = env.temp_root.join("operation-ready");
+    let release = env.temp_root.join("operation-release");
     let mut options = util::process::CommandOptions::default();
+    options.timeout = std::time::Duration::from_secs(10);
     options
         .env
         .insert(task_env::MARKER_ENV.into(), env.instance_id.clone());
@@ -294,9 +296,10 @@ fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation
     let argv = vec![
         "/bin/sh".into(),
         "-c".into(),
-        "printf ready > \"$1\"; sleep 2".into(),
+        "printf ready > \"$1\"; while [ ! -f \"$2\" ]; do :; done".into(),
         "fixture".into(),
         ready.to_str().unwrap().into(),
+        release.to_str().unwrap().into(),
     ];
     let child = std::thread::spawn(move || util::process::run_command(&argv, &options).unwrap());
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -304,8 +307,10 @@ fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation
         assert!(std::time::Instant::now() < until);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let error = task_runtime::review::prepare(&mut env, &root, &request).unwrap_err();
-    assert!(error.message.contains("still running"), "{error}");
+    let observed = task_runtime::review::prepare(&mut env, &root, &request);
+    fs::write(release, "release").unwrap();
     assert!(child.join().unwrap().success());
+    let error = observed.unwrap_err();
+    assert!(error.message.contains("still running"), "{error}");
     task_runtime::review::prepare(&mut env, &root, &request).unwrap();
 }
