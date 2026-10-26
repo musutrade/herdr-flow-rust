@@ -9,7 +9,7 @@ fn start(env: &mut TaskEnvironment, control: &J) -> std::path::PathBuf {
     let binary = fixture_binary(&root, &cwd, 0);
     util::atomic_write_json(&root.join("receiver-fixture.json"), control).unwrap();
     // Synthetic server, deliberately independent of host namespace support.
-    let spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,
+    let spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":1,
         "model":{"providerID":"openai","id":"fixture"}});
     let mut child = task_runtime::launch(env, &root, &spec).unwrap();
     fixture_ready(&root, &mut child);

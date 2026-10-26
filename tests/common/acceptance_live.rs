@@ -298,20 +298,12 @@ fn native_prepare_inner<F: FnOnce(&mut J)>(
     suffix: &str,
     configure: F,
 ) -> NativeTurn {
+    task_runtime::configuration::require_upstream("opencode").unwrap();
     let root = task_runtime::prepare(env, name).unwrap();
-    common::create_dir_all(root.join("config/opencode")).unwrap();
-    fs::copy(
-        std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap(),
-        root.join("config/opencode/opencode.json"),
-    )
-    .unwrap();
-    // This bounded test measures explicit roles, without internal delegation.
-    // Only the disposable config copy is changed; native approvals remain native.
-    let config_path = root.join("config/opencode/opencode.json");
-    let mut config = util::read_json(&config_path).unwrap();
-    config["tools"]["task"] = json!(false);
-    configure(&mut config);
-    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    // Any future task-only overrides must use a supported upstream interface;
+    // never copy or rewrite the user's provider configuration here.
+    let mut task_options = json!({"tools":{"task":false}});
+    configure(&mut task_options);
     let model: J =
         serde_json::from_str(&std::env::var("HERDR_LIVE_OPENCODE_MODEL").unwrap()).unwrap();
     let spec = json!({"adapter":"opencode","binary":std::env::var("HERDR_LIVE_OPENCODE_BINARY").unwrap(),"cwd":cwd,"model":model,"port":port()});
@@ -420,16 +412,7 @@ pub(super) fn native_codex(
     name: &str,
     instruction: &str,
 ) -> (J, J) {
-    let config_source = std::env::var_os("HERDR_LIVE_CODEX_CONFIG")
-        .map(std::path::PathBuf::from)
-        .expect("HERDR_LIVE_CODEX_CONFIG required for Codex developer");
-    let config_before = fs::read(&config_source).unwrap();
-    fs::copy(&config_source, root.join("c/config.toml")).unwrap();
-    let auth_source = std::env::var_os("HERDR_LIVE_CODEX_AUTH").map(std::path::PathBuf::from);
-    let auth_before = auth_source.as_ref().map(|path| fs::read(path).unwrap());
-    if let Some(path) = &auth_source {
-        fs::copy(path, root.join("c/auth.json")).unwrap();
-    }
+    task_runtime::configuration::require_upstream("codex").unwrap();
     let binary = std::env::var("HERDR_LIVE_CODEX_BINARY").unwrap();
     let model: J = serde_json::from_str(&std::env::var("HERDR_LIVE_CODEX_MODEL").unwrap()).unwrap();
     let mut spec = json!({
@@ -504,16 +487,6 @@ pub(super) fn native_codex(
     assert!(result["turn"].as_str().is_some_and(|turn| !turn.is_empty()));
     assert_eq!(result["report"]["id"], result["turn"]);
     child.stop();
-    assert!(
-        fs::read(&config_source).unwrap() == config_before,
-        "selected Codex config changed"
-    );
-    if let (Some(path), Some(before)) = (&auth_source, auth_before) {
-        assert!(
-            fs::read(path).unwrap() == before,
-            "selected Codex auth changed"
-        );
-    }
     println!("real Codex native {name}: exact turn collected and server stopped");
     (state, result)
 }
@@ -586,7 +559,7 @@ fn installed_real_roles_fail_repair_and_pass() {
     let coord = task_runtime::prepare(&env, "coordinator-fixture").unwrap();
     let p = port();
     let binary = fixture_binary(&coord, &cwd, p);
-    let mut coordinator_child=task_runtime::launch(&mut env,&coord,&json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":p,"model":{"providerID":"openai","id":"fixture"}})).unwrap();
+    let mut coordinator_child=task_runtime::launch(&mut env,&coord,&json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":p,"model":{"providerID":"openai","id":"fixture"}})).unwrap();
     for _ in 0..100 {
         if coord.join("server.sock").exists() {
             break;

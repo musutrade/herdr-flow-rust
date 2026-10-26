@@ -1,7 +1,13 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Native launch currently supports only explicit isolated-fixture configuration, not real-task acceptance.";
 
 fn run(args: &[String]) -> Result<J> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "configuration-status")
+    {
+        return configuration_status(args);
+    }
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
     let options = parse_options(&args[1..])?;
     let task = options
@@ -19,6 +25,12 @@ fn run(args: &[String]) -> Result<J> {
         .unwrap_or(json!({}));
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
+}
+fn configuration_status(args: &[String]) -> Result<J> {
+    match args {
+        [_, option, adapter] if option == "--adapter" => configuration::status(adapter),
+        _ => Err(FlowError::usage(USAGE)),
+    }
 }
 fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &str>> {
     let mut options = std::collections::BTreeMap::new();
@@ -92,6 +104,16 @@ mod tests {
             );
         }
         assert_eq!(cli(&["--help".into()]), 0);
+        for adapter in ["codex", "opencode"] {
+            let report = run(&[
+                "configuration-status".into(),
+                "--adapter".into(),
+                adapter.into(),
+            ])
+            .unwrap();
+            assert_eq!(report["supported"], false);
+        }
+        assert!(run(&["configuration-status".into()]).is_err());
     }
 }
 

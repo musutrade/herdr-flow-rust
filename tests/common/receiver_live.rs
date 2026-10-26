@@ -1328,6 +1328,7 @@ fn run_native_receiver(
 }
 
 fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
+    task_runtime::configuration::require_upstream("opencode").unwrap();
     let ReceiverSpec {
         development_adapter,
         apply_development,
@@ -1799,8 +1800,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         );
     }
     let mut failure_evidence = FailureEvidence(evidence_paths);
-    let selected = std::env::var("HERDR_LIVE_OPENCODE_CONFIG").unwrap();
-    let mut config = util::read_json(Path::new(&selected)).unwrap();
+    // Historical task-only options; never import user provider/credential data.
+    let mut config = json!({});
     // Only an explicit operator opt-in may widen the disposable copy's directory
     // permission. All other native approvals still block this bounded test.
     if std::env::var("HERDR_LIVE_ALLOW_OWNED_EXTERNAL_DIR").as_deref() == Ok("1") {
@@ -1940,7 +1941,8 @@ fn run_native_receiver_in(spec: ReceiverSpec<'_>) {
         .unwrap();
     items.push(json!(instructions));
     common::create_dir_all(root.join("config/opencode")).unwrap();
-    util::atomic_write_json(&root.join("config/opencode/opencode.json"), &config).unwrap();
+    // Applying these options awaits a supported upstream integration.
+    assert!(config.is_object());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener); // Native server requires an explicit port; failure is not retried.

@@ -3,6 +3,14 @@
 This checklist separates protocol evidence from real agent completion. #38
 remains open. It does not replace its issue acceptance matrix or close #32.
 
+The latest dependency order is configuration/task isolation decoupling (#130),
+queue-control, reviewer snapshot, then one real task in a new private acceptance
+queue. Global entrypoints, old watchers and old queues remain untouched.
+The [upstream configuration boundary](upstream-configuration.md) currently rejects
+real native launches: preventing credential-copy workarounds is implemented, but
+supported existing-login reuse with full cleanup remains unimplemented. Historical
+steps and runs below do not override this status or count as new acceptance.
+
 ## Current execution order (2026-10-26)
 
 Baseline main `5645b695` includes PR #131–#136: instance ownership, terminal

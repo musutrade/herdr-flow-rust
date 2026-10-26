@@ -102,13 +102,18 @@ explicitly here, while the generic lineage API still supports its own adapters.
 1. Create/restore a task environment. Create the linked requirement, input artifact
    and activity through `task-lineage`. Its signal wait initially has no producer.
    Put the queue and coordinator state inside the disposable environment.
-2. `task_runtime::prepare(&environment, assignment)` creates a private runtime root.
-   Provision only the explicitly required provider configuration/credentials into
-   that root (`c/config.toml`, `c/auth.json` for Codex;
-   `config/opencode/opencode.json` for OpenCode). No user conversation, memory,
-   plugins or global configuration is copied automatically.
+2. `task_runtime::prepare(&environment, assignment)` creates disposable storage.
+   It does not establish upstream configuration support. Never provision a new
+   login, copy auth/token or provider configuration, or change a billing route
+   to make this directory usable. Check `task-runtime configuration-status
+   --adapter codex` (or `opencode`) first; the current native integration reports
+   `supported=false`. See [the configuration boundary](upstream-configuration.md).
 3. `task_runtime::launch(&mut environment, &root, &spec)` starts a dedicated native
-   server and records the marked process. `spec` contains `adapter`, absolute
+   protocol fixture and records the marked process. Explicit
+   `configuration: "isolated-fixture"` is required for credential-free fixtures;
+   omitted configuration means upstream and currently fails before any launch
+   journal or process is created. This is not a production escape hatch or
+   real-task acceptance. `spec` contains `adapter`, absolute
    `binary`, owned `cwd`, and `model: {providerID, id}`. OpenCode also needs an
    explicit loopback `port`. Library embedders provide `driver_binary` pointing to
    herdr-flow for the Codex connection process; the CLI uses its own executable.
@@ -273,19 +278,19 @@ model inference, and destroy the entire environment. Their coordinator is a
 protocol fixture; they are not evidence of a fully autonomous multi-agent
 acceptance/delivery loop (that remains the later end-to-end scope).
 
-The installed test takes `HERDR_LIVE_{CODEX,OPENCODE}_BINARY`, corresponding
-`_MODEL` JSON objects and optional `_CONFIG` paths. `HERDR_LIVE_CODEX_AUTH` supplies
-an explicitly selected auth copy; `HERDR_LIVE_INFERENCE=1` requires an actual
-successful native model response. `HERDR_LIVE_ADAPTER` can select one adapter.
+The historical installed tests used `HERDR_LIVE_{CODEX,OPENCODE}_BINARY` and
+corresponding `_MODEL` JSON objects. They now reject unsupported upstream
+configuration before reading or copying credentials. Auth/config copies are no
+longer accepted as an integration workaround. `HERDR_LIVE_ADAPTER` can select one adapter.
 `HERDR_LIVE_ROLE=development` additionally requires native tools to modify the
 fixture file and create a new Git commit, collected as the activity's output.
-These inputs are copied only into disposable test environments. Failures are
-reported and the test environment is cancelled/destroyed, not marked delivered.
+Failures are reported and the test environment is cancelled/destroyed, not marked delivered.
 
 A separate opt-in mixed test is designed to run the Codex developer through task-owned
 `native::create/dispatch/collect` and then the existing real OpenCode coordinator
-and reviewer. It copies only selected Codex config/auth into the worker `c/`
-directory, uses Codex `on-request` approvals without automatic answers, and
+and reviewer. Its former Codex config/auth copying has been removed; the test
+now fails the upstream capability check. Its historical flow used Codex
+`on-request` approvals without automatic answers, and
 checks the actual `turn.json`/queue event/apply evidence. Its intended scope is a
 mixed Codex-worker/OpenCode-coordinator flow, not a Codex coordinator or twenty-task
 claim. It has not completed on the tested host; the startup blocker is described below.

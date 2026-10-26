@@ -12,6 +12,7 @@ use std::{
 };
 pub mod broker;
 pub mod cli;
+pub mod configuration;
 mod launcher;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
@@ -25,9 +26,8 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
     }
 }
 
-/// Redirect default storage before starting a runtime; inherited configuration,
-/// credentials, plugins and remote server addresses are intentionally not copied.
-/// Callers may provision explicit configuration inside the returned private root.
+/// Prepare disposable runtime storage, without importing user configuration or
+/// credentials. This does not establish support for an upstream login.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     verify_instance_owner(env)?;
@@ -136,9 +136,11 @@ fn configure_environment(
     Ok(command)
 }
 
-/// Start only a dedicated server. Its process and all defaults belong to env.
+/// Start an explicitly labelled, credential-free isolated protocol fixture.
+/// Real native launches require a supported upstream configuration contract.
 /// A persisted starting marker makes ambiguous launch non-replayable.
 pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child> {
+    configuration::validate_launch(spec)?;
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     let _lock = util::FileLock::acquire(&root.join("runtime.lock"), false)?

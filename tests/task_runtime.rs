@@ -440,6 +440,71 @@ fn handoff_guard_resumes_a_plan_after_registry_removal() {
 }
 
 #[test]
+fn native_launch_does_not_silently_replace_upstream_authentication() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let mut env = environment(temp.path());
+    let root = task_runtime::prepare(&env, "configuration-policy").unwrap();
+    let spec = json!({"adapter":"opencode","binary":"/bin/true",
+        "cwd":env.workspace_root,"port":1,"model":{"providerID":"fixture","id":"fixture"}});
+    let outcome = task_runtime::launch(&mut env, &root, &spec);
+    let rejected = match outcome {
+        Err(error) => error.message.contains("upstream"),
+        Ok(mut child) => {
+            child.wait().unwrap();
+            false
+        }
+    };
+    let journal_exists = root.join("runtime.json").exists();
+    destroy_environment(&env).unwrap();
+    assert!(
+        rejected,
+        "native launch must not silently use a fresh credential home"
+    );
+    assert!(
+        !journal_exists,
+        "unsupported launch must not consume its creation attempt"
+    );
+}
+
+#[test]
+fn rejected_configuration_preserves_user_assets_and_creates_no_runtime_state() {
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = temp();
+    let mut env = environment(temp.path());
+    let root = task_runtime::prepare(&env, "rejected-configuration").unwrap();
+    let upstream = temp.path().join("upstream");
+    fs::create_dir(&upstream).unwrap();
+    for name in ["auth.json", "config.toml", "shared.db"] {
+        fs::write(upstream.join(name), "synthetic-user-asset").unwrap();
+    }
+    for adapter in ["codex", "opencode"] {
+        for mode in [
+            json!("upstream"),
+            J::Null,
+            json!({"token":"synthetic-secret"}),
+        ] {
+            let spec = json!({"adapter":adapter,"configuration":mode,
+                "binary":"/bin/true","cwd":env.workspace_root,"port":1});
+            let error = task_runtime::launch(&mut env, &root, &spec).unwrap_err();
+            assert!(!error.message.contains("synthetic-secret"));
+            assert!(!root.join("runtime.json").exists());
+            assert!(!root.join("runtime.lock").exists());
+            assert!(!root.join("server.log").exists());
+            assert!(env.child_processes.is_empty());
+        }
+    }
+    destroy_environment(&env).unwrap();
+    assert!(!root.exists());
+    for name in ["auth.json", "config.toml", "shared.db"] {
+        assert_eq!(
+            fs::read_to_string(upstream.join(name)).unwrap(),
+            "synthetic-user-asset"
+        );
+    }
+}
+
+#[test]
 fn runtime_defaults_are_private_and_process_writes_cannot_escape() {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let temp = temp();
@@ -503,24 +568,7 @@ fn installed_fresh_sessions_are_bound_and_entirely_destroyed() {
         git(&cwd, &["config", "user.email", "native@example.invalid"]);
 
         let root = task_runtime::prepare(&env, "review-a1").unwrap();
-        let key = format!("HERDR_LIVE_{}_CONFIG", adapter.to_uppercase());
-        if let Ok(config) = std::env::var(key) {
-            let destination = if adapter == "codex" {
-                root.join("c/config.toml")
-            } else {
-                {
-                    let dir = root.join("config/opencode");
-                    fs::create_dir_all(&dir).unwrap();
-                    dir.join("opencode.json")
-                }
-            };
-            fs::copy(config, destination).unwrap();
-        }
-        if adapter == "codex" {
-            if let Ok(auth) = std::env::var("HERDR_LIVE_CODEX_AUTH") {
-                fs::copy(auth, root.join("c/auth.json")).unwrap();
-            }
-        }
+        task_runtime::configuration::require_upstream(adapter).unwrap();
         let binary =
             std::env::var(format!("HERDR_LIVE_{}_BINARY", adapter.to_uppercase())).unwrap();
         let model: J = serde_json::from_str(
@@ -569,7 +617,7 @@ fn installed_fresh_sessions_are_bound_and_entirely_destroyed() {
                 let _coord_child = task_runtime::launch(
                     &mut env,
                     &coord_root,
-                    &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":coord_port,"model":{"providerID":"openai","id":"fixture"}}),
+                    &json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":coord_port,"model":{"providerID":"openai","id":"fixture"}}),
                 )?;
                 for _ in 0..100 {
                     if coord_root.join("server.sock").exists() {
@@ -827,7 +875,7 @@ fn dedicated_native_protocol_creation_recovery_and_unknown_send_are_bound() {
         // so CI does not need user namespaces merely to exercise RPC fixtures.
         // The synthetic binary ignores launch argv; replace the placeholder
         // runtime port with the readiness handshake before any HTTP client.
-        let spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,"model":{"providerID":"openai","id":"fixture"}});
+        let spec = json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":1,"model":{"providerID":"openai","id":"fixture"}});
         let mut child = task_runtime::launch(&mut env, &root, &spec)
             .unwrap_or_else(|error| panic!("{error}; fixture log: {}", fixture_log(&root)));
         let port = fixture_ready(&root, &mut child);
@@ -1066,7 +1114,7 @@ fn production_foreground_watchers_are_owned_and_reclaimed() {
     let mut server = task_runtime::launch(
         &mut env,
         &root,
-        &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,
+        &json!({"adapter":"opencode","configuration":"isolated-fixture","binary":binary,"cwd":cwd,"port":1,
             "model":{"providerID":"openai","id":"fixture"}}),
     )
     .unwrap();
