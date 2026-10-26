@@ -14,11 +14,13 @@ fn upstream_thread_cleanup_preserves_service_config_and_other_sessions() {
 
 fn exercise(lost_reply: bool) {
     let f = Fixture::new();
-    let mut env = f.ready();
+    let mut env = isolated_runtime::linked(&f);
     let root = task_runtime::prepare(&env, "shared").unwrap();
     let cwd = env.workspace_root.join("checkout");
     let (release, wait) = mpsc::channel();
+    let (tool_reply, received) = mpsc::channel();
     let server_cwd = cwd.clone();
+    let server_queue = f.queue.clone();
     let mut index = 0;
     let server = rpc_server::Server::start_connections(
         if lost_reply { 4 } else { 3 },
@@ -36,7 +38,14 @@ fn exercise(lost_reply: bool) {
                     if !readable(&peer) {
                         continue;
                     }
+                    if wait.try_recv().is_ok() {
+                        break;
+                    }
                     let request = peer.request();
+                    if request["method"].is_null() {
+                        tool_reply.send(request).unwrap();
+                        continue;
+                    }
                     let result = match request["method"].as_str().unwrap() {
                         "thread/read" => json!({"thread":{"id":OWNED,"cwd":server_cwd,
                             "modelProvider":"openai","status":{"type":"idle"},"canAcceptDirectInput":true}}),
@@ -45,6 +54,29 @@ fn exercise(lost_reply: bool) {
                     };
                     assert_eq!(request["params"]["threadId"], OWNED);
                     peer.json(&json!({"id":request["id"],"result":result}));
+                    if request["method"] == "turn/start" {
+                        for (id, thread) in [(100, OWNED), (101, FOREIGN)] {
+                            peer.json(&json!({"id":id,"method":"item/tool/call","params":{
+                                "threadId":thread,"turnId":"fixture-turn","callId":format!("call-{id}"),
+                                "tool":"herdr_queue","arguments":{"action":"inspect","delivery":"","spec":""}}}));
+                        }
+                        let q = queue::load_queue(&server_queue).unwrap();
+                        let spec = json!({"task":"dev","state_version":q["tasks"]["dev"]["state_version"],"event":"synthetic-result",
+                            "next_action":{"kind":"blocked","owner":"coordinator","reason":"synthetic failure","condition":"inspected recovery"}});
+                        for (id, args) in [
+                            (
+                                102,
+                                json!({"action":"ack","delivery":q["active"],"spec":""}),
+                            ),
+                            (
+                                103,
+                                json!({"action":"apply","delivery":"","spec":spec.to_string()}),
+                            ),
+                        ] {
+                            peer.json(&json!({"id":id,"method":"item/tool/call","params":{"threadId":OWNED,"turnId":"fixture-turn",
+                                "callId":format!("call-{id}"),"tool":"herdr_queue","arguments":args}}));
+                        }
+                    }
                 }
             } else if index == 1 && lost_reply {
                 assert_eq!(request["method"], "thread/delete");
@@ -115,11 +147,54 @@ fn exercise(lost_reply: bool) {
             ["interactive_ready"],
         true
     );
+    {
+        let _lock = queue::locked(&f.queue, false).unwrap();
+        let mut q = f.state();
+        q["guard_dir"] = json!(root.join("guard"));
+        q["receiver"] = guard::scope(&active);
+        q["notify"] = json!(true);
+        let wait = q["waits"]["dev"].clone();
+        let mut event = json!({"id":"synthetic-result","task":"dev","wait":"dev","epoch":1,"acknowledged":false,"outcome":"failed"});
+        progress::attach(&mut q, &mut event, &wait, util::now()).unwrap();
+        q["events"]["synthetic-result"] = event;
+        queue::save(&f.queue, &mut q).unwrap();
+    }
     let adapter = herdr_flow::herdr::receiver_factory(&active).unwrap();
     assert_eq!(adapter.agent().unwrap()["interactive_ready"], true);
+    {
+        let _lock = queue::locked(&f.queue, false).unwrap();
+        queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut responses = vec![];
+    while responses.len() < 4 {
+        {
+            let _lock = queue::locked(&f.queue, false).unwrap();
+            queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
+        }
+        responses.extend(received.try_iter());
+        assert!(std::time::Instant::now() < deadline, "tool bridge timeout");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(responses[0]["id"], 100);
+    assert_eq!(responses[0]["result"]["success"], true);
+    assert_eq!(responses[1]["id"], 101);
+    assert_eq!(responses[1]["result"]["success"], false);
+    assert_eq!(responses[2]["result"]["success"], true, "{}", responses[2]);
+    assert_eq!(responses[3]["result"]["success"], true, "{}", responses[3]);
     assert_eq!(
-        adapter.prompt("synthetic protocol only").unwrap(),
-        "fixture-turn"
+        f.state()["events"]["synthetic-result"]["acknowledged"],
+        true
+    );
+    assert_eq!(f.state()["events"]["synthetic-result"]["applied"], true);
+    let completed = util::read_state_json(&root, "control-tools.json").unwrap();
+    {
+        let _lock = queue::locked(&f.queue, false).unwrap();
+        queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
+    }
+    assert_eq!(
+        util::read_state_json(&root, "control-tools.json").unwrap(),
+        completed
     );
     assert!(adapter.call(&["notify".into()]).is_err());
     let mut wrong = active;
@@ -224,9 +299,12 @@ fn live_upstream_identity_and_cleanup_without_model() {
 }
 
 pub(super) fn finalize_with_retry(f: &Fixture) {
+    finalize_with_outcome(f, "failure");
+}
+pub(super) fn finalize_with_outcome(f: &Fixture, outcome: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match finalize_registered(&f.queue) {
+        match finalize_outcome(&f.queue, outcome) {
             Ok(_) => return,
             Err(error)
                 if error.message.contains("lifecycle action busy")
@@ -290,6 +368,9 @@ fn readable(peer: &rpc_server::Peer) -> bool {
 // Administrative teardown by the explicitly invoked acceptance harness. It does
 // not claim a model decision, forge a tool-process probe or modify CODEX_THREAD_ID.
 fn finalize_registered(root: &Path) -> herdr_flow::Result<J> {
+    finalize_outcome(root, "failure")
+}
+fn finalize_outcome(root: &Path, outcome: &str) -> herdr_flow::Result<J> {
     let _lock = queue::locked(root, false)?;
     let state = queue::load_queue(root)?;
     let owner = lifecycle::task_owner(&state, "task")?.unwrap();
@@ -299,7 +380,7 @@ fn finalize_registered(root: &Path) -> herdr_flow::Result<J> {
     )?;
     let spec = json!({"task":"task","queue_id":owner.queue_id,"epoch":owner.epoch,
         "instance_id":owner.instance_id,"state_version":state["tasks"]["task"]["state_version"],
-        "outcome":"failure","reason":"explicit administrative teardown of acceptance resources; no delivery claim"});
+        "outcome":outcome,"reason":"explicit acceptance supervisor finalization; success requires confirmed local delivery"});
     queue::task_action(
         root,
         "task-finalize",

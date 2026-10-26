@@ -71,3 +71,59 @@ fn persistent_connection_records_exact_turns_and_never_answers_approval() {
     )
     .is_err());
 }
+
+#[test]
+fn dynamic_tool_response_uses_original_connection_and_is_not_sent_twice() {
+    let (release, released) = std::sync::mpsc::channel();
+    let root = common::tempdir().unwrap();
+    util::atomic_write_json(
+        &root.path().join("runtime.json"),
+        &json!({"instance":"tool-fixture"}),
+    )
+    .unwrap();
+    let request = json!({"id":91,"method":"item/tool/call","params":{"threadId":"s","turnId":"t","tool":"herdr_queue"}});
+    let native_request = request.clone();
+    let result = json!({"success":true,"contentItems":[{"type":"inputText","text":"checked"}]});
+    let native_result = result.clone();
+    let server = rpc_fixture::Server::start(move |mut peer| {
+        peer.initialize();
+        let read = peer.request();
+        peer.json(&native_request);
+        peer.json(&json!({"id":read["id"],"result":{"thread":{"id":"s"}}}));
+        assert_eq!(peer.request(), json!({"id":91,"result":native_result}));
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    std::fs::hard_link(&server.path, root.path().join("server.sock")).unwrap();
+    let mut connection = None;
+    execute(
+        root.path(),
+        &mut connection,
+        &json!({"method":"thread/read","params":{"threadId":"s"}}),
+    )
+    .unwrap();
+    let journal = util::read_state_json(root.path(), "broker-tools.json").unwrap();
+    assert_eq!(journal["91"]["request"], request);
+    util::atomic_write_json(
+        &root.path().join("control-tools.json"),
+        &json!({"91":{"phase":"complete","request":request,"result":result}}),
+    )
+    .unwrap();
+    let response = json!({"method":"tool/respond","params":{"id":91,"result":result}});
+    assert!(connection
+        .as_mut()
+        .unwrap()
+        .respond_tool(&J::Null, &result)
+        .is_err());
+    for _ in 0..2 {
+        assert_eq!(
+            execute(root.path(), &mut connection, &response).unwrap()["responded"],
+            true
+        );
+    }
+    assert_eq!(
+        util::read_state_json(root.path(), "broker-tools.json").unwrap()["91"]["phase"],
+        "responded"
+    );
+    release.send(()).unwrap();
+    server.finish();
+}

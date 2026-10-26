@@ -700,6 +700,17 @@ impl Client {
         poll_stream(stream, timeout)
     }
 
+    /// Respond only to a server request validated by the task broker.
+    pub(crate) fn respond_tool(&mut self, id: &Value, result: &Value) -> Result<()> {
+        if !(id.is_string() || id.is_number()) {
+            return Err(protocol_error("invalid server request id"));
+        }
+        self.send_message(
+            &json!({"id":id,"result":result}),
+            Instant::now() + Duration::from_secs(10),
+        )
+    }
+
     pub fn pop_events(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.events)
     }

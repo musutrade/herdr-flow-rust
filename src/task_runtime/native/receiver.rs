@@ -2,6 +2,7 @@
 //! No queue mutation, model turn, approval response or implicit recovery.
 use super::*;
 pub mod active;
+pub(crate) mod control;
 
 pub fn is_task_owned(state: &J) -> bool {
     state["adapter"] == "codex" && state["receiver_kind"] == "task-runtime"
@@ -116,6 +117,7 @@ fn initial_state(root: &Path, guard: &Path, runtime: &J, spec: &J) -> J {
         "runtime_pid":runtime["pid"],"runtime_start_time":runtime["start_time"],
         "cwd":runtime["cwd"],"model":runtime["model"],
         "approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),
+        "control_protocol":if super::super::upstream::selected(runtime) {json!("queue-tool-v1")} else {J::Null},
         "task":spec["task"],"role":spec["role"],"auto_rotate":false,"phase":"bootstrap"})
 }
 

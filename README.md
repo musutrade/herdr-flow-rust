@@ -5,7 +5,8 @@
 **认证与任务资源边界（#130）**：登录、provider、订阅和计费由既有 Codex／OpenCode
 管理。新的隔离队列可连接已有 Codex app-server，复用其认证并按任务登记、删除会话；
 不复制配置或凭据，不改变代理。OpenCode 的新任务清理接入仍未完成，禁止以临时登录
-绕过。独立队列上的真实 Codex 快照审查已验证，自动通知／ACK／客户交付尚未完整验收。
+绕过。独立队列已验证真实 Codex 快照审查、自动通知、模型 ACK／结果应用、本地 Git 交付和任务回收；
+候选提交由验收驱动准备，尚不代表从 issue 开发到远端发布的完整验收。
 详见[上游配置与资源回收](references/upstream-configuration.md)。
 
 **工作流范围**：herdr-flow 权威管理 task/epoch/instance、专属 Git worktree、

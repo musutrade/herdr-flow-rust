@@ -82,12 +82,18 @@ impl ReceiverAdapter for Adapter {
             self.agent()?["interactive_ready"] == true,
             "task receiver is busy",
         )?;
+        let text = super::control::prompt(&self.state, text);
         let response = client(&self.root)?.call(
             "turn/start",
             &json!({"threadId":self.state["session"],
-            "input":[{"type":"text","text":text}]}),
+            "input":[{"type":"text","text":text}],"sandboxPolicy":turn_sandbox(&self.root, &self.state)?}),
         )?;
-        required(&response["turn"], "id")
+        let id = required(&response["turn"], "id")?;
+        util::atomic_write_json(
+            &self.root.join("receiver-turn.json"),
+            &json!({"thread":self.state["session"],"turn":id}),
+        )?;
+        Ok(id)
     }
     fn call(&self, _args: &[String]) -> Result<J> {
         Err(FlowError::guard(

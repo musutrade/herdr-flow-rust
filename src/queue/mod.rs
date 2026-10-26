@@ -2085,6 +2085,7 @@ pub fn dispatch(root: &Path, s: &mut J, factory: &ReceiverFactory) -> Result<()>
 }
 
 pub fn tick(root: &Path, factory: &ReceiverFactory, now: Option<f64>) -> Result<J> {
+    crate::task_runtime::native::receiver::control::service(root)?;
     let mut s = load_queue(root)?;
     let _permits = isolation::active_permits(&s)?;
     if model::bool_or(&s, "stopped", false) {

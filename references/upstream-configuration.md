@@ -45,6 +45,30 @@ identity. Restart after receiver activation invalidates the old receiver binding
 that receiver stops on the identity mismatch. Automatic receiver rebinding is not
 implemented. The restart test covers a broker restarted before bootstrap.
 
+## Bounded coordinator control tools
+
+Fresh upstream receivers expose `herdr_queue` through Codex dynamic tools. The
+only operations are inspection of the assigned Owner's tasks/events, ACK of a
+notification containing only that Owner's events, and application of an existing
+result. The existing result/version/verdict checks still apply. The tool cannot
+create work, grant authorization, execute shell commands, publish, change accounts
+or accept arbitrary queue paths. Model turns remain workspace-write confined with
+network and temporary/global writes excluded.
+
+The task broker records native tool requests. The **new queue's driver**, while
+holding its queue lock, validates the registered receiver, lifecycle Owner and
+current native thread/turn, then calls the existing queue APIs. Model processes
+receive no write permission to the external control directory. Existing queues
+without a task-runtime receiver never enter this service. No session environment
+variable is forged. Approval and user-input requests are never answered by it.
+
+Request and result journals are bounded to 64 calls and 1 MiB reads. Mutation
+intent precedes execution; an interrupted operation with unknown outcome blocks
+without replay. Completed results can be returned again, but a response whose
+send outcome is unknown is not sent again automatically. Changed request IDs,
+foreign threads/turns, mixed-Owner deliveries and unregistered responses fail.
+These journals are task resources and are removed by normal terminal cleanup.
+
 ## Ownership and reclamation
 
 The socket device/inode/user identity is sealed; replacement does not silently
@@ -69,6 +93,39 @@ state/logs. Shared server availability is required for cleanup; service replacem
 or ambiguous creation still needs inspected recovery, never a new login.
 
 ## Validation and remaining scope
+
+Latest acceptance on 2026-10-26, evidence root
+`/mnt/dev-ssd/dev-tmp/.tmpBaYRBc`, completed this path:
+
+1. A real `gpt-6-astra` reviewer checked a registered fixed Git snapshot.
+2. The queue automatically notified the distinct coordinator thread.
+3. That coordinator invoked inspect, ACK and apply through the dynamic tool;
+   `coordinator-tools.json` records three successful native requests.
+4. The acceptance supervisor used the predeclared local-only authorization to
+   deliver the accepted commit to its new `output.git`, verified the actual ref,
+   and recorded a confirmed receipt before success finalization.
+5. Task threads, brokers, receiver watcher, workspaces, scratch roots and registry
+   were reclaimed. The output repository and acceptance evidence remain.
+
+The retained artifact is commit `8a58ac3d90345b67076475db3332ecac629e2afa` at
+`refs/heads/accepted`. Evidence includes `notification-application.json`,
+`coordinator-tools.json`, `local-delivery.json` and `result.json`. The earlier
+`review-result.json` in that run was written before notification completion and
+retains the old caller-driven scope label; completion is established by the later
+artifacts above. The harness now labels that checkpoint as pending.
+The candidate was seeded by the harness, not developed by a model. Collection,
+local delivery and terminal supervision were performed by the driver. This proves
+that concrete review/notification/ACK/application/local-delivery/cleanup path; it
+is not an autonomous issue-development or remote-publication acceptance.
+
+An earlier run at `/mnt/dev-ssd/dev-tmp/.tmptipGAq` encountered collector lock
+contention, then resumed the same review without redispatch. Its coordinator ACKed
+but submitted an unsupported apply field and stopped. The tool contract was made
+explicit before the successful fresh run. Failed tool/turn and queue evidence were
+saved, and `recovered.json` confirms that run's resources were reclaimed. The
+harness now retries only read-result lock contention within its deadline.
+
+Earlier checkpoints below retain their original, narrower validation scope.
 
 Synthetic real-socket tests cover shared service/foreign-session preservation,
 receiver activation, exact-ID requests, socket replacement, deletion response loss

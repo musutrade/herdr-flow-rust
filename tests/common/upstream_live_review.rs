@@ -5,12 +5,24 @@ use super::*;
 #[test]
 #[ignore = "explicit existing service/model; one real review turn in a new private queue"]
 fn live_upstream_fixed_snapshot_review() {
+    run(false);
+}
+
+#[test]
+#[ignore = "explicit existing service/model; real reviewer and coordinator notification turns"]
+fn live_upstream_notification_ack_application() {
+    run(true);
+}
+
+fn run(notifications: bool) {
     let socket = std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing socket required");
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let f = std::mem::ManuallyDrop::new(Fixture::new());
     eprintln!("real review evidence root: {}", f.temp.path().display());
     let goal = "The tracked file named file must contain exactly review candidate followed by one newline.";
-    let mut env = isolated_runtime::linked_goal(&f, goal);
+    let target = f.temp.path().join("output.git");
+    let mut env =
+        isolated_runtime::linked_delivery(&f, goal, notifications.then_some(target.as_path()));
     isolated_review::review_activity(&f, &env);
     let coord = task_runtime::prepare(&env, "coordinator").unwrap();
     let cwd = env.workspace_root.join("checkout");
@@ -35,6 +47,7 @@ fn live_upstream_fixed_snapshot_review() {
         q["guard_dir"] = json!(guard);
         q["receiver"] = guard::scope(&state);
         q["notify"] = json!(true);
+        q["poll_seconds"] = json!(1);
         queue::save(&f.queue, &mut q).unwrap();
     }
     let log = fs::File::create(f.temp.path().join("queue-watch.log")).unwrap();
@@ -86,9 +99,8 @@ fn live_upstream_fixed_snapshot_review() {
     )
     .unwrap();
     task_runtime::native::dispatch(&env, &root).unwrap();
-    // This acceptance explicitly uses caller-driven result collection. Disable
-    // notifications in this new queue before results; never fake a delivery ACK.
-    {
+    // Preserve the historical caller-driven scenario separately.
+    if !notifications {
         let _lock = queue::locked(&f.queue, false).unwrap();
         let mut q = f.state();
         q["notify"] = json!(false);
@@ -96,7 +108,16 @@ fn live_upstream_fixed_snapshot_review() {
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let result = loop {
-        let result = task_runtime::native::collect(&env, &root).unwrap();
+        let result = match task_runtime::native::collect(&env, &root) {
+            Err(error)
+                if error.kind == herdr_flow::ErrorKind::StateBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            result => result.unwrap(),
+        };
         if result["phase"] == "signalled" {
             break result;
         }
@@ -110,14 +131,20 @@ fn live_upstream_fixed_snapshot_review() {
     util::atomic_write_json(
         &f.temp.path().join("review-result.json"),
         &json!({"turn":result,"verdict":verdict,"snapshot":snapshot,
-        "notification_delivery":"not exercised; caller-driven collection","model":model}),
+        "collection":"caller-driven","notification_delivery":if notifications {"pending; see notification-application.json"} else {"disabled in this scenario"},"model":model}),
     )
     .unwrap();
     let passed = verdict["conclusion"] == "passed" && result["outcome"] == "complete";
+    if notifications {
+        await_application(&f.queue, f.temp.path(), &coord, &mut watch);
+    }
     watch.0.kill().unwrap();
     watch.0.wait().unwrap();
+    if notifications {
+        deliver_local(&f, &mut env, &target);
+    }
     drop(env);
-    upstream_runtime::finalize_with_retry(&f);
+    upstream_runtime::finalize_with_outcome(&f, if notifications { "success" } else { "failure" });
     let cleanup = queue::finalization::drive(&f.queue).unwrap();
     assert_eq!(cleanup.pending, 0, "{cleanup:?}");
     coord_broker.wait().unwrap();
@@ -125,8 +152,8 @@ fn live_upstream_fixed_snapshot_review() {
     assert!(!root.exists() && !coord.exists() && !f.temp.path().join("workspace").exists());
     assert!(!task_env::is_registered("task").unwrap());
     util::atomic_write_json(&f.temp.path().join("result.json"), &json!({"review_passed":passed,
-        "model_request_sent":true,"task_resources_removed":true,"notification_ack_tested":false,
-        "terminal_outcome":"failure (test teardown, not customer delivery)","global_installation_changed":false})).unwrap();
+        "model_request_sent":true,"task_resources_removed":true,"notification_ack_tested":notifications,
+        "terminal_outcome":if notifications {"success (isolated local output only)"} else {"failure (test teardown)"},"global_installation_changed":false})).unwrap();
     assert!(passed, "real review did not pass; see preserved verdict");
 }
 
@@ -144,4 +171,111 @@ fn attach(
         spec["review_snapshot"] = json!(review);
     }
     task_runtime::launch(env, root, &spec).unwrap()
+}
+
+fn await_application(queue_root: &Path, evidence: &Path, coord: &Path, watch: &mut FixtureChild) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        assert!(
+            watch.0.try_wait().unwrap().is_none(),
+            "queue watcher exited"
+        );
+        let q = queue::load_queue(queue_root).unwrap();
+        let applied =
+            q["events"].as_object().unwrap().values().any(|e| {
+                e["task"] == "review" && e["acknowledged"] == true && e["applied"] == true
+            });
+        if applied {
+            util::atomic_write_json(&evidence.join("notification-application.json"), &q).unwrap();
+            let tools = util::read_state_json(coord, "control-tools.json").unwrap();
+            util::atomic_write_json(&evidence.join("coordinator-tools.json"), &tools).unwrap();
+            for action in ["ack", "apply"] {
+                assert!(tools
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .any(|t| t["request"]["params"]["arguments"]["action"] == action
+                        && t["result"]["success"] == true));
+            }
+            assert_eq!(
+                q["tasks"]["task"]["continuation"]["action"]["kind"],
+                "delivery"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "coordinator ACK/application timed out; preserve evidence"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+#[ignore = "resume only an explicitly retained review; no repeat dispatch"]
+fn resume_upstream_notification_acceptance() {
+    let evidence = PathBuf::from(std::env::var("HERDR_UPSTREAM_RESUME").unwrap());
+    let queue_root = evidence.join("queue");
+    std::env::set_var(
+        "HERDR_TASK_ENV_ROOT",
+        queue_root.join("queue.json/task-environments"),
+    );
+    let env = task_env::restore_environment("task").unwrap();
+    let root = env.temp_root.join("rt/review-a1");
+    let coord = env.temp_root.join("rt/coordinator");
+    let log = fs::File::create(evidence.join("queue-watch-resumed.log")).unwrap();
+    let mut watch = FixtureChild(
+        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(["queue", "watch", "--state-dir"])
+            .arg(&queue_root)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match task_runtime::native::collect(&env, &root) {
+            Ok(result) if result["phase"] == "signalled" => break,
+            Ok(_) => (),
+            Err(e) if e.kind == herdr_flow::ErrorKind::StateBusy => (),
+            Err(e) => panic!("{e}"),
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    await_application(&queue_root, &evidence, &coord, &mut watch);
+    watch.0.kill().unwrap();
+    watch.0.wait().unwrap();
+    drop(env);
+    // Cleanup is performed by the explicit retained-acceptance recovery entry.
+}
+
+fn deliver_local(f: &Fixture, env: &mut task_env::TaskEnvironment, target: &Path) {
+    use herdr_flow::delivery;
+    git(
+        f.temp.path(),
+        &[
+            "clone",
+            "--bare",
+            f.temp.path().join("repo").to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+    git(target, &["update-ref", "refs/heads/accepted", &f.commit]);
+    let q = f.state();
+    let spec = json!({"adapter":"git","target":target,"ref":"refs/heads/accepted","expected":f.commit,
+        "authorization":"deliver-local","state_version":q["tasks"]["task"]["state_version"]});
+    delivery::prepare(env, &f.queue, &spec, &delivery::local::Local).unwrap();
+    let receipt = delivery::execute(env, &delivery::local::Local).unwrap();
+    util::atomic_write_json(&f.temp.path().join("local-delivery.json"), &receipt).unwrap();
+    assert_eq!(receipt["phase"], "confirmed");
+    assert_eq!(
+        git(target, &["rev-parse", "refs/heads/accepted"]),
+        q["tasks"]["task"]["candidate"].as_str().unwrap()
+    );
+    assert_eq!(
+        git(target, &["show", "refs/heads/accepted:file"]),
+        "review candidate"
+    );
 }

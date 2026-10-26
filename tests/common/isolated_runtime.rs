@@ -21,12 +21,24 @@ pub(super) fn linked(f: &Fixture) -> task_env::TaskEnvironment {
 }
 
 pub(super) fn linked_goal(f: &Fixture, goal: &str) -> task_env::TaskEnvironment {
+    linked_delivery(f, goal, None)
+}
+
+pub(super) fn linked_delivery(
+    f: &Fixture,
+    goal: &str,
+    target: Option<&Path>,
+) -> task_env::TaskEnvironment {
     let mut q = f.state();
     q["tasks"].as_object_mut().unwrap().remove("task");
-    progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":goal,
+    let mut plan = json!({"kind":"plan","task":"task","goal":goal,
         "basis":{"original":[goal],"changes":[],"specifications":[],"endpoint":"local","confirmation":"fixture"},
         "authorization":[{"id":"develop","action":"development","source":"fixture"},
-            {"id":"verify","action":"review","source":"fixture"}]}), util::now()).unwrap();
+            {"id":"verify","action":"review","source":"fixture"}]});
+    if target.is_some() {
+        plan["authorization"].as_array_mut().unwrap().push(json!({"id":"deliver-local","action":"delivery","source":"isolated acceptance harness: only its new local output repository"}));
+    }
+    progress::lineage::action(&mut q, &plan, util::now()).unwrap();
     for mut spec in [
         json!({"kind":"artifact","artifact":{"id":f.commit,"adapter":"git","location":f.temp.path().join("repo")}}),
         json!({"kind":"candidate","candidate":f.commit}),
@@ -37,7 +49,13 @@ pub(super) fn linked_goal(f: &Fixture, goal: &str) -> task_env::TaskEnvironment 
         progress::lineage::action(&mut q, &spec, util::now()).unwrap();
     }
     queue::save(&f.queue, &mut q).unwrap();
-    let env = f.ready();
+    let mut create = f.create_spec();
+    if let Some(target) = target {
+        create["environment"]["delivery_targets"] =
+            json!([{"path":target,"target_type":"git","description":"isolated acceptance output"}]);
+    }
+    f.call(&create).unwrap();
+    let env = task_env::restore_environment("task").unwrap();
     let mut q = f.state();
     let spec = json!({"kind":"activity","task":"task","state_version":q["tasks"]["task"]["state_version"],
         "activity":"dev","role":"development","input":f.commit,"session_epoch":1,

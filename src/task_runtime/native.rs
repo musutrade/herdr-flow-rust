@@ -283,7 +283,7 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
         "baseInstructions":instructions,
         "developerInstructions":"","config":{"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}},
-        "dynamicTools":[],"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
+        "dynamicTools":receiver::control::definitions(state),"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
     let result = observed.result;
     state["session"] = result["thread"]["id"].clone();
     state["transcript"] = result["thread"]["path"].clone();
