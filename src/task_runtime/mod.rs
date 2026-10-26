@@ -16,6 +16,7 @@ pub mod configuration;
 mod launcher;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
+pub mod review;
 pub mod status;
 pub(crate) mod upstream;
 
@@ -216,11 +217,14 @@ fn launch_command_permitted(
     verify_instance_owner(env)?;
     let binary = PathBuf::from(required(spec, "binary")?);
     let cwd = PathBuf::from(required(spec, "cwd")?);
-    validate_launch_cwd(env, &cwd)?;
+    validate_launch_cwd(env, root, &cwd, spec)?;
     configured_server_command(env, root, &cwd, &binary, spec, permit)
 }
 
-fn validate_launch_cwd(env: &TaskEnvironment, cwd: &Path) -> Result<()> {
+fn validate_launch_cwd(env: &TaskEnvironment, root: &Path, cwd: &Path, spec: &J) -> Result<()> {
+    if review::selected(env, root, cwd, spec)? {
+        return Ok(());
+    }
     if env.creation.is_some() {
         ensure(
             cwd == env.workspace_root.join("checkout"),
@@ -387,6 +391,9 @@ fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Re
         record["instance"] == env.instance_id && record["root"] == json!(root),
         "runtime belongs to another environment",
     )?;
+    if env.creation.is_some() || record.get("review_snapshot").is_some() {
+        validate_launch_cwd(env, root, Path::new(&required(record, "cwd")?), record)?;
+    }
     let pid = model::u64_field(record, "pid").unwrap_or(0) as i32;
     ensure(
         env.owns_process(pid),

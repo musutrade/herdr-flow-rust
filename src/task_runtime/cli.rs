@@ -1,5 +1,6 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Native launch currently supports only explicit isolated-fixture configuration, not real-task acceptance.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+
 
 fn run(args: &[String]) -> Result<J> {
     if args
@@ -52,6 +53,7 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &st
 fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     match action {
         "prepare" => Ok(json!({"root":prepare(env,&required(spec,"assignment")?)?})),
+        "review-snapshot" => review::prepare(env, root, spec),
         "launch" => {
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }

@@ -45,25 +45,31 @@ pub(super) fn linked(f: &Fixture) -> task_env::TaskEnvironment {
 }
 
 fn runtime(env: &mut task_env::TaskEnvironment) -> (PathBuf, FixtureChild) {
-    let root = task_runtime::prepare(env, "dev-a1").unwrap();
+    let cwd = env.workspace_root.join("checkout");
+    runtime_at(env, "dev-a1", &cwd, None)
+}
+
+pub(super) fn runtime_at(
+    env: &mut task_env::TaskEnvironment,
+    assignment: &str,
+    cwd: &Path,
+    review: Option<&str>,
+) -> (PathBuf, FixtureChild) {
+    let root = task_runtime::prepare(env, assignment).unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let cwd = env.workspace_root.join("checkout");
     util::atomic_write_json(&root.join("fixture.json"), &json!({"cwd":cwd,"port":port})).unwrap();
     let binary = root.join("fixture-server");
     fs::write(&binary, format!("#!/bin/sh\nexport HERDR_ISOLATED_HTTP_FIXTURE='{}'\nexec '{}' --exact isolated_runtime::http_child --ignored --nocapture\n",
         root.display(), std::env::current_exe().unwrap().display())).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut child = FixtureChild(
-        task_runtime::launch(
-            env,
-            &root,
-            &json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,
-            "model":{"providerID":"openai","id":"fixture"}}),
-        )
-        .unwrap(),
-    );
+    let mut spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":port,
+        "model":{"providerID":"openai","id":"fixture"}});
+    if let Some(key) = review {
+        spec["review_snapshot"] = json!(key);
+    }
+    let mut child = FixtureChild(task_runtime::launch(env, &root, &spec).unwrap());
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !root.join("ready").exists() {
         assert!(child.0.try_wait().unwrap().is_none());
