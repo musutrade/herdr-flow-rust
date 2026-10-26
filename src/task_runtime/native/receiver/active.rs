@@ -11,7 +11,7 @@ impl Adapter {
     pub fn new(state: &J) -> Result<Self> {
         ensure(
             is_task_owned(state) && state["receiver_activation"] == "active",
-            "task receiver is not explicitly activated",
+            "task receiver is not activated; explicit activation required",
         )?;
         let root = PathBuf::from(required(state, "runtime")?);
         let adapter = Self {
@@ -26,22 +26,7 @@ impl Adapter {
             FlowError::guard("task receiver requires isolated lifecycle authority")
         })?;
         let runtime = util::read_state_json(&self.root, "runtime.json")?;
-        ensure(
-            runtime["instance"] == self.state["instance"]
-                && runtime["pid"] == self.state["runtime_pid"]
-                && runtime["start_time"] == self.state["runtime_start_time"]
-                && runtime["cwd"] == self.state["cwd"]
-                && runtime["model"] == self.state["model"],
-            "task receiver runtime binding changed",
-        )?;
-        let pid = runtime["pid"]
-            .as_u64()
-            .ok_or_else(|| FlowError::guard("runtime pid missing"))?;
-        ensure(
-            runtime["start_time"] == json!(crate::task_env::process_start_time(pid as i32))
-                && !runtime["start_time"].is_null(),
-            "task receiver broker is not alive",
-        )?;
+        runtime_binding(&runtime, &self.state)?;
         let receiver = util::read_state_json(&self.root, "receiver.json")?;
         ensure(
             receiver["phase"] == "bound"
@@ -51,6 +36,28 @@ impl Adapter {
         )
     }
 }
+fn runtime_binding(runtime: &J, state: &J) -> Result<()> {
+    ensure(
+        runtime["instance"] == state["instance"]
+            && runtime["pid"] == state["runtime_pid"]
+            && runtime["start_time"] == state["runtime_start_time"]
+            && runtime["cwd"] == state["cwd"]
+            && runtime["model"] == state["model"],
+        "task receiver runtime binding changed",
+    )?;
+    live_broker(runtime)
+}
+fn live_broker(runtime: &J) -> Result<()> {
+    let pid = runtime["pid"]
+        .as_u64()
+        .ok_or_else(|| FlowError::guard("runtime pid missing"))?;
+    ensure(
+        runtime["start_time"] == json!(crate::task_env::process_start_time(pid as i32))
+            && !runtime["start_time"].is_null(),
+        "task receiver broker is not alive",
+    )
+}
+
 impl ReceiverAdapter for Adapter {
     fn agent(&self) -> Result<J> {
         let _permit = crate::lifecycle::runtime_permit(&self.root)?;
@@ -95,6 +102,16 @@ pub fn activate(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
         permit.is_some(),
         "receiver activation requires isolated task instance",
     )?;
+    let (guard, state, lock) = reserve_activation(env, root)?;
+    let mut child = spawn_watch(env, &guard, spec, permit.as_deref())?;
+    drop(lock);
+    await_watch(&guard, &mut child)?;
+    let result = json!({"phase":"active","pid":child.id(),"session":state["session"],
+        "safe_rotation":false,"context_telemetry":false});
+    util::atomic_write_json(&guard.join("activation.json"), &result)?;
+    Ok(result)
+}
+fn reserve_activation(env: &TaskEnvironment, root: &Path) -> Result<(PathBuf, J, util::FileLock)> {
     let runtime = super::started_runtime(env, root)?;
     let journal = util::read_state_json(root, "receiver.json")?;
     ensure(
@@ -103,9 +120,13 @@ pub fn activate(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     )?;
     let guard = PathBuf::from(required(&journal, "guard_dir")?);
     crate::task_env::validate_path(env, &guard)?;
-    let _lock = crate::guard::locked(&guard)?;
+    let lock = crate::guard::locked(&guard)?;
+    let state = reserve_guard(&guard, &runtime, &journal)?;
+    Ok((guard, state, lock))
+}
+fn reserve_guard(guard: &Path, runtime: &J, journal: &J) -> Result<J> {
     ensure_absent(&guard.join("activation.json"))?;
-    let mut state = util::read_state_json(&guard, "state.json")?;
+    let mut state = util::read_state_json(guard, "state.json")?;
     ensure(
         state["session"] == journal["state"]["session"]
             && state["instance"] == runtime["instance"]
@@ -118,21 +139,24 @@ pub fn activate(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     )?;
     state["receiver_activation"] = json!("active");
     state["phase"] = json!("monitoring");
-    crate::guard::save(&guard, &mut state)?;
+    crate::guard::save(guard, &mut state)?;
+    Ok(state)
+}
+fn spawn_watch(
+    env: &mut TaskEnvironment,
+    guard: &Path,
+    spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Child> {
     let binary = model::string(spec, "driver_binary")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
-    let mut cmd = env.permitted_command(binary.as_os_str(), true, permit.as_deref())?;
+    let mut cmd = env.permitted_command(binary.as_os_str(), true, permit)?;
     cmd.args(["task-runtime", "receiver-watch", "--state-dir"])
-        .arg(&guard);
-    let mut child = super::super::super::spawn_logged(&guard, &mut cmd)?;
+        .arg(guard);
+    let mut child = super::super::super::spawn_logged(guard, &mut cmd)?;
     super::super::super::register_child(env, &mut child)?;
-    drop(_lock);
-    await_watch(&guard, &mut child)?;
-    let result = json!({"phase":"active","pid":child.id(),"session":state["session"],
-        "safe_rotation":false,"context_telemetry":false});
-    util::atomic_write_json(&guard.join("activation.json"), &result)?;
-    Ok(result)
+    Ok(child)
 }
 
 fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
@@ -156,23 +180,41 @@ fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
 pub fn watch(guard: &Path) -> Result<()> {
     crate::watch_service::run(
         guard,
-        || {
-            let _permit = crate::lifecycle::runtime_permit(guard)?;
-            let state = util::read_state_json(guard, "state.json")?;
-            Adapter::new(&state)?.agent()?;
-            Ok(false)
-        },
-        || {
-            let state = util::read_state_json(guard, "state.json")?;
-            ensure(
-                std::env::var(crate::task_env::MARKER_ENV).ok().as_deref()
-                    == state["instance"].as_str(),
-                "task receiver watcher must belong to its task process tree",
-            )?;
-            Adapter::new(&state)?.agent().map(|_| ())
-        },
+        || observe(guard).map(|_| false),
+        || validate_watch(guard),
         2,
         None,
         false,
     )
+}
+
+/// One read-only observation; the watcher uses the same exact-identity path.
+pub fn observe(guard: &Path) -> Result<J> {
+    let _permit = crate::lifecycle::runtime_permit(guard)?;
+    let state = util::read_state_json(guard, "state.json")?;
+    Adapter::new(&state)?.agent()
+}
+fn validate_watch(guard: &Path) -> Result<()> {
+    let state = util::read_state_json(guard, "state.json")?;
+    ensure(
+        std::env::var(crate::task_env::MARKER_ENV).ok().as_deref() == state["instance"].as_str(),
+        "task receiver watcher must belong to its task process tree",
+    )?;
+    Adapter::new(&state)?.agent().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn watcher_rejects_foreign_process_before_heartbeat_or_model_work() {
+        let temp = crate::util::fs::test_tempdir();
+        util::atomic_write_json(
+            &temp.path().join("state.json"),
+            &json!({"instance":"foreign-watcher-fixture"}),
+        )
+        .unwrap();
+        assert!(watch(temp.path()).is_err());
+        assert!(!temp.path().join("watch.json").exists());
+    }
 }

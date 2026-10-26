@@ -81,6 +81,18 @@ fn exercise(lost_reply: bool) {
     // A separate task broker is owned; the server/test process is not.
     assert!(env.owns_process(broker.id() as i32));
     assert!(!env.owns_process(std::process::id() as i32));
+    broker.kill().unwrap();
+    broker.wait().unwrap();
+    task_runtime::start_broker(
+        &mut env,
+        &root,
+        &json!({"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")}),
+    )
+    .unwrap();
+    let restarted = task_runtime::verify(&env, &root).unwrap();
+    assert_ne!(restarted["pid"], broker.id());
+    assert_eq!(restarted["configuration"], "upstream");
+
     let state = task_runtime::native::receiver::bootstrap(
         &env,
         &root,
@@ -98,6 +110,11 @@ fn exercise(lost_reply: bool) {
     .unwrap();
     assert!(task_runtime::native::receiver::active::activate(&mut env, &root, &json!({})).is_err());
     let active = util::read_state_json(&root.join("guard"), "state.json").unwrap();
+    assert_eq!(
+        task_runtime::native::receiver::active::observe(&root.join("guard")).unwrap()
+            ["interactive_ready"],
+        true
+    );
     let adapter = herdr_flow::herdr::receiver_factory(&active).unwrap();
     assert_eq!(adapter.agent().unwrap()["interactive_ready"], true);
     assert_eq!(

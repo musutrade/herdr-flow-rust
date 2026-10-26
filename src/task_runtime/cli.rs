@@ -2,17 +2,8 @@ use super::*;
 const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-activate|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex|opencode>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
-    if let [action, option, path] = args {
-        if action == "receiver-watch" && option == "--state-dir" {
-            native::receiver::active::watch(Path::new(path))?;
-            return Ok(json!({"stopped":true}));
-        }
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "configuration-status")
-    {
-        return configuration_status(args);
+    if let Some(result) = special(args) {
+        return result;
     }
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
     let options = parse_options(&args[1..])?;
@@ -32,6 +23,21 @@ fn run(args: &[String]) -> Result<J> {
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
 }
+fn special(args: &[String]) -> Option<Result<J>> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "configuration-status")
+    {
+        return Some(configuration_status(args));
+    }
+    match args {
+        [action, option, path] if action == "receiver-watch" && option == "--state-dir" => {
+            Some(native::receiver::active::watch(Path::new(path)).map(|_| json!({"stopped":true})))
+        }
+        _ => None,
+    }
+}
+
 fn configuration_status(args: &[String]) -> Result<J> {
     match args {
         [_, option, adapter] if option == "--adapter" => configuration::status(adapter),
@@ -62,16 +68,22 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
         "launch" => {
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }
+        "status" => status::status(env, root),
+        _ => native_action(action, env, root, spec),
+    }
+}
+fn native_action(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    match action {
         "create" => native::create(env, root, spec),
         "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
         "receiver-activate" => native::receiver::active::activate(env, root, spec),
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
-        "status" => status::status(env, root),
         _ => Err(FlowError::usage(USAGE)),
     }
 }
+
 pub fn cli(args: &[String]) -> i32 {
     if args.iter().any(|v| v == "--help" || v == "-h") {
         println!("{USAGE}");

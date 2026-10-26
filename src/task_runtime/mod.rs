@@ -1,4 +1,4 @@
-//! Task-owned native runtimes. Shared servers cannot provide deletion guarantees.
+//! Task-owned runtimes and bounded attachments to existing upstream services.
 use crate::{
     error::FlowError,
     model::{self, J},
@@ -435,7 +435,29 @@ pub(super) fn required(value: &J, key: &str) -> Result<String> {
 pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    broker_child(env, root, spec, permit.as_deref()).map(|_| ())
+    let mut record = util::read_state_json(root, "runtime.json")?;
+    verify_owner_record(env, &record)?;
+    ensure(
+        record["instance"] == env.instance_id && record["root"] == json!(root),
+        "broker restart runtime binding changed",
+    )?;
+    if let Some(binary) = spec.get("driver_binary") {
+        record["driver_binary"] = binary.clone();
+    }
+    restart_broker(env, root, record, permit.as_deref())
+}
+fn restart_broker(
+    env: &mut TaskEnvironment,
+    root: &Path,
+    record: J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<()> {
+    let child = broker_child(env, root, &record, permit)?;
+    if upstream::selected(&record) {
+        upstream::finish_attachment(root, record, child).map(|_| ())
+    } else {
+        Ok(())
+    }
 }
 fn broker_child(
     env: &mut TaskEnvironment,

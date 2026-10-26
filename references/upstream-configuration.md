@@ -40,6 +40,11 @@ It does not activate old guards or change a global entrypoint. Context telemetry
 and safe rotation are explicitly unsupported on this new receiver path. The old
 Herdr/TUI watcher remains unchanged. Queue notification/ACK policy is independent.
 
+Broker restart reuses the recorded upstream attachment and refreshes its process
+identity. Restart after receiver activation invalidates the old receiver binding;
+that receiver stops on the identity mismatch. Automatic receiver rebinding is not
+implemented. The restart test covers a broker restarted before bootstrap.
+
 ## Ownership and reclamation
 
 The socket device/inode/user identity is sealed; replacement does not silently

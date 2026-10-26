@@ -236,6 +236,9 @@ fn native_socket(root: &Path) -> Result<PathBuf> {
             return super::upstream::endpoint(&runtime);
         }
     }
+    private_native_socket(root)
+}
+fn private_native_socket(root: &Path) -> Result<PathBuf> {
     let socket = root.join("server.sock");
     if !std::fs::symlink_metadata(&socket)?.file_type().is_symlink() {
         return Ok(socket);
@@ -762,25 +765,30 @@ fn read_codex_turn(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
     );
     match page {
         Ok(page) => find_turn(&page, turn),
-        Err(error) if error.rpc_code == Some(-32601) => {
-            if let Some(actual) = super::broker::turn(root, state, turn)? {
-                return Ok(Some(actual));
-            }
-            let runtime = util::read_state_json(root, "runtime.json")?;
-            if super::upstream::selected(&runtime) {
-                let result = client(root)?.call(
-                    "thread/read",
-                    &json!({"threadId":state["session"],"includeTurns":true}),
-                )?;
-                verify_thread(state, &result["thread"])?;
-                find_turn(&json!({"data":result["thread"]["turns"]}), turn)
-            } else {
-                rollout::read(root, state, turn)
-            }
-        }
+        Err(error) if error.rpc_code == Some(-32601) => fallback_turn(root, state, turn),
         Err(error) => Err(error),
     }
 }
+fn fallback_turn(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
+    if let Some(actual) = super::broker::turn(root, state, turn)? {
+        return Ok(Some(actual));
+    }
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    if super::upstream::selected(&runtime) {
+        shared_history(root, state, turn)
+    } else {
+        rollout::read(root, state, turn)
+    }
+}
+fn shared_history(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
+    let result = client(root)?.call(
+        "thread/read",
+        &json!({"threadId":state["session"],"includeTurns":true}),
+    )?;
+    verify_thread(state, &result["thread"])?;
+    find_turn(&json!({"data":result["thread"]["turns"]}), turn)
+}
+
 fn find_turn(page: &J, turn: &J) -> Result<Option<J>> {
     let turns = page["data"]
         .as_array()
@@ -912,6 +920,49 @@ fn healthy_opencode(api: &dyn Api) -> Result<J> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_history_rejects_foreign_thread_before_reading_turns() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let root = util::fs::test_tempdir();
+        let listener = UnixListener::bind(root.path().join("broker.sock")).unwrap();
+        let session = "12345678-1234-1234-1234-123456789abc";
+        let server = std::thread::spawn(move || {
+            for id in [session, "12345678-1234-1234-1234-123456789def"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&mut stream).read_line(&mut request).unwrap();
+                let request: J = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "thread/read");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId":session,"includeTurns":true})
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"result":{"thread":{
+                        "id":id,"cwd":"/task","modelProvider":"openai",
+                        "turns":[{"id":"other"},{"id":"wanted","status":"completed"}]
+                    }}})
+                )
+                .unwrap();
+            }
+        });
+        let state = json!({"session":session,"cwd":"/task","model":{"providerID":"openai"}});
+        assert_eq!(
+            super::shared_history(root.path(), &state, &json!("wanted"))
+                .unwrap()
+                .unwrap()["status"],
+            "completed"
+        );
+        assert!(super::shared_history(root.path(), &state, &json!("wanted")).is_err());
+        server.join().unwrap();
+    }
+
     fn bound_owner_fixture() -> (super::J, super::J) {
         let binding = serde_json::json!({"queue_id":"queue","task_id":"task","epoch":7});
         let owner = serde_json::json!({"binding":binding,"instance_id":"instance"});

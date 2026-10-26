@@ -41,6 +41,25 @@ pub(super) fn attach(
     spec: &J,
     permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Child> {
+    validate_attachment(env, root, spec)?;
+    let socket = selected_endpoint(env, spec)?;
+    let mut record = starting_record(env, root, spec)?;
+    record["upstream_socket"] = socket;
+    record["service_owner"] = json!("upstream");
+    record["configuration"] = json!("upstream");
+    util::atomic_write_json(&root.join("runtime.json"), &record)?;
+    let child = broker_child(env, root, &record, permit)?;
+    finish_attachment(root, record, child)
+}
+pub(super) fn finish_attachment(root: &Path, mut record: J, child: Child) -> Result<Child> {
+    record["pid"] = json!(child.id());
+    record["start_time"] = json!(crate::task_env::process_start_time(child.id() as i32));
+    record["phase"] = json!("started");
+    util::atomic_write_json(&root.join("runtime.json"), &record)?;
+    Ok(child)
+}
+
+fn validate_attachment(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
     ensure(
         env.creation.is_some(),
         "upstream attachment requires an isolated queue instance",
@@ -49,24 +68,16 @@ pub(super) fn attach(
     verify_instance_owner(env)?;
     crate::task_env::validate_path(env, root)?;
     let cwd = PathBuf::from(required(spec, "cwd")?);
-    validate_launch_cwd(env, root, &cwd, spec)?;
+    validate_launch_cwd(env, root, &cwd, spec)
+}
+fn selected_endpoint(env: &TaskEnvironment, spec: &J) -> Result<J> {
     let socket = PathBuf::from(required(spec, "socket")?);
     ensure(
         !crate::task_env::paths_overlap(&socket, &env.temp_root)
             && !crate::task_env::paths_overlap(&socket, &env.workspace_root),
         "shared server must be outside disposable task roots",
     )?;
-    let mut record = starting_record(env, root, spec)?;
-    record["upstream_socket"] = socket_identity(&socket)?;
-    record["service_owner"] = json!("upstream");
-    record["configuration"] = json!("upstream");
-    util::atomic_write_json(&root.join("runtime.json"), &record)?;
-    let child = broker_child(env, root, &record, permit)?;
-    record["pid"] = json!(child.id());
-    record["start_time"] = json!(crate::task_env::process_start_time(child.id() as i32));
-    record["phase"] = json!("started");
-    util::atomic_write_json(&root.join("runtime.json"), &record)?;
-    Ok(child)
+    socket_identity(&socket)
 }
 
 fn validate_spec(spec: &J) -> Result<()> {
@@ -112,28 +123,34 @@ pub(super) fn before(root: &Path, method: &str, params: &J) -> Result<()> {
         return Ok(());
     }
     endpoint(&runtime)?;
-    let path = root.join("upstream-session.json");
     if method == "thread/start" {
-        native::receiver::ensure_absent(&path)?;
-        ensure(
-            params["cwd"] == runtime["cwd"],
-            "upstream creation cwd changed",
-        )?;
-        util::atomic_write_json(
-            &path,
-            &json!({"phase":"creating","instance":runtime["instance"],
-            "runtime":runtime,"session":null}),
-        )
+        reserve_creation(root, &runtime, params)
     } else {
-        let journal = util::read_state_json(root, "upstream-session.json")?;
-        ensure(
-            journal["phase"] == "created"
-                && journal["instance"] == runtime["instance"]
-                && !journal["session"].is_null()
-                && params["threadId"] == journal["session"],
-            "upstream request does not belong to the recorded task thread",
-        )
+        validate_request(root, &runtime, params)
     }
+}
+fn reserve_creation(root: &Path, runtime: &J, params: &J) -> Result<()> {
+    let path = root.join("upstream-session.json");
+    native::receiver::ensure_absent(&path)?;
+    ensure(
+        params["cwd"] == runtime["cwd"],
+        "upstream creation cwd changed",
+    )?;
+    util::atomic_write_json(
+        &path,
+        &json!({"phase":"creating","instance":runtime["instance"],
+        "runtime":runtime,"session":null}),
+    )
+}
+fn validate_request(root: &Path, runtime: &J, params: &J) -> Result<()> {
+    let journal = util::read_state_json(root, "upstream-session.json")?;
+    ensure(
+        journal["phase"] == "created"
+            && journal["instance"] == runtime["instance"]
+            && !journal["session"].is_null()
+            && params["threadId"] == journal["session"],
+        "upstream request does not belong to the recorded task thread",
+    )
 }
 
 pub(super) fn after(root: &Path, method: &str, result: &J) -> Result<()> {
@@ -163,32 +180,39 @@ pub(crate) fn obligations(env: &TaskEnvironment) -> Result<Vec<J>> {
     let mut out = vec![];
     for (index, entry) in std::fs::read_dir(directory)?.enumerate() {
         ensure(index < 128, "runtime cleanup scan exceeded bound")?;
-        let root = entry?.path();
-        ensure(
-            std::fs::symlink_metadata(&root)?.is_dir(),
-            "invalid runtime directory",
-        )?;
-        let runtime = util::read_state_json_bounded_if_exists(&root, "runtime.json", 1024 * 1024)?;
-        let Some(runtime) = runtime.filter(selected) else {
-            continue;
-        };
-        verify_owner_record(env, &runtime)?;
-        ensure(
-            runtime["instance"] == env.instance_id,
-            "upstream cleanup instance changed",
-        )?;
-        if let Some(journal) =
-            util::read_state_json_bounded_if_exists(&root, "upstream-session.json", 1024 * 1024)?
-        {
-            ensure(
-                journal["instance"] == env.instance_id
-                    && journal["runtime"]["upstream_socket"] == runtime["upstream_socket"],
-                "upstream obligation binding changed",
-            )?;
+        if let Some(journal) = obligation(env, &entry?.path())? {
             out.push(journal);
         }
     }
     Ok(out)
+}
+fn obligation(env: &TaskEnvironment, root: &Path) -> Result<Option<J>> {
+    ensure(
+        std::fs::symlink_metadata(root)?.is_dir(),
+        "invalid runtime directory",
+    )?;
+    let runtime = util::read_state_json_bounded_if_exists(root, "runtime.json", 1024 * 1024)?;
+    match runtime.filter(selected) {
+        Some(runtime) => bound_obligation(env, root, &runtime),
+        None => Ok(None),
+    }
+}
+fn bound_obligation(env: &TaskEnvironment, root: &Path, runtime: &J) -> Result<Option<J>> {
+    verify_owner_record(env, runtime)?;
+    ensure(
+        runtime["instance"] == env.instance_id,
+        "upstream cleanup instance changed",
+    )?;
+    let journal =
+        util::read_state_json_bounded_if_exists(root, "upstream-session.json", 1024 * 1024)?;
+    if let Some(journal) = &journal {
+        ensure(
+            journal["instance"] == env.instance_id
+                && journal["runtime"]["upstream_socket"] == runtime["upstream_socket"],
+            "upstream obligation binding changed",
+        )?;
+    }
+    Ok(journal)
 }
 
 /// Delete only IDs recorded from this task's thread/start response. A transport
