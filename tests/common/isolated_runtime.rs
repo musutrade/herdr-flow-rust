@@ -4,12 +4,28 @@ use super::*;
 #[ignore = "subprocess-only Codex protocol fixture; no model"]
 fn rpc_child() {
     use std::os::unix::net::UnixListener;
+    // Set this after the namespace bootstrap/exec so credential transitions
+    // cannot clear it. The fixture must not outlive the launcher held by its
+    // FixtureChild guard, including when a test unwinds before finalization.
+    // SAFETY: getppid/prctl take scalar arguments and do not borrow memory.
+    unsafe {
+        let parent = libc::getppid();
+        assert_eq!(
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0),
+            0
+        );
+        assert_eq!(
+            libc::getppid(),
+            parent,
+            "fixture launcher exited during setup"
+        );
+    }
     let root = PathBuf::from(std::env::var_os("HERDR_ISOLATED_RPC_FIXTURE").unwrap());
     let config: J =
         serde_json::from_slice(&fs::read(root.join("tmp/fixture.json")).unwrap()).unwrap();
     let listener = UnixListener::bind(root.join("server.sock")).unwrap();
     fs::set_permissions(root.join("server.sock"), fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(root.join("ready"), b"ready").unwrap();
+    fs::write(root.join("ready"), std::process::id().to_string()).unwrap();
     let session = if root.ends_with("coordinator") {
         "22222222-2222-2222-2222-222222222222"
     } else {
@@ -156,6 +172,41 @@ pub(super) fn runtime_at(
 
 fn create_spec(f: &Fixture) -> J {
     json!({"queue_dir":f.queue,"wait":"dev","instruction":"fixture only","evidence":[]})
+}
+
+#[test]
+fn fixture_server_exits_when_its_namespace_launcher_is_killed() {
+    let f = Fixture::new();
+    let mut env = linked(&f);
+    let (root, mut child) = runtime(&mut env);
+    let pid: i32 = fs::read_to_string(root.join("ready"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let identity = task_env::process_start_time(pid).unwrap();
+    assert_ne!(pid, child.0.id() as i32);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while task_env::process_start_time(pid) == Some(identity) {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, fields)| fields.starts_with('Z'))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture server {pid} survived launcher exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    drop(env);
+    upstream_runtime::finalize_with_retry(&f);
+    let report = queue::finalization::drive(&f.queue).unwrap();
+    assert_eq!(report.pending, 0, "{report:?}");
+    assert!(!root.exists());
 }
 
 #[test]

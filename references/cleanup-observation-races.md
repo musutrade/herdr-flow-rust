@@ -4,6 +4,27 @@ This supplements #130/#38. Full reclamation and preservation of unrelated user
 processes/assets remain simultaneous requirements. No login, configuration,
 provider, billing, proxy, installed entrypoint or existing watcher is changed.
 
+## Protocol fixture process leak (2026-10-26, latest)
+
+A final process inventory found abandoned `isolated_runtime::rpc_child` protocol
+servers after their `FixtureChild` guard killed the namespace launcher. Killing
+that launcher did not kill the test server. This is real test-resource residue,
+not upstream user data, and earlier passing suites did not establish its absence.
+The synthetic server now sets a parent-death SIGKILL **after** namespace/exec
+bootstrap and checks that its parent did not change while arming it. A regression
+launches the actual fixture, kills/reaps its launcher, requires the exact server
+identity to exit, and finalizes the remaining owned resources. A preliminary
+launcher-option-only attempt failed that regression and is not shipped.
+
+Inspected cleanup uses pidfds and rechecks exact executable/arguments, start
+identity, fixture root and ownership before stopping old synthetic servers.
+For the retained `.tmpN692zo` fixture, the exact instance/queue markers were also
+verified, its two abandoned servers stopped, and its workspace/scratch removed;
+the seed repository remains. Evidence is in
+`/mnt/dev-ssd/dev-tmp/recovery-orphan-fixture-*.json` and
+`recovery-orphan-retained-fixture-cleanup.json`. This is separate from the 12 real
+Codex task attempts and does not upgrade their failed acceptance results.
+
 ## Additional environment-lock race and unresolved Git timeout (2026-10-26)
 
 The later documentation-only commit `bf1788a` reproduced another fixture race in
