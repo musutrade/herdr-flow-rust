@@ -28,8 +28,8 @@ struct Target {
 
 fn options(args: &[String]) -> Result<BTreeMap<&str, &str>> {
     let mut result = BTreeMap::new();
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = args.as_chunks::<2>();
+    for pair in pairs {
         if !["--task", "--spec"].contains(&pair[0].as_str())
             || pair[1].is_empty()
             || result.insert(pair[0].as_str(), pair[1].as_str()).is_some()
@@ -37,7 +37,7 @@ fn options(args: &[String]) -> Result<BTreeMap<&str, &str>> {
             return Err(FlowError::usage(USAGE));
         }
     }
-    if !pairs.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(FlowError::usage(USAGE));
     }
     Ok(result)

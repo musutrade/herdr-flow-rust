@@ -797,7 +797,7 @@ impl GitHubApi for StatusChanging {
         if path == "actions/runs/10" {
             let n = self.1.get() + 1;
             self.1.set(n);
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 row["status"] = json!("in_progress");
             }
         }
