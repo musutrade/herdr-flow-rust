@@ -350,15 +350,20 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
+    let (journal, queue_root) = recovery_input(env, root)?;
+    let mut state = recovered_state(root, &journal)?;
+    recover_binding(env, root, &queue_root, &journal, &mut state)?;
+    Ok(state)
+}
+
+fn recovery_input(env: &TaskEnvironment, root: &Path) -> Result<(J, PathBuf)> {
     let runtime = super::verify(env, root)?;
     let journal = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &journal)?;
     super::review::binding(env, &runtime, &journal["packet"]["binding"])?;
     let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
     validate_queue_control(env, &queue_root)?;
-    let mut state = recovered_state(root, &journal)?;
-    recover_binding(env, root, &queue_root, &journal, &mut state)?;
-    Ok(state)
+    Ok((journal, queue_root))
 }
 
 fn recover_binding(
