@@ -1,12 +1,26 @@
 # Herdr 工作流边界与最小验收
 
+## 当前职责（2026-10-26，覆盖下方历史拓扑要求）
+
+herdr-flow 自己管理任务实例、专属 Git worktree、受管进程与收尾；Herdr 仅为
+可选展示/会话/通信适配。启用的对象必须可核验归属且可释放，否则明确不支持，
+不等待上游、不猜测共享资源，也不将原生路径冒称 Herdr 可见闭环。
+PR #131–#136 在 main `5645b695` 已合并；具体支持域见[任务创建](task-instance.md)
+和[生命周期](task-lifecycle.md)。复用既有实现，不重建调度器或 ACK 系统。
+
+任务最终成功或显式最终失败均自动进入统一收尾；一次测试失败、暂停、修复和
+不确定外部结果不是终态。停止所属执行者、身份核验和清理恢复由系统执行，
+不能把占用当成人工放行条件。仅约定正式交付物保留，任务临时数据最终清除。
+实现/局部回归/真实接入分层记录，下一步以[当前验收顺序](end-to-end-readiness.md#current-execution-order-2026-10-26)
+为准；本页后续 dated 观察与命令示例保留历史证据，不规定所有任务必须使用 Herdr。
+
 2026-10-23 源码审计基线：`55c6ba073400dff1a1840fd9f82515f6a00412f3`。
 本节记录证据分类和后续执行条件。下方新增的实际接续观察基线为
 `7373b1121244f2e308518d4bcc52336a0fafcb30`，与历史后台原生测试分开记录。
 
 ## 职责与现有能力
 
-Herdr 管理 agent/session 通信、终端和 worktree 生命周期。herdr-flow 复用
+可选 Herdr 适配提供 agent/session 通信与终端展示；核心生命周期权威在 herdr-flow。它复用
 guard、queue delivery journal、ACK、task-apply、成果验收、交付及 CI 观察。
 不新增调度器、数据库、独立 controller、进程监督器或平行 ACK 事务系统。
 生产程序仍为 Rust，无 Python 运行时依赖。
@@ -19,7 +33,7 @@ guard、queue delivery journal、ACK、task-apply、成果验收、交付及 CI 
 | queue/task 命令 | 登记结果、持久派发意图、接手、signal、ACK、task-apply | 复用已有身份、锁和状态门禁；不把终端接纳伪装为 turn id、ACK 或完成 |
 | task-owned Codex bootstrap | 创建一次线程并记录身份，明确拒绝 ready | 保持 inactive；不作为当前工作流的接收端，也不继续补独立 controller |
 
-当前宿主观察为 Herdr client 0.9.5 / server 0.9.4、protocol 22。历史混合原生
+当时（2026-10-23）宿主观察为 Herdr client 0.9.5 / server 0.9.4、protocol 22。历史混合原生
 运行固定 Codex 0.163.0 / OpenCode 1.19.4；这些版本记录不要求升级。
 
 ## 历史证据如何解读
@@ -42,7 +56,9 @@ agent idle、普通命令成功或日志不存在都不能代替这些证据。
 bootstrap。已验证的启动、安全和回收修复保留；后续 socket/stdio/controller
 调查没有产品 PR，不继续扩展。不能把这些原生实现整体宣称为 Herdr 集成。
 
-## 下一次最小验收步骤
+## 历史 Herdr 可见拓扑的最小结果回传步骤
+
+仅适用于另行选定且可安全接入/释放的 Herdr 拓扑；不代替当前单任务终态清理或连续任务验收。
 
 1. **固定角色和实际身份**：从现有 Herdr agent 查询开始，记录任务角色、pane、
    exact agent_session、cwd/worktree、版本及候选 SHA。需要新角色时使用已安装
@@ -118,7 +134,7 @@ checkout 外；跨会话使用前重查当前身份，不能复制旧 readiness 
 实际 accept 后工作；不能新增“等用户再说继续”的条件。用户暂停、真实阻塞或授权
 不覆盖时，记录准确原因和恢复条件并主动通知。详见 [任务交接](handoff.md)。
 
-### 当前会话限制
+### 当时会话限制（须重新探测，不能当作当前安装结论）
 
 本次观察的 Codex TUI 使用 `--no-daemon`，没有匹配的 app-server bridge，不能
 作为现有 queue receiver。普通 Herdr 消息往返仍可用。仓库已有 `herdr-flow tui`
