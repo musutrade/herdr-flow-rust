@@ -12,6 +12,11 @@ Linux 协议夹具测试需要 `/usr/bin/bwrap`（bubblewrap）及可用的用�
 候选提交由验收驱动准备，尚不代表从 issue 开发到远端发布的完整验收。
 详见[上游配置与资源回收](references/upstream-configuration.md)。
 
+新建 Codex 协调者已接通按 Owner 限定的开发派发、自动收集、独立评审、本地 Git 交付和终态回收；
+支持任务 broker 重启后对同一空闲接收者恢复绑定。新入口和未知结果的恢复边界见
+[协调者接续说明](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26)。
+协议集成测试与真实模型总验收分别记录，旧接收者不会自动升级控制能力。
+
 **工作流范围**：herdr-flow 权威管理 task/epoch/instance、专属 Git worktree、
 受管 Agent/子进程及终态收尾，复用现有 guard、队列、ACK、任务应用及交付。
 Herdr 只接入可核验归属且可释放的展示、会话和通信能力；不支持的适配明确标明，

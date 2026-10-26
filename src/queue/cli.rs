@@ -945,6 +945,12 @@ fn watch_tick(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<boo
     let Some(report) = cleanup_before_tick(root, args.once)? else {
         return Ok(false);
     };
+    match crate::task_runtime::native::receiver::control::drive(root) {
+        Ok(true) => return Ok(false),
+        Err(error) if error.kind == ErrorKind::StateBusy && !args.once => return Ok(false),
+        Err(error) => return Err(error),
+        Ok(false) => (),
+    }
     let Some(lock) = watch_queue_lock(root, args.once)? else {
         return Ok(false);
     };
@@ -1340,4 +1346,29 @@ pub fn cli(args: &[String]) -> i32 {
 fn cli_error(error: FlowError) -> i32 {
     util::write_stderr(&format!("{}: {}\n", error.kind.type_name(), error));
     2
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn watch_lock_contention_defers_poll_but_once_reports_busy() {
+        let temp = util::fs::test_tempdir();
+        let root = temp.path().join("queue");
+        super::super::init(&root, None, 10).unwrap();
+        let held = super::super::locked(&root, false).unwrap();
+        assert!(watch_queue_lock(&root, false).unwrap().is_none());
+        assert_eq!(
+            watch_queue_lock(&root, true).err().unwrap().kind,
+            ErrorKind::StateBusy
+        );
+        drop(held);
+        assert!(watch_queue_lock(&root, false).unwrap().is_some());
+        let bad = temp.path().join("not-a-directory");
+        std::fs::write(&bad, b"fixture").unwrap();
+        assert_ne!(
+            watch_queue_lock(&bad, false).err().unwrap().kind,
+            ErrorKind::StateBusy
+        );
+    }
 }

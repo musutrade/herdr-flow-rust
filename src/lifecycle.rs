@@ -51,12 +51,7 @@ fn acquire_with_creation(owner: &Owner, exclusive: bool, create: bool) -> Result
     } else {
         libc::LOCK_SH
     };
-    // SAFETY: a valid held fd and scalar operation; always nonblocking.
-    if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
-        return Err(FlowError::guard(
-            "lifecycle action busy; release other locks and retry",
-        ));
-    }
+    lock_permit(&file, mode)?;
     let permit = Permit {
         owner: owner.clone(),
         file,
@@ -263,4 +258,19 @@ fn verify_retirement(owner: &Owner, permit: &Permit) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn lock_permit(file: &std::fs::File, mode: i32) -> Result<()> {
+    // SAFETY: a valid held fd and scalar operation; always nonblocking.
+    if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Err(FlowError::new(
+            crate::ErrorKind::StateBusy,
+            "lifecycle action busy; release other locks and retry",
+        ));
+    }
+    Err(error.into())
 }

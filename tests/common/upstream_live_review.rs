@@ -3,6 +3,123 @@
 use super::*;
 
 #[test]
+#[ignore = "explicit existing endpoint/model: coordinator develops, reviews, delivers and finalizes a new local task"]
+fn live_upstream_coordinator_full_task() {
+    let socket = std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing socket required");
+    let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
+    let f = std::mem::ManuallyDrop::new(Fixture::new());
+    eprintln!("full task evidence root: {}", f.temp.path().display());
+    let target = f.temp.path().join("output.git");
+    git(
+        f.temp.path(),
+        &[
+            "clone",
+            "--bare",
+            f.temp.path().join("repo").to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+    git(&target, &["update-ref", "refs/heads/accepted", &f.commit]);
+    let goal = "Create and commit a tracked file answer.txt containing exactly 42 followed by one newline. Independently verify the fixed commit and deliver it to the predeclared local output repository.";
+    let mut env = isolated_runtime::linked_delivery(&f, goal, Some(&target));
+    let coord = task_runtime::prepare(&env, "coordinator").unwrap();
+    let cwd = env.workspace_root.join("checkout");
+    let workspace = env.workspace_root.clone();
+    let scratch = env.temp_root.clone();
+    let mut broker = attach(&mut env, &coord, &socket, &model, &cwd, None);
+    let guard = coord.join("guard");
+    task_runtime::native::receiver::bootstrap(
+        &env,
+        &coord,
+        &json!({"guard_dir":guard,"task":"task","role":"coordinator"}),
+    )
+    .unwrap();
+    task_runtime::native::receiver::active::activate(
+        &mut env,
+        &coord,
+        &json!({"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")}),
+    )
+    .unwrap();
+    bind_coordinator(&f, &guard);
+    let instruction = full_task_instruction(&f, &target);
+    // Start before the external queue supervisor to avoid a queue-lock race.
+    // The coordinator only receives bounded tools; no worker can dispatch until
+    // the watcher processes its request and readiness has succeeded.
+    task_runtime::native::receiver::start(&env, &coord, &json!({"instruction":instruction}))
+        .unwrap();
+    drop(env);
+    let log = fs::File::create(f.temp.path().join("full-task-watch.log")).unwrap();
+    let mut watch = FixtureChild(
+        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(["queue", "watch", "--state-dir"])
+            .arg(&f.queue)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    while !f.state()["tasks"]["task"].is_null() {
+        assert!(
+            watch.0.try_wait().unwrap().is_none(),
+            "queue supervisor stopped; retain state for inspected recovery"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "real task deadline; retain state without redispatch"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    watch.0.kill().unwrap();
+    watch.0.wait().unwrap();
+    broker.wait().unwrap();
+    assert!(!workspace.exists() && !scratch.exists());
+    assert!(!task_env::is_registered("task").unwrap());
+    assert_eq!(
+        git(&target, &["show", "refs/heads/accepted:answer.txt"]),
+        "42"
+    );
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["show", "refs/heads/accepted:answer.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, b"42\n");
+    util::atomic_write_json(
+        &f.temp.path().join("full-task-result.json"),
+        &json!({
+        "scope":"real coordinator/developer/reviewer; new predeclared local Git target only",
+        "candidate_seeded_by_harness":false,"model":model,"task_resources_removed":true,
+        "commit":git(&target, &["rev-parse","refs/heads/accepted"]),
+        "global_entrypoint_changed":false,"remote_publication":false}),
+    )
+    .unwrap();
+}
+
+fn bind_coordinator(f: &Fixture, guard: &Path) {
+    let _lock = queue::locked(&f.queue, false).unwrap();
+    let state = util::read_state_json(guard, "state.json").unwrap();
+    let mut q = f.state();
+    q["guard_dir"] = json!(guard);
+    q["receiver"] = guard::scope(&state);
+    q["notify"] = json!(true);
+    q["poll_seconds"] = json!(1);
+    queue::save(&f.queue, &mut q).unwrap();
+}
+
+fn full_task_instruction(f: &Fixture, target: &Path) -> String {
+    format!(
+        r#"Complete only registered task task through herdr_queue tools. Inspect its actual requirement and existing permissions. Use the already registered development wait dev: run with instruction to create answer.txt containing exactly 42 plus newline and commit it. The developer may use git -c user.name=Acceptance -c user.email=acceptance@example.test commit (per-command identity only). No network, login or global configuration changes. Do not edit the candidate yourself.
+After dispatch stop until the result notification. Inspect runtime_results for the development output; ACK that delivery and apply the dev event with output, acceptance {{"goal":"bound development result completed"}}, release_evidence identifying the completed turn and next_action {{"kind":"complete"}}. Select that output's full SHA using lineage kind candidate with parent task task and its CURRENT state_version. Register independent acceptance with lineage kind activity, task task, current state_version, activity review, role acceptance, input full SHA, session_epoch 1, result_wait {{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":"reviewer","reason":"independent fixed snapshot review","condition":"report","timeout_seconds":600}}.
+Run wait review with an instruction to verify the exact tracked bytes and write .herdr-verdict.json using the supplied acceptance_protocol, exact original requirement source, criterion goal, no tracked edits, no git commits. Stop until notification. ACK and apply its immutable verdict; a passed report uses next_action {{"kind":"delivery","owner":"coordinator","reason":"independently passed","condition":"existing local delivery authorization"}}. Never supply reviewer acceptance evidence yourself. If a real defect occurs use existing continue/repair rules with new activities and independent re-review, never overwrite a verdict.
+For a passed review, deliver spec {{"adapter":"git","target":{},"ref":"refs/heads/accepted","expected":{},"authorization":"deliver-local","state_version":CURRENT_PARENT_VERSION}}. This authorization covers only this predeclared new local repository. Inspect again after delivery for the current parent version; finalize task task with outcome success only after confirmed delivery, and a reason. On an actual unrecoverable task failure, finalize failure with a concrete reason. Do not invent success. For unknown external outcomes stop and report without replay. Use inspect for current versions after mutations. Do not poll or use shell for queue operations."#,
+        json!(target),
+        json!(f.commit)
+    )
+}
+
+#[test]
 #[ignore = "explicit existing service/model; one real review turn in a new private queue"]
 fn live_upstream_fixed_snapshot_review() {
     run(false);

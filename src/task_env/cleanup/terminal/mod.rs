@@ -1315,7 +1315,11 @@ fi
             );
             assert!(
                 std::time::Instant::now() < deadline,
-                "real Git mutation did not complete"
+                "real Git mutation did not complete; action={action}; worker={}; wait={:?}; log={}; queue={}",
+                worker.0.id(),
+                fs::read_to_string(format!("/proc/{}/wchan", worker.0.id())),
+                fs::read_to_string(f.temp.path().join(format!("{action}-worker.log"))).unwrap_or_default(),
+                f.state()
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         };

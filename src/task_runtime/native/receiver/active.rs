@@ -148,7 +148,7 @@ fn reserve_guard(guard: &Path, runtime: &J, journal: &J) -> Result<J> {
     crate::guard::save(guard, &mut state)?;
     Ok(state)
 }
-fn spawn_watch(
+pub(super) fn spawn_watch(
     env: &mut TaskEnvironment,
     guard: &Path,
     spec: &J,
@@ -165,7 +165,7 @@ fn spawn_watch(
     Ok(child)
 }
 
-fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
+pub(super) fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         ensure(

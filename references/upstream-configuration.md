@@ -23,6 +23,112 @@ Codex installation. Historical OpenCode account settings remain untouched.
 No task imports account files, creates a credential
 store, changes a proxy, or switches billing routes on failure.
 
+## Coordinator continuation implementation (2026-10-26)
+
+Fresh upstream receivers now use `queue-tool-v2`. Existing v1 receivers retain
+inspect/ACK/apply only; their sessions are not upgraded or given new tool
+capabilities. No old queue, watcher or global entrypoint is changed.
+
+The existing queue watcher executes the coordinator's bounded continuations:
+
+- `lineage`: existing artifact/candidate/activity/continue operations for
+  the same Owner. Creating or revising requirements and authorization is refused.
+- `run`: starts an already registered development or acceptance activity, using
+  its persisted assignment. It inherits the coordinator's pinned upstream socket,
+  configured model/provider and approval policy. The model cannot supply a new
+  executable, endpoint, credentials or sandbox. Acceptance creates the registered
+  fixed Git snapshot through the existing review API.
+- `inspect`: includes collected native results. The watcher collects dispatched
+  workers and publishes their ordinary queue events; a successful run response
+  means dispatch, not task completion. The coordinator stops until notification,
+  then ACKs and applies the immutable result. Development application can register
+  the collected output and release its writer through the existing checks.
+- `deliver`: invokes the existing local Git executor with an already recorded
+  authorization and predeclared delivery target. Current independent acceptance,
+  candidate/version, target identity and expected ref are still required. It does
+  not add remote publication or manufacture an authorization/receipt.
+- `finalize`: validates success against confirmed delivery, or records an explicit
+  final failure. After its exact tool response is recorded sent, the watcher commits
+  the terminal obligation under the existing exclusive lifecycle gate. Subsequent
+  cleanup ticks reclaim the task; a pending cleanup does not re-enter role control.
+
+Runtime, collection and delivery operations run outside the outer queue lock;
+existing APIs retain their own transactions. Task lifecycle permits protect the
+control journal and child spawning. The existing bounded request/result journal
+provides at-most-once execution; native journals protect the individual launch,
+creation and turn attempts. Child brokers are reaped. No new scheduler, service,
+credential store or permanent task archive is introduced.
+
+After bootstrap, activation and binding to the new queue, explicitly start the
+first coordinator turn with:
+
+```sh
+herdr-flow task-runtime receiver-start --task TASK --state-dir COORDINATOR_ROOT --spec START_SPEC
+```
+
+`START_SPEC` contains only `{"instruction":"Proceed with the registered task"}`.
+This creates a model turn, and is used only within the task's existing execution
+authorization. Intent is persisted before sending; an uncertain response is not
+replayed. Later result notifications drive the same coordinator.
+
+### Transport restart and unresolved operations
+
+`task-runtime broker-recover` restarts only the owned transport using the recorded
+runtime; it neither starts nor changes the shared upstream service. After that
+restart the queue watcher automatically rebinds an already loaded, idle receiver.
+`task-runtime receiver-recover` exposes the same operation explicitly. Both use
+`--task TASK --state-dir COORDINATOR_ROOT`; an optional spec supplies the existing
+Flow executable as `driver_binary` for operator-side invocation only.
+
+Rebinding requires unchanged runtime configuration and upstream socket identity,
+the same Owner/thread, kernel-confirmed absence of the old broker, a stopped old
+watcher, and no unresolved tool operation. The old/new local images are recorded
+before publication so an interrupted rebind can resume exactly. It starts only a
+replacement task-owned watcher. Active, unloaded or unknown thread states remain
+blocked; no turn is resent and no replacement thread is created.
+
+Existing `task-runtime recover` reconciles known creation identities, and
+`delivery reconcile` observes an existing delivery without resubmission. Unknown
+thread creation with no returned ID and ambiguous tool response transmission still
+require inspected recovery. The implementation cannot infer non-execution from a
+missing response; those cases are not automatically retried or declared reclaimed.
+
+### Evidence scope
+
+New protocol integration tests run the actual queue watcher, brokers, Git commits,
+fixed review workspaces, local Git delivery and finalizer. A synthetic upstream
+peer supplies developer/reviewer behavior and coordinator tool requests. They
+cover successful delivery, explicit final failure, broker restart after activation,
+forbidden endpoint/requirement changes, foreign tasks and premature success.
+They are not real-model acceptance or the required continuous 20-task run.
+The earlier real-model evidence below retains its original limited scope.
+
+Concurrent continuation tests also exposed lifecycle-gate contention being
+classified as a permanent guard error. Only an actual nonblocking lock
+`WouldBlock` is now `StateBusy`: periodic queue watching defers that attempt,
+while `--once` reports it and other OS errors remain errors. Regression tests
+verify both contention and malformed-path behavior. A separate existing Git
+removal fixture once exceeded its unchanged ten-second deadline; it now reports
+the worker state and log on failure. Later passing runs do not establish the
+cause of that isolated timeout.
+
+`live_upstream_coordinator_full_task` is an explicitly ignored real-model harness
+for development through local delivery and cleanup. It requires the operator's
+existing socket and model selection. Its presence is not evidence that the real
+scenario passed; an uncertain run retains state rather than redispatching.
+
+The final full coverage run passed with default concurrency (195 library tests
+plus binary/integration suites). Absolute CRAP threshold 10, without a baseline,
+passed at 83.6% selected source line coverage; continuation and recovery modules
+reached 93.6% and 93.8%. Format, all-target/all-feature Clippy with warnings denied,
+suppression policy, release build and rustdoc with warnings denied passed. Local logs and JSON
+reports are retained as `/mnt/dev-ssd/dev-tmp/coordinator-validated-coverage.*`,
+`coordinator-validated-crap.json` and `coordinator-*-final.log`. Failed development
+runs remain investigation evidence, not passing acceptance.
+
+The following sections retain earlier implementation/evidence history. Where
+control capabilities or restart limitations differ, this section takes precedence.
+
 ## Historical OpenCode verification (before the removal decision)
 
 The installed/interactive binary is 1.19.4, but the observed listening service

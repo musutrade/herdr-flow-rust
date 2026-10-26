@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-activate|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -75,11 +75,23 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
 fn native_action(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     match action {
         "create" => native::create(env, root, spec),
-        "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
-        "receiver-activate" => native::receiver::active::activate(env, root, spec),
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
+        _ => receiver_action(action, env, root, spec),
+    }
+}
+
+fn receiver_action(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    match action {
+        "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
+        "receiver-start" => native::receiver::start(env, root, spec),
+        "receiver-activate" => native::receiver::active::activate(env, root, spec),
+        "receiver-recover" => native::receiver::recovery::recover(env, root, spec),
+        "broker-recover" => {
+            start_broker(env, root, spec)?;
+            verify(env, root)
+        }
         _ => Err(FlowError::usage(USAGE)),
     }
 }
@@ -203,6 +215,10 @@ mod lifecycle_tests {
             "launch",
             "create",
             "receiver-bootstrap",
+            "receiver-start",
+            "receiver-activate",
+            "receiver-recover",
+            "broker-recover",
             "recover",
             "dispatch",
             "collect",

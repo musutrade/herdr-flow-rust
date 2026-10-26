@@ -1,5 +1,7 @@
 //! Instance admission and crash checkpoints over isolated Git/queue fixtures.
 pub mod common;
+#[path = "common/coordinator_continuation.rs"]
+mod coordinator_continuation;
 #[path = "common/rpc_server.rs"]
 pub mod rpc_server;
 #[path = "common/upstream_live_review.rs"]
@@ -294,8 +296,14 @@ fn action_permit_excludes_terminal_then_terminal_blocks_late_actions() {
     let owner = task_env::isolation::owner(&env).unwrap();
     drop(env);
     let permit = lifecycle::write_permit(&owner).unwrap();
-    assert!(lifecycle::acquire(&owner, true).is_err());
-    assert!(f.finalize("failure").is_err());
+    assert_eq!(
+        lifecycle::acquire(&owner, true).err().unwrap().kind,
+        herdr_flow::ErrorKind::StateBusy
+    );
+    assert_eq!(
+        f.finalize("failure").unwrap_err().kind,
+        herdr_flow::ErrorKind::StateBusy
+    );
     drop(permit);
     let s = f.finalize("failure").unwrap();
     assert_eq!(s["tasks"]["task"]["final_outcome"], "failure");

@@ -27,6 +27,11 @@ installation checks, one real task, failure/recovery/parallel cases, then at lea
 CI or process fixture is not real-role or power-loss acceptance. Do not redo the
 merged slices or close #130/#112/#38/#32 on partial evidence.
 
+Fresh upstream Codex coordinators use bounded queue-tool-v2 continuations; existing
+v1 receivers remain inspect/ACK/apply only. Use the explicit receiver-start entry
+for the first authorized turn, then let the existing queue watcher collect workers
+and deliver notifications. Follow [continuation and recovery boundaries](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26); do not replay unknown creation/tool/delivery outcomes.
+
 Codex receiver activation requires its task-bound bootstrap, readiness checks and
 explicit activation. Select only supported roles/transports, and distinguish
 implementation, regression and actual integration evidence using

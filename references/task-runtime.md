@@ -1,5 +1,7 @@
 # Task-owned Codex and OpenCode runtimes (#35)
 
+> **2026-10-26 接续更新：** 新建上游 Codex 接收者使用 queue-tool-v2，由原队列驱动器执行有界开发/评审/本地交付/终态接续。新增 receiver-start、broker-recover、receiver-recover；详见[实现与恢复边界](upstream-configuration.md#coordinator-continuation-implementation-2026-10-26)。下方旧 bootstrap/控制能力限制作为历史保留，本段优先。
+
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 
