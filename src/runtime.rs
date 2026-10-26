@@ -12,6 +12,8 @@ use crate::progress;
 use crate::util::FileLock;
 use crate::watch_service;
 
+pub mod role;
+
 pub fn scope(g: &J) -> J {
     guard::scope(g)
 }
@@ -33,6 +35,7 @@ fn readiness_report(
         "active_wakeup": false,
         "context_telemetry": false,
         "safe_rotation": false,
+        "role_context": "unknown",
         "opencode_safe_rotation": "unsupported",
         "gaps": gaps.clone(),
         "next_steps": next_steps.clone(),

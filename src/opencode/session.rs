@@ -105,15 +105,16 @@ impl SessionAdapter {
     pub fn verify_binding(&self) -> Result<J> {
         let _server_version = self.server_version()?;
         let session = self.api.get(&self.route(""))?;
-        ensure(
+        validate_observed_session(&session)?;
+        identity_matches(
             session["id"] == self.state["session"],
             "OpenCode session identity changed",
         )?;
-        ensure(
+        identity_matches(
             session["directory"] == self.state["cwd"],
             "OpenCode session directory changed",
         )?;
-        ensure(
+        identity_matches(
             same_model(&session["model"], &self.state["model"]),
             "OpenCode session model changed or cannot be verified",
         )?;
@@ -236,6 +237,25 @@ impl ReceiverAdapter for SessionAdapter {
         Err(FlowError::guard(
             "OpenCode receiver does not expose Codex/Herdr command control",
         ))
+    }
+}
+
+fn validate_observed_session(session: &J) -> Result<()> {
+    required(session, "id")?;
+    required(session, "directory")?;
+    required(&session["model"], "providerID")?;
+    required(&session["model"], "id")?;
+    ensure(
+        model_variant(&session["model"]).is_some(),
+        "OpenCode observed model variant unavailable",
+    )
+}
+
+fn identity_matches(condition: bool, message: &str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(FlowError::new(ErrorKind::IdentityMismatch, message))
     }
 }
 

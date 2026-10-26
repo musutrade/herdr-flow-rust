@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde_json::Value;
 
-use crate::error::{FlowError, Result};
+use crate::error::{ErrorKind as FlowKind, FlowError, Result};
 use crate::model::{self, J};
 
 const REQUEST_BUDGET: Duration = Duration::from_secs(10);
@@ -108,10 +108,13 @@ impl HttpApi {
         response: &mut ureq::http::Response<ureq::Body>,
     ) -> std::result::Result<J, ReadError> {
         if !response.status().is_success() {
-            return Err(ReadError::Response(FlowError::guard(format!(
-                "OpenCode HTTP request rejected ({})",
-                response.status().as_u16()
-            ))));
+            return Err(ReadError::Response(FlowError::new(
+                http_error_kind(response.status().as_u16()),
+                format!(
+                    "OpenCode HTTP request rejected ({})",
+                    response.status().as_u16()
+                ),
+            )));
         }
         let body = response
             .body_mut()
@@ -155,7 +158,31 @@ fn authorization() -> Option<String> {
 
 fn transport_error(error: ureq::Error) -> FlowError {
     // Avoid serializing headers, credentials or response bodies in diagnostics.
-    FlowError::guard(format!("OpenCode transport failed: {error}"))
+    FlowError::new(transport_kind(&error), "OpenCode transport failed")
+}
+
+fn http_error_kind(status: u16) -> FlowKind {
+    match status {
+        401 => FlowKind::Authentication,
+        403 => FlowKind::PolicyDenied,
+        _ => FlowKind::Transport,
+    }
+}
+
+fn transport_kind(error: &ureq::Error) -> FlowKind {
+    match error {
+        ureq::Error::Timeout(_) => FlowKind::Timeout,
+        ureq::Error::Io(error) => io_kind(error.kind()),
+        _ => FlowKind::Transport,
+    }
+}
+
+fn io_kind(kind: ErrorKind) -> FlowKind {
+    match kind {
+        ErrorKind::PermissionDenied => FlowKind::PolicyDenied,
+        ErrorKind::TimedOut => FlowKind::Timeout,
+        _ => FlowKind::Transport,
+    }
 }
 
 pub(super) fn required(state: &J, key: &str) -> Result<String> {
@@ -315,7 +342,7 @@ mod tests {
             ureq::Error::Io(io::Error::other("Interrupted system call (os error 4)")),
             ureq::Error::Timeout(ureq::Timeout::Global),
         ] {
-            let expected = format!("OpenCode transport failed: {error}");
+            let expected = "OpenCode transport failed";
             let (api, calls) = fixture(vec![Err(error)]);
             assert_eq!(api.get("/global/health").unwrap_err().message, expected);
             assert_eq!(calls.lock().unwrap().len(), 1);
