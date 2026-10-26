@@ -28,6 +28,10 @@ pub enum ErrorKind {
     Io,
     Json,
     Usage,
+    Authentication,
+    PolicyDenied,
+    Transport,
+    IdentityMismatch,
     Other,
 }
 
@@ -48,6 +52,10 @@ const TYPE_NAMES: &[(ErrorKind, &str)] = &[
     (ErrorKind::Io, "OSError"),
     (ErrorKind::Json, "ValueError"),
     (ErrorKind::Usage, "ValueError"),
+    (ErrorKind::Authentication, "AuthenticationError"),
+    (ErrorKind::PolicyDenied, "PolicyDenied"),
+    (ErrorKind::Transport, "TransportError"),
+    (ErrorKind::IdentityMismatch, "IdentityMismatch"),
     (ErrorKind::Other, "Error"),
 ];
 

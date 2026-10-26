@@ -33,7 +33,9 @@ Follow the current tops of [#32](https://github.com/musutrade/herdr-flow-rust/is
 3. Extend existing readiness with no-model checks in the actual role's execution
    context, and verify installed binaries plus all active/future writers. A parent
    controller connection alone cannot prove a role's tool channel works. This is
-   outstanding work, not a capability supplied by this documentation change.
+   tracked by [the no-model role observation slice](role-readiness.md), which
+   keeps unsupported sandbox/trust equivalence unknown. Its protocol fixtures
+   and read-only writer sample do not complete actual-role or deployment acceptance.
 4. Verify one real task: takeover → execution → result → receiver ACK → application
    → final outcome → cleanup. Label driver substitutions as fixtures.
 5. Verify final failure, repair, interruption/unknown-operation recovery, late

@@ -150,6 +150,11 @@ herdr-flow queue watch --state-dir /absolute/queue --background
 herdr-flow queue readiness --state-dir /absolute/queue
 ```
 
+无模型角色检查使用同一入口加 `--spec /absolute/role-spec.json`，须从实际角色
+工具上下文运行。当前只探测所选 OpenCode receiver HTTP 或 producer 结果文件
+通道；沙箱等价性与仓库信任证据不足时仍为 unknown。参数、退出码和实际 writer
+盘点见[角色就绪检查](references/role-readiness.md)。
+
 读取任务与投递指标（只读）：
 
 ```bash

@@ -666,7 +666,11 @@ fn action_init_isolated(root: &Path, args: &Args, _factory: &ReceiverFactory) ->
     )?))
 }
 
-fn action_readiness(root: &Path, _args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
+fn action_readiness(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<Outcome> {
+    if let Some(path) = &args.spec {
+        let result = runtime::role::check(root, &util::read_json(path)?)?;
+        return action_readiness_print(result);
+    }
     let session = crate::opencode::session::receiver_session(root)?;
     let result = runtime::readiness(root, session.as_deref(), factory)?;
     action_readiness_report(root, result)
