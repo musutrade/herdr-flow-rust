@@ -98,3 +98,10 @@ restriction. CI installs and loads the distribution's `bwrap-userns-restrict`
 profile from `apparmor-profiles` for bubblewrap. It does not disable AppArmor or
 change a global user-namespace sysctl; production Flow and the local host remain
 unchanged. The dependency probe must succeed before any Rust test runs.
+
+On Noble, that profile is packaged under
+`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict`, not loaded from `/etc`
+by package installation. CI therefore downloads/extracts the distribution package
+into `RUNNER_TEMP` and loads only this profile. It does not install the whole
+profile set or upgrade AppArmor/restart unrelated services. The source location
+is also documented by [the VS Code sandbox maintainers](https://github.com/microsoft/vscode/issues/316046).

@@ -17,8 +17,14 @@ jobs:
       - name: Install isolated Codex fixture dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          sudo apt-get install -y bubblewrap
+          profile_dir="$(mktemp -d "$RUNNER_TEMP/herdr-apparmor.XXXXXX")"
+          (
+            cd "$profile_dir"
+            apt-get download apparmor-profiles
+            dpkg-deb -x apparmor-profiles_*.deb extracted
+          )
+          sudo apparmor_parser -r "$profile_dir/extracted/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
           /usr/bin/bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
