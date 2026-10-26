@@ -86,3 +86,9 @@ production races. Final evidence is in `cleanup-final-stress-git.log`,
 These results complete the removal/regression slice, not #130/#112/#38/#32's
 remaining complete real-task, failure/recovery/parallel and consecutive-task
 acceptance obligations. The PR remains a draft.
+
+The first remote CI run after removal failed before starting the isolated Codex
+fixtures because the runner lacked `/usr/bin/bwrap`. Both Rust and coverage
+workflows now install bubblewrap and probe user-namespace launch in the disposable
+runner. No test is skipped and no host security restriction is disabled. Local
+passing results above remain distinct from the remote CI outcome.

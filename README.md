@@ -1,5 +1,7 @@
 # herdr-issue-flow（纯 Rust）
 
+Linux 协议夹具测试需要 `/usr/bin/bwrap`（bubblewrap）及可用的用户命名空间。CI 会在临时 runner 中安装并检查此依赖；已有上游 Codex 连接不会因此安装程序或更改本机安全策略。
+
 以任务为生命周期单位编排 issue 开发，复用任务交接、受管执行与独立 CI 监控；Herdr 是可选适配。
 
 **支持范围：仅 Codex，明确不支持 OpenCode。** OpenCode 适配器、命令入口、HTTP 会话接入及混合验收驱动已移除。旧 OpenCode 注册会被拒绝，不会自动转成 Codex；已有用户文件、登录、配置、服务和队列不做迁移或清理。历史验收记录保留，不代表当前支持。
