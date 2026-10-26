@@ -1,14 +1,48 @@
-//! Explicit real-model review of a fixed local snapshot. This is a caller-driven
-//! acceptance scenario, not a claim of autonomous notification/ACK/publication.
+//! Explicit real-model scenarios over isolated queues and local delivery targets.
+//! Initial setup is harness-owned; task decisions use the actual coordinator.
 use super::*;
+#[path = "upstream_live_audit.rs"]
+mod audit;
+use audit::LiveAudit;
 
 #[test]
 #[ignore = "explicit existing endpoint/model: coordinator develops, reviews, delivers and finalizes a new local task"]
 fn live_upstream_coordinator_full_task() {
+    full_task(Scenario::Success);
+}
+
+#[test]
+#[ignore = "explicit existing endpoint/models; real failed review, repair and independent re-review"]
+fn live_upstream_failed_review_is_repaired() {
+    full_task(Scenario::Repair);
+}
+
+#[test]
+#[ignore = "explicit existing endpoint/models; real failed review and final failure cleanup"]
+fn live_upstream_final_failure_is_reclaimed() {
+    full_task(Scenario::FinalFailure);
+}
+
+#[test]
+#[ignore = "explicit existing endpoint/models; restart owned watcher after actual worker submission"]
+fn live_upstream_submitted_worker_survives_watcher_restart() {
+    full_task(Scenario::WatcherRestart);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    Success,
+    Repair,
+    FinalFailure,
+    WatcherRestart,
+}
+
+fn full_task(scenario: Scenario) {
     let socket = std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing socket required");
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let f = std::mem::ManuallyDrop::new(Fixture::new());
     eprintln!("full task evidence root: {}", f.temp.path().display());
+    let mut audit = LiveAudit::new(&f, scenario);
     let target = f.temp.path().join("output.git");
     git(
         f.temp.path(),
@@ -55,25 +89,24 @@ fn live_upstream_coordinator_full_task() {
     )
     .unwrap();
     bind_coordinator(&f, &guard);
-    let instruction = full_task_instruction(&f, &target);
+    let instruction = scenario_instruction(&f, &target, scenario);
     // Start before the external queue supervisor to avoid a queue-lock race.
     // The coordinator only receives bounded tools; no worker can dispatch until
     // the watcher processes its request and readiness has succeeded.
     task_runtime::native::receiver::start(&env, &coord, &json!({"instruction":instruction}))
         .unwrap();
     drop(env);
-    let log = fs::File::create(f.temp.path().join("full-task-watch.log")).unwrap();
-    let mut watch = FixtureChild(
-        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
-            .args(["queue", "watch", "--state-dir"])
-            .arg(&f.queue)
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
+    let mut watch = start_watch(&f, "full-task-watch.log");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    while !f.state()["tasks"]["task"].is_null() {
+    loop {
+        let state = f.state();
+        audit.observe(&f, &state);
+        if state["tasks"]["task"].is_null() {
+            break;
+        }
+        if state["tasks"]["task"]["final_outcome"].is_null() {
+            audit.restart_if_submitted(&f, &coord, &mut watch);
+        }
         assert!(
             watch.0.try_wait().unwrap().is_none(),
             "queue supervisor stopped; retain state for inspected recovery"
@@ -82,34 +115,76 @@ fn live_upstream_coordinator_full_task() {
             std::time::Instant::now() < deadline,
             "real task deadline; retain state without redispatch"
         );
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     watch.0.kill().unwrap();
     watch.0.wait().unwrap();
     broker.wait().unwrap();
     assert!(!workspace.exists() && !scratch.exists());
     assert!(!task_env::is_registered("task").unwrap());
-    assert_upstream_empty(&socket, &[cwd.clone(), workspace.join("reviews/review-a1")]);
-    assert_eq!(
-        git(&target, &["show", "refs/heads/accepted:answer.txt"]),
-        "42"
+    audit.verify(scenario);
+    assert_upstream_empty(
+        &socket,
+        &[
+            cwd.clone(),
+            workspace.join("reviews/review-a1"),
+            workspace.join("reviews/retest-a1"),
+        ],
     );
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&target)
-        .args(["show", "refs/heads/accepted:answer.txt"])
-        .output()
-        .unwrap();
-    assert_eq!(output.stdout, b"42\n");
+    if scenario != Scenario::FinalFailure {
+        assert_eq!(
+            git(&target, &["show", "refs/heads/accepted:answer.txt"]),
+            "42"
+        );
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&target)
+            .args(["show", "refs/heads/accepted:answer.txt"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"42\n");
+    } else {
+        assert_eq!(
+            git(&target, &["rev-parse", "refs/heads/accepted"]),
+            f.commit
+        );
+    }
     util::atomic_write_json(
         &f.temp.path().join("full-task-result.json"),
         &json!({
         "scope":"real coordinator/developer/reviewer; new predeclared local Git target only",
-        "candidate_seeded_by_harness":false,"model":model,"role_models":role_models,"task_resources_removed":true,
+        "scenario":format!("{scenario:?}"),"delivered":scenario != Scenario::FinalFailure,"candidate_seeded_by_harness":false,"model":model,"role_models":role_models,"task_resources_removed":true,
         "commit":git(&target, &["rev-parse","refs/heads/accepted"]),
         "global_entrypoint_changed":false,"remote_publication":false}),
     )
     .unwrap();
+}
+
+fn start_watch(f: &Fixture, name: &str) -> FixtureChild {
+    let log = fs::File::create(f.temp.path().join(name)).unwrap();
+    FixtureChild(
+        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(["queue", "watch", "--state-dir"])
+            .arg(&f.queue)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+fn scenario_instruction(f: &Fixture, target: &Path, scenario: Scenario) -> String {
+    let mut instruction = full_task_instruction(f, target);
+    if matches!(scenario, Scenario::Repair | Scenario::FinalFailure) {
+        instruction = instruction.replace("to create answer.txt containing exactly 42 plus newline and commit it", "to create answer.txt containing exactly 41 plus newline and commit it FOR THIS DELIBERATE FAULT-INJECTION FIRST ATTEMPT ONLY. Explain to the developer that the unchanged acceptance requirement is 42; this first artifact intentionally fails it and must be reported honestly");
+        instruction.push_str("\nThis scenario requires a real failed first review. Do not tell the reviewer what conclusion to produce; ask it to inspect the actual fixed commit against the unchanged 42 requirement. Apply the actual failed verdict with next_action kind repair, owner coordinator, reason and condition. Never deliver that failed artifact. ");
+        if scenario == Scenario::FinalFailure {
+            instruction.push_str("The fixture operator has explicitly selected FINAL FAILURE after this deliberate failed first review; do not start repair. After applying the actual failed verdict, finalize task task with outcome failure, its current state_version and a concrete reason. This is a final failure cleanup acceptance scenario; do not claim delivery or success.");
+        } else {
+            instruction.push_str(r#"After applying the failed verdict, inspect the parent's continuation. Resume through lineage spec {"kind":"continue","task":"task","state_version":CURRENT_PARENT_VERSION,"intent":"review","authorization":"develop","action":"development","resolution":"repair the observed content gap under existing development authorization","activity":{"activity":"repair","role":"development","input":FAILED_CANDIDATE_SHA,"session_epoch":1,"result_wait":{"id":"repair","kind":"signal","task":"repair","epoch":1,"assignment":"repair-a1","owner":"developer","reason":"repair actual failed review","condition":"report","timeout_seconds":600}}}. Run repair with instruction to change answer.txt to exactly 42 plus newline and commit it. Collect, ACK and apply its output exactly as for dev. Select the new candidate with a reason. Register a NEW acceptance activity retest with wait retest, assignment retest-a1, role acceptance and the new SHA (the same activity schema as review). Run an independent reviewer; require it to verify bytes and supply resolutions referencing every actual previous gap by activity review and exact gap ID. It must write its own report. ACK/apply the actual passed retest verdict with next_action delivery. Only then deliver and finalize success using the original instructions. Keep the original failed report immutable. Do not reuse the old reviewer or invent gap resolutions."#);
+        }
+    }
+    instruction
 }
 
 fn assert_upstream_empty(socket: &str, cwds: &[PathBuf]) {
@@ -151,7 +226,7 @@ fn bind_coordinator(f: &Fixture, guard: &Path) {
 
 fn full_task_instruction(f: &Fixture, target: &Path) -> String {
     format!(
-        r#"Complete only registered task task through herdr_queue tools. Inspect its actual requirement and existing permissions. Use the already registered development wait dev: run with instruction to create answer.txt containing exactly 42 plus newline and commit it. The developer may use git -c user.name=Acceptance -c user.email=acceptance@example.test commit (per-command identity only). No network, login or global configuration changes. Do not edit the candidate yourself.
+        r#"Complete only registered task task through herdr_queue tools. Inspect its actual requirement and existing permissions. Every run spec has wait, instruction and evidence (an array of strings, or []). Development apply output, acceptance and release_evidence are top-level fields. Every lineage candidate needs reason. Use the already registered development wait dev: run with instruction to create answer.txt containing exactly 42 plus newline and commit it. The developer may use git -c user.name=Acceptance -c user.email=acceptance@example.test commit (per-command identity only). No network, login or global configuration changes. Do not edit the candidate yourself.
 After dispatch stop until the result notification. Inspect runtime_results for the development output; ACK that delivery and apply the dev event with output, acceptance {{"goal":"bound development result completed"}}, release_evidence identifying the completed turn and next_action {{"kind":"complete"}}. Select that output's full SHA using lineage kind candidate with parent task task and its CURRENT state_version. Register independent acceptance with lineage kind activity, task task, current state_version, activity review, role acceptance, input full SHA, session_epoch 1, result_wait {{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1","owner":"reviewer","reason":"independent fixed snapshot review","condition":"report","timeout_seconds":600}}.
 Run wait review with an instruction to verify the exact tracked bytes and write .herdr-verdict.json using the supplied acceptance_protocol, exact original requirement source, criterion goal, no tracked edits, no git commits. Stop until notification. ACK and apply its immutable verdict; a passed report uses next_action {{"kind":"delivery","owner":"coordinator","reason":"independently passed","condition":"existing local delivery authorization"}}. Never supply reviewer acceptance evidence yourself. If a real defect occurs use existing continue/repair rules with new activities and independent re-review, never overwrite a verdict.
 For a passed review, deliver spec {{"adapter":"git","target":{},"ref":"refs/heads/accepted","expected":{},"authorization":"deliver-local","state_version":CURRENT_PARENT_VERSION}}. This authorization covers only this predeclared new local repository. Inspect again after delivery for the current parent version; finalize task task with outcome success only after confirmed delivery, and a reason. On an actual unrecoverable task failure, finalize failure with a concrete reason. Do not invent success. For unknown external outcomes stop and report without replay. Use inspect for current versions after mutations. Do not poll or use shell for queue operations."#,

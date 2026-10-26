@@ -3,6 +3,69 @@
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 
+## Failure and recovery acceptance (2026-10-26, latest)
+
+New explicit live scenarios cover failed review followed by repair/re-review,
+final failure cleanup, and restarting only the owned queue watcher after a real
+worker turn has been submitted. They use the existing Sol/high coordinator and
+developer and Astra/high reviewer. Bounded private queue snapshots are retained
+outside the task roots, including immutable applied verdicts and terminal state.
+The watcher-restart case records the submitted session/turn/binding and rejects
+identity changes; it is not a shared app-server restart test.
+
+The first final-failure attempt (`/mnt/dev-ssd/dev-tmp/.tmp6TEsva`) failed because
+the new evidence directory inherited a group-writable mode. This fixture error
+is fixed with explicit private creation and a non-model regression. On inspected
+recovery, the coordinator's upstream turn had definitively failed with
+`serverOverloaded` (selected model at capacity), while its developer completed.
+No model, account, provider, or billing fallback was used. A resumed queue watcher
+could collect that development result but could not notify the unhealthy
+coordinator. The ordinary CLI finalizer also rejected the inactive receiver.
+Explicit inspected fixture finalization through the existing library API recorded
+failure and reclaimed its exact registered resources. Active and archived
+upstream inventory was empty afterward. This is **not** an automatic failure
+acceptance pass or proof that an unhealthy coordinator can recover itself.
+
+A fresh final-failure attempt (`/mnt/dev-ssd/dev-tmp/.tmpn3gavG`) passed in
+231.40 seconds: a real developer produced the deliberately wrong first artifact,
+a real independent reviewer rejected it, the coordinator applied that immutable
+failed verdict and finalized failure as instructed. The predeclared local target
+remained at its original commit; no failed artifact was delivered. Owned roots,
+registration, and active/archived task/review sessions were absent. Evidence is
+in `audit/`, `full-task-result.json`, and
+`/mnt/dev-ssd/dev-tmp/recovery-live-final-failure-2.log`.
+
+The first repair and watcher-restart attempts (`.tmpkpCUFK` and `.tmpbJOdDN`)
+failed in the evidence collector at 295.10 and 253.56 seconds respectively:
+authority-version and heartbeat-only writes exhausted the 256-snapshot bound.
+The collector now compares business state without those three top-level clock/
+authority fields, retaining the full original snapshot only for actual changes.
+A regression processes 1,000 heartbeat updates without losing a later business
+transition. The bound is unchanged. These attempts are not passes. Their original
+requests were observed without redispatch, remained incomplete at their original
+600-second deadlines, and were explicitly finalized as failed through inspected
+fixture recovery. Owned roots and active/archived inventories were empty after
+cleanup (`recovery-failed-attempts-inventory.jsonl`). No model fallback was used.
+
+Validation after the lock/trace changes: the complete default-concurrency
+coverage suite passed (201 library tests plus all binary/integration suites),
+with CRAP absolute threshold 10/no baseline, format, Clippy, and lint policy.
+The later heartbeat-only fixture correction passed its focused regression.
+These automated checks do not count ignored live cases as passing.
+
+The two-queue and twenty-consecutive-task campaign entrypoints are explicit
+ignored tests in `upstream_live_campaign.rs`. Every child uses a separate process
+and queue. A sequential campaign stops at its first failed task and retains that
+attempt; it never redispatches uncertain work or retries to manufacture twenty
+passes. Two independent queues do not prove shared-queue claim backpressure.
+Results of the remaining live scenarios and campaigns must be recorded before
+claiming them complete. Remote publication and global migration remain outside
+these local acceptance scenarios.
+
+The separately reproduced environment-lock race and the still-unexplained
+historical Git timeout are distinguished in
+[the cleanup observation record](cleanup-observation-races.md).
+
 ## Real continuation acceptance and Guardian cleanup (2026-10-26)
 
 The configured team uses gpt-6.1-sol/high for coordination and development and

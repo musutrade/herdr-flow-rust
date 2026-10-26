@@ -1,5 +1,7 @@
 # End-to-end acceptance readiness (#38)
 
+> **2026-10-26 最新补充（优先适用）：** Codex 单条真实本地成功链路及真实评审失败后的最终失败回收已分别通过。新失败/恢复夹具的失败记录、修复及未完成项见[当前验收记录](upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。历史 OpenCode 记录不充当当前 Codex 矩阵证据；全局迁移和远端发布未完成。
+
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 

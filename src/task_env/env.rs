@@ -1660,7 +1660,7 @@ fn restore_lock(task_id: &str, state_file: &Path) -> Result<File> {
     Ok(
         if crate::util::protected::is_namespace(state_file.parent().unwrap())? {
             registry::try_lock_existing_task(task_id)?
-                .ok_or_else(|| FlowError::guard("environment busy"))?
+                .ok_or_else(|| FlowError::new(crate::ErrorKind::StateBusy, "environment busy"))?
         } else {
             acquire_task_lock(task_id)?
         },

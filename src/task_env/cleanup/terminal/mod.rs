@@ -73,8 +73,12 @@ fn check(owner: &Owner, permit: &Permit) -> Result<()> {
     )
 }
 fn lock(owner: &Owner) -> Result<std::fs::File> {
-    registry::try_lock_task(&owner.task_id)?
-        .ok_or_else(|| FlowError::guard("environment busy; retry cleanup"))
+    registry::try_lock_task(&owner.task_id)?.ok_or_else(|| {
+        FlowError::new(
+            crate::ErrorKind::StateBusy,
+            "environment busy; retry cleanup",
+        )
+    })
 }
 
 /// Freeze associations once; callers must hold the queue lock as well as EX.
@@ -593,6 +597,28 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn held_environment_is_retryable_without_changing_identity() {
+        let f = Fixture::new();
+        let owner = f.create();
+        let env = task_env::restore_environment("task").unwrap();
+        let before = f.state();
+        let error = task_env::restore_environment("task").err().unwrap();
+        assert_eq!(error.kind, crate::ErrorKind::StateBusy);
+        assert_eq!(
+            super::lock(&owner).err().unwrap().kind,
+            crate::ErrorKind::StateBusy
+        );
+        assert_eq!(f.state(), before);
+        drop(env);
+        let env = task_env::restore_environment("task").unwrap();
+        assert_eq!(env.instance_id, owner.instance_id);
+        drop(env);
+        f.record(&owner);
+        assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 1);
+        f.clean(&owner);
     }
 
     #[test]
@@ -1286,8 +1312,10 @@ read -r ignored < "$REMOVAL_FIXTURE_FIFO"
         fs::write(
             bin.join("git"),
             br#"#!/bin/sh
+printf 'git-start pid=%s args=%s\n' "$$" "$*" >> "$RECOVERY_FIXTURE_TRACE"
 /usr/bin/git "$@"
 status=$?
+printf 'git-exit pid=%s status=%s\n' "$$" "$status" >> "$RECOVERY_FIXTURE_TRACE"
 [ "$status" = 0 ] || exit "$status"
 if [ "$3" = worktree ] && [ "$4" = "$RECOVERY_FIXTURE_ACTION" ]; then
     printf '%s\n' "$$" > "$RECOVERY_FIXTURE_PID"
@@ -1315,6 +1343,10 @@ fi
                 .env("RECOVERY_FIXTURE_ACTION", action)
                 .env("RECOVERY_FIXTURE_PID", &pidfile)
                 .env("RECOVERY_FIXTURE_FIFO", &fifo)
+                .env(
+                    "RECOVERY_FIXTURE_TRACE",
+                    f.temp.path().join(format!("{action}-git-trace.log")),
+                )
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
                 .spawn()
@@ -1334,10 +1366,11 @@ fi
             );
             assert!(
                 std::time::Instant::now() < deadline,
-                "real Git mutation did not complete; action={action}; worker={}; wait={:?}; log={}; queue={}",
+                "real Git mutation did not complete; action={action}; worker={}; wait={:?}; log={}; trace={}; queue={}",
                 worker.0.id(),
                 fs::read_to_string(format!("/proc/{}/wchan", worker.0.id())),
                 fs::read_to_string(f.temp.path().join(format!("{action}-worker.log"))).unwrap_or_default(),
+                fs::read_to_string(f.temp.path().join(format!("{action}-git-trace.log"))).unwrap_or_default(),
                 f.state()
             );
             std::thread::sleep(std::time::Duration::from_millis(5));

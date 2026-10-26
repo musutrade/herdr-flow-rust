@@ -4,6 +4,35 @@ This supplements #130/#38. Full reclamation and preservation of unrelated user
 processes/assets remain simultaneous requirements. No login, configuration,
 provider, billing, proxy, installed entrypoint or existing watcher is changed.
 
+## Additional environment-lock race and unresolved Git timeout (2026-10-26)
+
+A fresh default-concurrency coverage run reproduced a different failure in
+`coordinator_dispatches_collects_and_finalizes_without_driver_task_mutations`:
+the watcher temporarily owned the environment lock while the fixture restored
+it to send the first coordinator turn. `restore_lock` classified a failed
+nonblocking lock acquisition as `Guard`, and the fixture unwrapped it.
+
+Environment restoration and terminal cleanup now classify that known contention
+as `StateBusy`. Other lock errors still propagate. The fixture shares its existing
+10-second deadline across restore/start and retries only `StateBusy` before any
+`receiver-start.json` intent exists. No uncertain send is retried. A regression
+holds the environment lock, verifies both classifications and unchanged state,
+then restores the same instance and performs ordinary terminal cleanup.
+
+This does **not** explain the separate historical 10-second Git reply-loss
+checkpoint timeout. That test passed once alone and 80 times across four
+independent processes (20 per process), and the default-concurrency suites did
+not reproduce that timeout. Its root cause remains unproven. The wrapper now
+records each Git command's start/exit to a private fixture trace, included in
+timeout diagnostics; the original deadline and identity assertions are unchanged.
+The trace is outside the command's captured stderr so a killed supervisor does
+not discard it. Do not count repeated passes as a root-cause fix.
+
+Evidence: `/mnt/dev-ssd/dev-tmp/recovery-baseline-coverage.log` (reproduced lock
+race), `git-removal-stress-20261026/` (80 passes),
+`recovery-terminal-suite.log` (21 terminal tests passed), and
+`recovery-continuation-test.log` (both continuation scenarios passed).
+
 ## Reproduced failures
 
 The terminal cleanup scan observes same-user processes born after the task's

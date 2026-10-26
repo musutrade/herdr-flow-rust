@@ -117,8 +117,20 @@ fn exercise(success: bool) {
     });
     await_condition(|| task_runtime::native::receiver::active::observe(&guard).is_ok());
     {
-        let env = task_env::restore_environment("task").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
+        let env = loop {
+            match task_env::restore_environment("task") {
+                Ok(env) => break env,
+                Err(error)
+                    if error.kind == herdr_flow::ErrorKind::StateBusy
+                        && !coord.join("receiver-start.json").exists()
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Err(error) => panic!("coordinator environment restore: {error}"),
+            }
+        };
         loop {
             match task_runtime::native::receiver::start(
                 &env,

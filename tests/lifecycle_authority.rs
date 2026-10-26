@@ -4,6 +4,8 @@ pub mod common;
 mod coordinator_continuation;
 #[path = "common/rpc_server.rs"]
 pub mod rpc_server;
+#[path = "common/upstream_live_campaign.rs"]
+mod upstream_live_campaign;
 #[path = "common/upstream_live_review.rs"]
 mod upstream_live_review;
 #[path = "common/upstream_runtime.rs"]
