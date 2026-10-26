@@ -5,6 +5,51 @@
 
 ## Failure and recovery acceptance (2026-10-26, latest)
 
+### Network-instrumented single-task retest (2026-10-26)
+
+One fresh real task passed in **143.13 seconds** with unchanged Sol/high
+coordination/development, Astra/high review, existing service/proxy and the
+600-second task deadline. Delivered commit:
+`9bc8bf488f875e3721e546ed12d94a423b9dc3a4`. The fixture verified local delivery,
+owned-root/registration removal and empty active/archived upstream inventories.
+This single run does not replace the failed parallel campaign or the 2/20 result.
+
+An external read-only observer sampled every three seconds, independently of
+the task supervisor. It retained phase/tool status and thread item **types**,
+local read-RPC duration, daemon TCP metrics and newly appended daemon errors.
+No prompts, credential copies, model changes or service restarts were required.
+This is an investigation harness, not newly installed production monitoring.
+
+- Developer turn first observed at 15.25 seconds, first visible non-user item at
+  21.37 seconds, completed at 45.86 seconds (roughly 31 seconds observed turn time).
+- Reviewer turn first observed at 82.67 seconds, first visible item at 91.92,
+  completed at 104.21 seconds (roughly 22 seconds observed turn time).
+- Review applied by 119.61 seconds; finalizing observed at 141.24; task passed
+  at 143.13. Observation times have approximately three-second sampling error;
+  first visible item is **not** network time-to-first-token.
+- Local read RPC maximum was 49.7 ms. Sampled shared-daemon TCP RTT to its proxy
+  was 0.143–4.945 ms, with no retransmitted bytes or receive/send queue backlog
+  observed. No new daemon errors or sampled turn errors were recorded.
+- Actual daemon connections used proxy port **10812**. The earlier port-10811
+  reachability probe came from process environment and did not identify the
+  actual connection path. Neither proxy configuration was changed.
+
+Conclusion: the long delay did not recur; there is no evidence of a local-to-proxy
+network fault in this run. Shared sockets cannot be attributed exclusively to
+this task, and proxy-to-upstream transport, request DNS/TLS/TTFT and upstream
+queue time remain unobserved. This cannot exclude intermittent historical network
+trouble or prove that earlier waits were model computation. The earlier slow
+developer intervals were about 367/460 seconds; their missing transport telemetry
+cannot be reconstructed from this successful run. The separate Git 10-second
+fixture timeout uses a local repository/worktree and no model/remote-Git call;
+its root cause is still unproven.
+
+Evidence: `/mnt/dev-ssd/dev-tmp/network-probe-20261026/` contains the bounded
+observer, raw `samples.jsonl`, `analysis.json`, `result.json` and `task.log`.
+Task evidence: `/mnt/dev-ssd/dev-tmp/.tmpbMGXb3/full-task-result.json` and `audit/`.
+
+### Earlier failure/recovery matrix (retained)
+
 New explicit live scenarios cover failed review followed by repair/re-review,
 final failure cleanup, and restarting only the owned queue watcher after a real
 worker turn has been submitted. They use the existing Sol/high coordinator and
