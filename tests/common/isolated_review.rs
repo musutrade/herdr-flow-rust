@@ -284,15 +284,17 @@ fn review_refuses_wrong_head_foreign_git_control_and_inflight_snapshot_operation
     fs::remove_file(common).unwrap();
     let ready = env.temp_root.join("operation-ready");
     let release = env.temp_root.join("operation-release");
-    let mut options = util::process::CommandOptions::default();
-    options.timeout = std::time::Duration::from_secs(10);
+    let mut options = util::process::CommandOptions {
+        timeout: std::time::Duration::from_secs(10),
+        kill_on_parent_death: true,
+        ..Default::default()
+    };
     options
         .env
         .insert(task_env::MARKER_ENV.into(), env.instance_id.clone());
     options
         .env
         .insert("HERDR_REVIEW_SNAPSHOT".into(), "review-a1".into());
-    options.kill_on_parent_death = true;
     let argv = vec![
         "/bin/sh".into(),
         "-c".into(),
