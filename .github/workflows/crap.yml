@@ -22,4 +22,6 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Check absolute CRAP
-        run: cargo run --locked -- crap --all --threshold 10 --no-baseline
+        run: |
+          cargo llvm-cov --locked --json --output-path "$RUNNER_TEMP/herdr-crap-coverage.json"
+          cargo run --locked -- crap --all --threshold 10 --no-baseline --coverage "$RUNNER_TEMP/herdr-crap-coverage.json"
