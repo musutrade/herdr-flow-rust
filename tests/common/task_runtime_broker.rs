@@ -42,7 +42,10 @@ fn persistent_connection_records_exact_turns_and_never_answers_approval() {
         peer.json(&json!({"id":91,"method":"item/commandExecution/requestApproval","params":{"threadId":"s","turnId":"t"}}));
     });
     std::fs::hard_link(&server.path, root.join("server.sock")).unwrap();
-    let result = call(&root, "thread/read", &json!({"threadId":"s"})).unwrap();
+    let observed = call_observed(&root, "thread/read", &json!({"threadId":"s"})).unwrap();
+    assert_eq!(observed.server_version, "1");
+    let result = observed.result;
+    assert!(result.get("server_info").is_none());
     assert_eq!(result["thread"]["id"], "s");
     assert_eq!(result["large"].as_str().unwrap().len(), 2 * 1024 * 1024);
     release.send(()).unwrap();

@@ -117,13 +117,15 @@ impl Peer {
     }
 
     pub fn initialize(&mut self) {
+        self.initialize_with_result(json!({"serverInfo":{"name":"fixture","version":"1"}}));
+    }
+
+    pub fn initialize_with_result(&mut self, result: Value) {
         self.upgrade();
         let request = self.request();
         assert_eq!(request["method"], "initialize");
         assert!(request["params"].is_object());
-        self.json(
-            &json!({"id":request["id"],"result":{"serverInfo":{"name":"fixture","version":"1"}}}),
-        );
+        self.json(&json!({"id":request["id"],"result":result}));
         assert_eq!(self.request()["method"], "initialized");
     }
 
