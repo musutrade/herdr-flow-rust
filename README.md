@@ -1,6 +1,6 @@
 # herdr-issue-flow（纯 Rust）
 
-> **最新验收进展（2026-10-26）：** 新增真实评审失败后的最终失败回收通过；另修复环境锁竞争的错误分类。修复复审、监督进程重启、并行和连续 20 条仍须逐项取得通过证据，不能由测试入口已实现推定完成。见[失败与恢复验收记录](references/upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。
+> **最新验收进展（2026-10-26）：** 新增真实评审失败后的最终失败回收、worker 提交后队列监督进程重启接续通过；另修复环境锁竞争的错误分类。真实失败后的修复复审也已通过；并行和连续 20 条仍须逐项取得通过证据，不能由测试入口已实现推定完成。见[失败与恢复验收记录](references/upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。
 
 Linux 协议夹具测试需要 `/usr/bin/bwrap`（bubblewrap）及可用的用户命名空间。CI 会在临时 runner 中安装并检查此依赖；已有上游 Codex 连接不会因此安装程序或更改本机安全策略。
 

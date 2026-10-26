@@ -53,6 +53,55 @@ with CRAP absolute threshold 10/no baseline, format, Clippy, and lint policy.
 The later heartbeat-only fixture correction passed its focused regression.
 These automated checks do not count ignored live cases as passing.
 
+A fresh watcher-restart attempt (`/mnt/dev-ssd/dev-tmp/.tmpUWTX56`) passed
+in 522.35 seconds. The harness killed and reaped only its owned queue watcher
+after the real development turn was durably submitted, then started a replacement.
+The submitted worker session, turn and binding stayed unchanged; the existing
+result was collected and independently reviewed, and the coordinator delivered
+commit `2e0b2ede49bf39d0783b9452496a91eade41d7b4` to the predeclared local target
+before automatic cleanup. Task roots/registration and active/archived inventories
+were empty. `audit/watcher-restart.json` preserves the exact pre-restart tuple.
+The worker was slow to produce its first output, but did eventually complete;
+that delay is not classified as another capacity error. This proves queue-watcher
+restart after submission, not shared-service restart or unknown-send replay.
+
+Commit `35ddcda` also passed all remote checks:
+[Rust checks](https://github.com/musutrade/herdr-flow-rust/actions/runs/40349678949),
+[CRAP](https://github.com/musutrade/herdr-flow-rust/actions/runs/40349680505), and
+[dependency audit](https://github.com/musutrade/herdr-flow-rust/actions/runs/40349679063).
+
+The second repair attempt (`/mnt/dev-ssd/dev-tmp/.tmpwSuYgr`) hit its
+original 600-second deadline (600.82 seconds) and remains a failed test record.
+Inspected continuation of that same task, without replaying initial or worker
+requests, produced a genuine repair commit with exact bytes `42\n`. The new
+independent reviewer still rejected it: the fixture's original goal combined
+artifact acceptance with completed delivery, although delivery requires passed
+acceptance. Its first review had recorded both a content gap and a delivery gap;
+the repaired content resolved only the former. The failed reports are legitimate
+under that circular fixture criterion and were not rewritten or overridden.
+
+The fixture now asks the independent reviewer to accept the committed artifact;
+the existing separate delivery authorization, receipt gate, target-content
+assertion and success finalization still verify actual delivery afterward. This
+changes only new fixture requirements, not existing reports or product approval
+rules. The old attempt was explicitly finalized as failure using inspected
+recovery, with the transient lifecycle lock retried only after `StateBusy`.
+Its registered roots and all active/archived task/review inventories were then
+empty (`inspected-upstream-inventory-final.jsonl`). The original timeout and
+both failed reports remain in its evidence directory.
+
+The fresh corrected repair scenario (`/mnt/dev-ssd/dev-tmp/.tmpWxJg62`)
+passed in 395.35 seconds, within the unchanged 600-second task deadline.
+The real first reviewer rejected the deliberately incorrect artifact with a
+content gap. A real developer repaired and committed it; a new independent
+reviewer passed the fixed snapshot and resolved the exact original gap. The
+harness verified that the first failed verdict stayed immutable, reviewer
+identities differed, and terminal open gaps were empty. The coordinator delivered
+`bd1bd640f4be91b6bbe12884de49e48fe2b2c965` (exact `42\n`) and finalized success;
+owned roots/registration and active/archived inventories were absent. No driver
+ACK, verdict, repair, candidate selection or delivery substituted for the models.
+The earlier failed attempts remain separate and are not relabeled as passes.
+
 The two-queue and twenty-consecutive-task campaign entrypoints are explicit
 ignored tests in `upstream_live_campaign.rs`. Every child uses a separate process
 and queue. A sequential campaign stops at its first failed task and retains that

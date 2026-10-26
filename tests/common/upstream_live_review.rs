@@ -54,7 +54,10 @@ fn full_task(scenario: Scenario) {
         ],
     );
     git(&target, &["update-ref", "refs/heads/accepted", &f.commit]);
-    let goal = "Create and commit a tracked file answer.txt containing exactly 42 followed by one newline. Independently verify the fixed commit and deliver it to the predeclared local output repository.";
+    // Artifact acceptance precedes delivery. Including completed delivery in
+    // this criterion makes a failed-review gap impossible to close before the
+    // delivery gate; the separate authorization and final assertions cover it.
+    let goal = "Create and commit a tracked file answer.txt containing exactly 42 followed by one newline.";
     let mut env = isolated_runtime::linked_delivery(&f, goal, Some(&target));
     let coord = task_runtime::prepare(&env, "coordinator").unwrap();
     let cwd = env.workspace_root.join("checkout");
