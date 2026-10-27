@@ -75,6 +75,7 @@ fn exercise(failed: bool) {
         &json!({"instruction":"original task"}),
     )
     .unwrap();
+    status_reader_does_not_stop_observer(&coordinator);
     let watcher = activated["pid"].as_u64().unwrap();
     assert!(env.owns_process(watcher as i32));
     assert!(Command::new("kill")
@@ -180,6 +181,43 @@ fn exercise(failed: bool) {
             .iter()
             .any(|r| r["method"] == "thread/delete" && r["params"]["threadId"] == session));
     }
+}
+
+fn status_reader_does_not_stop_observer(coordinator: &Path) {
+    let observer = coordinator.join("recovery-observer");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let _reader = loop {
+        match guard::locked_existing(&observer) {
+            Ok(lock) => break lock,
+            Err(error) if error.kind == herdr_flow::ErrorKind::StateBusy => {
+                assert!(Instant::now() < deadline, "{error}");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    let mut heartbeat = util::read_state_json(&observer, "watch.json").unwrap()["heartbeat_at"]
+        .as_f64()
+        .unwrap();
+    // Two heartbeats exclude a tick that had released its lock immediately
+    // before this reader acquired it. The next tick must survive contention.
+    for _ in 0..2 {
+        loop {
+            let health = herdr_flow::watch_service::health(&observer);
+            assert_eq!(health["healthy"], true, "{health}");
+            let next = health["heartbeat_at"].as_f64().unwrap();
+            if next > heartbeat {
+                heartbeat = next;
+                break;
+            }
+            assert!(Instant::now() < deadline, "{health}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    assert_eq!(
+        task_runtime::recovery::status(coordinator).unwrap()["phase"],
+        "updating"
+    );
 }
 
 fn serve(mut peer: rpc_server::Peer, cwd: &Path, requests: &Mutex<Vec<J>>, failed: bool) {

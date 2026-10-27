@@ -105,11 +105,29 @@ pub fn status(coordinator: &Path) -> Result<J> {
     if !root.try_exists()? {
         return Ok(json!({"phase":"not_configured"}));
     }
-    if read(&root, "observer.json")?.is_none() {
+    snapshot(&root)
+}
+
+fn snapshot(root: &Path) -> Result<J> {
+    // First publication creates a protected directory before its marker and
+    // payload. Serialize with the writer instead of inspecting that interval.
+    let Some(_lock) = lock_state(root)? else {
+        return Ok(json!({"phase":"updating",
+            "next_step":"Read recovery status again after the current observation; do not resend any operation."}));
+    };
+    if read(root, "observer.json")?.is_none() {
         return Ok(json!({"phase":"not_configured"}));
     }
-    Ok(json!({"observer":crate::watch_service::health(&root),
-        "incident":read(&root,"incident.json")?,"error":read(&root,"observer-error.json")?}))
+    Ok(json!({"observer":crate::watch_service::health(root),
+        "incident":read(root,"incident.json")?,"error":read(root,"observer-error.json")?}))
+}
+
+fn lock_state(root: &Path) -> Result<Option<util::FileLock>> {
+    match crate::guard::locked_existing(root) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind == crate::ErrorKind::StateBusy => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn context(root: &Path) -> Result<J> {
@@ -142,7 +160,11 @@ fn tick(root: &Path, context: &J) -> Result<bool> {
         Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(false),
         Err(error) => return Err(error),
     };
-    let _lock = crate::guard::locked(root)?;
+    // A status reader may briefly own this lock. Keep the observer alive and
+    // leave all operations untouched until the next tick.
+    let Some(_lock) = lock_state(root)? else {
+        return Ok(false);
+    };
     record_cycle(root, context, &q, &permit)?;
     Ok(false)
 }

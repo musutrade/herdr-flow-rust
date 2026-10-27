@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn status_distinguishes_document_creation_from_unprotected_or_corrupt_state() {
+    let temp = crate::util::fs::test_tempdir();
+    let root = temp.path();
+    util::protected::namespace(root).unwrap();
+    for name in ["observer.json", "incident.json", "observer-error.json"] {
+        let lock = crate::guard::locked(root).unwrap();
+        // Pause the first write after mkdir, before publishing the marker.
+        let document = root.join(name);
+        util::ensure_private_dir(&document, true).unwrap();
+        assert_eq!(snapshot(root).unwrap()["phase"], "updating");
+        assert_eq!(std::fs::read_dir(&document).unwrap().count(), 0);
+        drop(lock);
+        // Without a writer, the same partial document must still fail closed.
+        assert_eq!(snapshot(root).unwrap_err().kind, crate::ErrorKind::Guard);
+        let lock = crate::guard::locked(root).unwrap();
+        save(root, name, &json!({"phase":"recorded"})).unwrap();
+        drop(lock);
+        snapshot(root).unwrap();
+    }
+    let status = snapshot(root).unwrap();
+    assert_eq!(status["incident"]["phase"], "recorded");
+    assert_eq!(status["error"]["phase"], "recorded");
+    let payload = root.join("incident.json/authority.json");
+    std::fs::write(&payload, "invalid json").unwrap();
+    assert_eq!(snapshot(root).unwrap_err().kind, crate::ErrorKind::Json);
+    assert_eq!(std::fs::read_to_string(payload).unwrap(), "invalid json");
+}
+
+#[test]
 fn incident_identity_deduplicates_observations_without_erasing_unknown_side_effects() {
     let first = observe::fault(
         Path::new("/task/rt/a"),

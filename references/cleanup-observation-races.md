@@ -1,5 +1,36 @@
 # Cleanup observation races — 2026-10-26
 
+## Recovery status and initial document publication (2026-10-27, latest)
+
+The new-tab commit `b9f4880` passed local coverage, but its remote
+[CRAP workflow](https://github.com/musutrade/herdr-flow-rust/actions/runs/40482035551)
+failed in the coverage test `recovery_model_failure_stays_visible_without_recursion_or_replay`,
+before complexity scoring. `recovery::status` read incident/error documents
+without the observer's state lock. First publication reserves a protected
+directory before writing its marker and payload, so the reader could encounter
+`unprotected document in isolated namespace` during a valid write.
+
+A deterministic regression pauses publication in that interval and reproduced
+the same error before the fix. Status now uses the observer's nonblocking state
+lock and reports `phase: updating` during contention, with an instruction to
+read status again without resending any operation. A reader holding the lock
+also makes the observer defer that cycle, rather than exit. Neither path waits
+for the environment lock or grants a model/operation retry. Without an active
+writer, incomplete or corrupt documents still fail closed and remain unchanged.
+The protocol regression holds a reader lock across two heartbeat updates, then
+checks the original diagnosis/failure, exact dispatch counts and terminal cleanup.
+
+Both protocol scenarios passed in 28.32 seconds, and the complete all-targets
+coverage regression passed. The first CRAP check counted the new test helper
+with no coverage data and rejected its conditional assertions; the final test
+uses direct assertions for both recorded results, retaining every check.
+The final ten recovery unit checks passed with coverage, and absolute CRAP 10
+passed for 6151 functions without a baseline or relaxed missing-coverage rules.
+
+This fixes the reproduced status/publication race. The separate local
+`intent:allocation-workspace` 15-second checkpoint timeout and historical Git
+10-second timeout remain unconfirmed; neither is relabeled as fixed.
+
 ## Real Recovery Agent findings (2026-10-27, latest)
 
 The real Herdr run exposed a broker socket path exceeding `sockaddr_un` after

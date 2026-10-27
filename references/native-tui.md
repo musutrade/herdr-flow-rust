@@ -21,6 +21,13 @@
 lint-policy、全 targets/features Clippy、release 和 CRAP 绝对阈值 10（无 baseline，
 6148 个函数、零违规）通过。远端 CI 按 PR 最终提交单独跟踪。
 
+该 tab 提交 `b9f4880` 的远端 Rust 检查和依赖审计通过，CRAP 工作流在覆盖率测试阶段
+暴露恢复状态查询与文档首次发布的竞态。已用暂停文档初始化的回归复现并修复，详见
+[竞态记录](cleanup-observation-races.md)。这不改变上方 81.27 秒 tab 实测的输入、展示及
+回收逻辑，也不将此前 109.26 秒恢复诊断实测追加为新 tab 下的故障注入验收。
+追加修复的完整 all-targets 覆盖率回归通过，最终测试断言整理后 10 项恢复单元定向检查
+通过；CRAP 绝对阈值 10、无 baseline，6151 个函数零违规。新提交的远端结果以 PR 为准。
+
 > 2026-10-27 本轮更新：恢复角色已有真实模型诊断及原协调者接收证据，见
 > [恢复验收](recovery-agent.md)。新增显式 `native_tui.session_store`，以现有 Herdr
 > `session.json` 的路径和目录身份绑定 v3 共享快照回收；只关闭窗格不足以证明无残留。
