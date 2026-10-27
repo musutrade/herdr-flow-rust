@@ -33,14 +33,7 @@ pub(super) fn parse(turn: &J, id: &str) -> Result<J> {
 }
 
 fn validate(result: &J, id: &str) -> Result<()> {
-    let fields = result
-        .as_object()
-        .ok_or_else(|| FlowError::guard("recovery result must be an object"))?;
-    ensure(
-        (fields.len() == 6 || (fields.len() == 7 && fields.contains_key("requested_action")))
-            && result["incident"] == id,
-        "recovery conclusion belongs to another incident",
-    )?;
+    validate_fields(result, id)?;
     ensure(
         matches!(
             result["disposition"].as_str(),
@@ -53,6 +46,17 @@ fn validate(result: &J, id: &str) -> Result<()> {
         required(result, field)?;
     }
     Ok(())
+}
+
+fn validate_fields(result: &J, id: &str) -> Result<()> {
+    let fields = result
+        .as_object()
+        .ok_or_else(|| FlowError::guard("recovery result must be an object"))?;
+    ensure(
+        (fields.len() == 6 || (fields.len() == 7 && fields.contains_key("requested_action")))
+            && result["incident"] == id,
+        "recovery conclusion belongs to another incident",
+    )
 }
 
 fn validate_action(result: &J) -> Result<()> {

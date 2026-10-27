@@ -172,13 +172,14 @@ pub(in crate::task_runtime) fn spawn_watch(
 }
 
 pub(in crate::task_runtime) fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
+    let identity = util::process::process_identity(child.id())?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         ensure(
             child.try_wait()?.is_none(),
             "task receiver watcher exited; inspect activation journal",
         )?;
-        if crate::watch_service::health(guard)["healthy"] == true {
+        if watcher_ready(guard, &identity) {
             return Ok(());
         }
         ensure(
@@ -187,6 +188,13 @@ pub(in crate::task_runtime) fn await_watch(guard: &Path, child: &mut Child) -> R
         )?;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+fn watcher_ready(guard: &Path, identity: &J) -> bool {
+    let health = crate::watch_service::health(guard);
+    health["healthy"] == true
+        && health["pid"] == identity["pid"]
+        && health["start_ticks"] == identity["start_ticks"]
 }
 
 pub fn watch(guard: &Path) -> Result<()> {
@@ -228,5 +236,50 @@ mod tests {
         .unwrap();
         assert!(watch(temp.path()).is_err());
         assert!(!temp.path().join("watch.json").exists());
+    }
+
+    #[test]
+    fn startup_waits_for_its_own_identity_after_a_predecessor_heartbeat() {
+        let temp = util::fs::test_tempdir();
+        let root = temp.path();
+        let _lock = util::FileLock::acquire(&root.join("watch.lock"), false)
+            .unwrap()
+            .unwrap();
+        let previous = util::process::process_identity(std::process::id()).unwrap();
+        let mut watch = previous.clone();
+        watch["status"] = json!("running");
+        watch["heartbeat_at"] = json!(util::now());
+        watch["max_age"] = json!(180);
+        util::atomic_write_json(&root.join("watch.json"), &watch).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let identity = util::process::process_identity(child.id()).unwrap();
+        assert_eq!(crate::watch_service::health(root)["healthy"], true);
+        assert!(!watcher_ready(root, &identity));
+        let mut other_ticks = previous.clone();
+        other_ticks["start_ticks"] = json!("0");
+        assert!(!watcher_ready(root, &other_ticks));
+        std::thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let child = &mut child;
+            let waiting = scope.spawn(move || {
+                let result = await_watch(root, child);
+                send.send(result).unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            watch["pid"] = identity["pid"].clone();
+            watch["start_ticks"] = identity["start_ticks"].clone();
+            util::atomic_write_json(&root.join("watch.json"), &watch).unwrap();
+            receive
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
+            waiting.join().unwrap();
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!watcher_ready(root, &identity));
     }
 }

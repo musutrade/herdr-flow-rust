@@ -36,26 +36,10 @@ struct Receiver {
 impl Receiver {
     fn load(context: &J, env: &TaskEnvironment) -> Result<Self> {
         let root = PathBuf::from(required(context, "coordinator")?);
-        let runtime = super::super::verify(env, &root)?;
-        ensure(
-            runtime == context["runtime"],
-            "repair coordinator runtime changed",
-        )?;
-        let binding = util::read_state_json(&root, "receiver.json")?;
-        ensure(binding["phase"] == "bound", "repair receiver is not bound")?;
-        let guard = PathBuf::from(required(&binding, "guard_dir")?);
-        crate::task_env::validate_path(env, &guard)?;
+        let runtime = verified_runtime(env, &root, context)?;
+        let guard = receiver_guard(env, &root)?;
         let state = util::read_state_json(&guard, "state.json")?;
-        let owner: Owner = serde_json::from_value(context["owner"].clone())?;
-        let q = queue::load_queue(&owner.queue_root)?;
-        ensure(
-            q["stopped"] != true
-                && q["receiver"] == crate::guard::scope(&state)
-                && state["phase"] == "monitoring"
-                && state["instance"] == owner.instance_id,
-            "repair receiver registration or control state changed",
-        )?;
-        active::Adapter::new(&state)?;
+        registered_receiver(context, &state)?;
         Ok(Self {
             root,
             guard,
@@ -87,6 +71,37 @@ impl Receiver {
         )?;
         Ok(json!({"binding":binding,"status":actual["status"],"operation_replay_allowed":false}))
     }
+}
+
+fn verified_runtime(env: &TaskEnvironment, root: &Path, context: &J) -> Result<J> {
+    let runtime = super::super::verify(env, root)?;
+    ensure(
+        runtime == context["runtime"],
+        "repair coordinator runtime changed",
+    )?;
+    Ok(runtime)
+}
+
+fn receiver_guard(env: &TaskEnvironment, root: &Path) -> Result<PathBuf> {
+    let binding = util::read_state_json(root, "receiver.json")?;
+    ensure(binding["phase"] == "bound", "repair receiver is not bound")?;
+    let guard = PathBuf::from(required(&binding, "guard_dir")?);
+    crate::task_env::validate_path(env, &guard)?;
+    Ok(guard)
+}
+
+fn registered_receiver(context: &J, state: &J) -> Result<()> {
+    let owner: Owner = serde_json::from_value(context["owner"].clone())?;
+    let q = queue::load_queue(&owner.queue_root)?;
+    ensure(
+        q["stopped"] != true
+            && q["receiver"] == crate::guard::scope(state)
+            && state["phase"] == "monitoring"
+            && state["instance"] == owner.instance_id,
+        "repair receiver registration or control state changed",
+    )?;
+    active::Adapter::new(state)?;
+    Ok(())
 }
 
 fn environment(context: &J) -> Result<(crate::lifecycle::Permit, TaskEnvironment)> {

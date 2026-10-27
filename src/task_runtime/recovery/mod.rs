@@ -231,6 +231,14 @@ fn record_fault(root: &Path, context: &J, fault: J) -> Result<()> {
 }
 
 fn advance(root: &Path, context: &J, incident: &mut J, q: &J) -> Result<()> {
+    advance_operation(root, context, incident)?;
+    if incident["phase"] == "reported" {
+        report::handoff(root, context, incident, q)?;
+    }
+    Ok(())
+}
+
+fn advance_operation(root: &Path, context: &J, incident: &mut J) -> Result<()> {
     match incident["phase"].as_str() {
         Some("pending") => agent::begin(root, context, incident)?,
         Some("submitted") => agent::collect(root, context, incident)?,
@@ -242,9 +250,6 @@ fn advance(root: &Path, context: &J, incident: &mut J, q: &J) -> Result<()> {
             report::notice(context, "recovery unavailable");
         }
         _ => (),
-    }
-    if incident["phase"] == "reported" {
-        report::handoff(root, context, incident, q)?;
     }
     Ok(())
 }

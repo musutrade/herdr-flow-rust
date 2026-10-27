@@ -55,6 +55,18 @@ watcher，没有重启原任务或再创建 watcher。启动记录按同一 sess
 其他身份不能被覆盖。交回协调者的消息包含宿主实际修复记录。最终提交的完整覆盖率、
 Clippy、release 和 CRAP 绝对阈值 10（无 baseline）由本轮 PR 跟踪。
 
+首个提交 `d50ac63` 的本地完整 all-targets 覆盖率回归为 **812 通过、24 显式忽略**，
+远端 Rust checks 和依赖审计通过，但 [CRAP 工作流](https://github.com/musutrade/herdr-flow-rust/actions/runs/40493530552)
+在中断接续测试阶段失败，不能据本地通过将它补记成功。新 watcher 取得原锁、尚未发布
+自己的心跳时，旧记录仍可能被通用健康查询判为 healthy；原 `await_watch` 仅检查 healthy，
+会过早返回，随后的精确身份核验因仍读到旧 PID 而正确拒绝并保留 unknown。
+现在就绪等待也必须匹配刚启动子进程的 PID/start ticks，仍使用原 10 秒就绪期限。
+确定性回归先保留健康的旧身份，再发布新子进程身份，确认等待只在新身份出现后返回。
+
+首轮本地 CRAP 另报告 `Receiver::load`、`advance` 和结果 `validate` 三处超限，分别为
+16.12、11.00 和 10.01。已按 runtime/登记核验、动作推进/交接、字段/结论校验拆分职责，
+不放宽阈值、不添加 baseline 或忽略项。上述失败与后续最终提交的检查分别记账。
+
 以下记录保留此前入口和实机验收历史；本节优先说明当前新增能力。
 
 > 状态查询修正（2026-10-27）：`recovery-status` 与观察者使用同一非阻塞状态锁。
