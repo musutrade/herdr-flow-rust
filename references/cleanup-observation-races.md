@@ -1,5 +1,29 @@
 # Cleanup observation races — 2026-10-26
 
+## Real Recovery Agent findings (2026-10-27, latest)
+
+The real Herdr run exposed a broker socket path exceeding `sockaddr_un` after
+the recovery runtime suffix was added. Bind/connect now use a held directory-fd
+alias for long paths; the socket remains task-owned at its original location.
+Regression checks cover communication, exclusive ownership, stale-owner restart,
+and preservation of existing files. This is unrelated to the historical Git
+10-second timeout below; that root cause remains unconfirmed.
+
+Shared-storage inspection also found three exact acceptance repository trust
+entries written by upstream `thread/start`, and two task panes in a real Herdr
+recovery snapshot. Request-local project configuration now prevents new trust
+writes. The three entries were removed without changing any preexisting config
+bytes. Herdr v3 snapshot reclamation now uses explicit store identity and saved
+pane bindings, preserves unrelated user data, and retains cleanup obligations
+until the server has persisted the close. A stopped Agent's shell record remains
+task-owned through the saved mapping. A cleanup retry resumes the existing
+terminal decision; it does not submit another finalization or model operation.
+
+The initial 104.98-second diagnostic test pass did not establish complete
+shared-storage cleanup. Earlier failures and that limitation remain recorded in
+[the real recovery acceptance](recovery-agent.md); final evidence supersedes only
+the capabilities actually checked, not historical failures.
+
 ## Additional closing-owner fixture race (2026-10-27)
 
 The first full recovery-feature coverage run reproduced `StateBusy` at

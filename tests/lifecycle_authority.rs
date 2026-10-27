@@ -6,6 +6,8 @@ mod coordinator_continuation;
 mod native_tui_live;
 #[path = "common/recovery_incidents.rs"]
 mod recovery_incidents;
+#[path = "common/recovery_live.rs"]
+mod recovery_live;
 #[path = "common/rpc_server.rs"]
 pub mod rpc_server;
 #[path = "common/upstream_live_campaign.rs"]

@@ -32,7 +32,7 @@ Schema version 1 supports:
 
 - `team.max_active_agents`: positive integer including the coordinator; a cap,
   not a requirement to start all roles.
-- `roles.coordinator`, `roles.dev`, `roles.review`, `roles.publish`: each has
+- `roles.coordinator`, `roles.dev`, `roles.review`, `roles.publish`, `roles.recovery`: each has
   `agent`, `model`, and `reasoning_effort` strings. Currently the configured
   adapter is `codex`; other adapters need documented CLI mapping before use.
 - `rotation.worker_between_issues`: boolean.

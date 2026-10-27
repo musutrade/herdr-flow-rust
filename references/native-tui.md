@@ -1,5 +1,10 @@
 # 任务接入原生 Codex TUI
 
+> 2026-10-27 本轮更新：恢复角色已有真实模型诊断及原协调者接收证据，见
+> [恢复验收](recovery-agent.md)。新增显式 `native_tui.session_store`，以现有 Herdr
+> `session.json` 的路径和目录身份绑定 v3 共享快照回收；只关闭窗格不足以证明无残留。
+> 会话内项目配置覆盖避免上游为临时工作树追加全局 trust。以下历史实测按原范围保留。
+
 > 2026-10-27 当前状态：本页已有 TUI 成果已随 #144 合入 main。恢复角色继承协调者的
 > `native_tui` 配置，在首条真实故障诊断提交后打开自己的原生会话；协调窗格标题显示
 > 恢复等待、结果就绪或恢复不可用。此新增接入的证据与边界见[恢复说明](recovery-agent.md)，
@@ -25,6 +30,7 @@ OpenCode 不支持。
   "model": {"providerID": "openai", "id": "YOUR_MODEL", "reasoning_effort": "high"},
   "native_tui": {
     "binary": "/absolute/path/to/matching/codex",
+    "session_store": "/absolute/path/to/existing/herdr/session.json",
     "parent_pane": "YOUR_HERDR_PANE_ID",
     "direction": "right"
   }
@@ -85,6 +91,12 @@ SessionStart 上报 hook，并由实际前端上报所属窗格；其他 hook �
 新窗格的精确身份列入原有终态回收计划，先停止任务进程和关闭所属窗格，再删除所属
 上游会话和任务目录。服务不可用或归属不确定时保留回收义务，不删用户窗格来凑成功。
 历史 Herdr 快照和以前已有的输入历史记录不因本次接入而被批量修改。
+
+配置 `session_store` 后，终态在停止 Agent 前记录 Herdr 已保存的精确 pane 映射，
+等待服务保存关闭状态，然后从 `session-snapshots` / `session-backups` 的 v3 文件中
+移除匹配会话/cwd 或已登记映射的任务窗格，保留其他数据。主 `session.json` 仍由 Herdr
+写入；格式或身份不符、关闭尚未落盘均保留回收义务。未配置该字段的历史绑定不猜测
+外部保存位置，也不能作为“共享存储已清空”的证明。
 
 自动化测试覆盖协议分片、动态工具响应权、原生审批消息透传、会话边界与 hook 选择。
 真实验收入口（默认 ignored，必须显式指定现有服务和模型）：

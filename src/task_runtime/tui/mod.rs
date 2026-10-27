@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 mod fixture;
 mod herdr;
 mod hooks;
+mod persistence;
 mod protocol;
 
 pub(super) fn configure(runtime: &mut J) -> Result<()> {
@@ -15,6 +16,7 @@ pub(super) fn configure(runtime: &mut J) -> Result<()> {
     validate_config(&runtime["native_tui"])?;
     configure_socket(runtime)?;
     configure_parent(runtime)?;
+    persistence::configure(&mut runtime["native_tui"])?;
     runtime["native_tui_hooks"] = hooks::discover(runtime)?;
     Ok(())
 }
@@ -29,6 +31,7 @@ fn validate_config(config: &J) -> Result<()> {
                     "direction",
                     "herdr_socket",
                     "parent_terminal",
+                    "session_store",
                 ]
                 .contains(&k.as_str())
             })
@@ -83,6 +86,12 @@ fn configure_parent(runtime: &mut J) -> Result<()> {
 pub(super) fn thread_config(root: &Path, model: &J) -> Result<J> {
     let mut config = role_models::thread_config(model);
     let runtime = util::read_state_json(root, "runtime.json")?;
+    if upstream::selected(&runtime) {
+        // Codex otherwise persists project trust when thread/start requests a
+        // writable sandbox in a fresh worktree. Keep task-local project config
+        // disabled through a request-only override, without editing user config.
+        config["projects"] = json!({required(&runtime, "cwd")?:{"trust_level":"untrusted"}});
+    }
     if runtime.get("native_tui").is_some() {
         config["hooks"] = json!({"state":runtime["native_tui_hooks"]});
         config["history"] = json!({"persistence":"none"});
@@ -195,7 +204,8 @@ fn reserve_attachment(root: &Path, runtime: &J) -> Result<J> {
     util::ensure_private_dir(&directory, true)?;
     let record = json!({"phase":"creating","instance":runtime["instance"],"session":session,
         "nonce":nonce,"directory":directory,"herdr_socket":config["herdr_socket"],
-        "runtime":root,"pane":null,"terminal":null});
+        "runtime":root,"pane":null,"terminal":null,"cwd":runtime["cwd"],
+        "session_store":config.get("session_store")});
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     Ok(record)
 }
@@ -440,9 +450,16 @@ pub fn close(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let runtime = runtime(env, root)?;
     let _lock = presentation_lock(root)?;
-    let mut record = binding(root)?.ok_or_else(|| FlowError::guard("native TUI was not opened"))?;
+    let record = binding(root)?.ok_or_else(|| FlowError::guard("native TUI was not opened"))?;
     validate_binding(&runtime, &record)?;
+    let mut record = capture_presentation(root, &record)?;
     herdr::close(&mut record)?;
+    util::atomic_write_json(&root.join("presentation.json"), &record)?;
+    Ok(record)
+}
+
+fn capture_presentation(root: &Path, record: &J) -> Result<J> {
+    let record = persistence::capture(record)?;
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     Ok(record)
 }
@@ -525,7 +542,7 @@ fn entry_obligation(
     if let Some(record) = &record {
         validate_obligation(env, &root, record)?;
     }
-    Ok(record)
+    record.as_ref().map(persistence::capture).transpose()
 }
 
 fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
@@ -535,7 +552,8 @@ fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result
 }
 
 pub(crate) fn reclaim(record: &mut J) -> Result<()> {
-    herdr::close(record)
+    herdr::close(record)?;
+    persistence::reclaim(record)
 }
 
 /// A native user turn has the same queue-tool ownership checks as a broker
@@ -567,6 +585,23 @@ pub(super) fn observe_turn(root: &Path, event: &J) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upstream_project_trust_is_explicitly_scoped_to_the_thread() {
+        let root = util::fs::test_tempdir();
+        util::atomic_write_json(
+            &root.path().join("runtime.json"),
+            &json!({"configuration":"upstream","cwd":"/task/checkout"}),
+        )
+        .unwrap();
+        let config = thread_config(root.path(), &json!({"reasoning_effort":"high"})).unwrap();
+        assert_eq!(
+            config["projects"],
+            json!({"/task/checkout":{"trust_level":"untrusted"}})
+        );
+        assert_eq!(config["model_reasoning_effort"], "high");
+        util::atomic_write_json(&root.path().join("runtime.json"), &json!({})).unwrap();
+        assert!(thread_config(root.path(), &json!({})).unwrap()["projects"].is_null());
+    }
     #[test]
     fn native_turn_can_advance_control_but_foreign_turn_cannot() {
         let root = util::fs::test_tempdir();
