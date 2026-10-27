@@ -1,4 +1,4 @@
-//! Opt-in real Herdr/model diagnosis. Setup, fault injection and final failure
+//! Opt-in real Herdr/model diagnosis and repair. Setup, fault injection and final failure
 //! are harness-owned; the recovery conclusion and coordinator response are real.
 use super::*;
 use std::time::{Duration, Instant};
@@ -77,6 +77,59 @@ fn screen(pane: &str, expected: &str) -> J {
 #[test]
 #[ignore = "explicit existing socket, role models and native binary; creates a private Herdr recovery task"]
 fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
+    exercise(false);
+}
+
+#[test]
+#[ignore = "explicit existing socket, role models and native binary; repairs a private Herdr task watcher"]
+fn stopped_watcher_real_repair_verification_handoff_and_cleanup() {
+    exercise(true);
+}
+
+fn verify_repair(root: &Path, incident: &J, original: &J, state: &J) {
+    assert_eq!(incident["diagnosis"]["disposition"], "repair_requested");
+    assert_eq!(
+        incident["diagnosis"]["requested_action"],
+        "restart_receiver_watch"
+    );
+    assert_ne!(incident["diagnosis_turn"], incident["turn"]);
+    assert_eq!(incident["repair"]["phase"], "verified", "{incident}");
+    assert_eq!(incident["result"]["disposition"], "recovered", "{incident}");
+    assert_eq!(incident["result"]["requested_action"], "none");
+    assert_eq!(incident["repair"]["operation_replay_allowed"], false);
+    assert_eq!(incident["repair"]["business_outcome"], "unchanged");
+    assert_eq!(
+        incident["repair"]["original_operation"]["binding"],
+        json!({"session":state["session"],"turn":original["turn"]})
+    );
+    let guard = root.join("guard");
+    let health = herdr_flow::watch_service::health(&guard);
+    assert_eq!(health["healthy"], true, "{health}");
+    assert_eq!(health["pid"], incident["repair"]["watcher"]["pid"]);
+    assert_eq!(
+        health["start_ticks"],
+        incident["repair"]["watcher"]["start_ticks"]
+    );
+    assert_ne!(health["pid"], incident["fault"]["identity"]["pid"]);
+    let activation = util::read_state_json(&guard, "activation.json").unwrap();
+    assert_eq!(activation["pid"], health["pid"]);
+    assert_eq!(activation["session"], state["session"]);
+    assert_eq!(activation["recovery_incident"], incident["id"]);
+    let env = task_env::restore_environment("task").unwrap();
+    let pid = health["pid"].as_i64().unwrap() as i32;
+    let ticks = health["start_ticks"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        env.child_processes
+            .iter()
+            .filter(|p| p.pid == pid && p.start_time == Some(ticks))
+            .count(),
+        1,
+        "the replacement watcher must be registered exactly once under the original task"
+    );
+    assert_eq!(task_env::process_start_time(pid), Some(ticks));
+}
+
+fn exercise(repair: bool) {
     let socket = std::env::var("HERDR_UPSTREAM_SOCKET").unwrap();
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let roles: J =
@@ -94,12 +147,16 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
     client.timeout = 5.0;
     let parent_before = herdr(&["pane", "get", &parent])["pane"].clone();
     // A failed setup/cleanup must retain the exact ownership record for recovery.
-    let f = std::mem::ManuallyDrop::new(Fixture::new());
+    let mut f = Fixture::new();
+    // Retain evidence on failure without leaking the fixture mutex or its
+    // task-registry environment override when both live cases run together.
+    f.temp.disable_cleanup(true);
     eprintln!("recovery live root: {}", f.temp.path().display());
     let mut env = f.ready();
     let root = task_runtime::prepare(&env, "coordinator").unwrap();
     let workspace = env.workspace_root.clone();
     let scratch = env.temp_root.clone();
+    let environment_file = env.state_file().to_path_buf();
     let mut broker = task_runtime::launch(
         &mut env,
         &root,
@@ -145,17 +202,20 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
         let health = herdr_flow::watch_service::health(&queue::artifacts(&f.queue).unwrap());
         (health["healthy"] == true).then_some(health)
     });
+    let mut held_env = Some(env);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let env = held_env.as_ref().unwrap();
         assert_eq!(
             activated["recovery"]["agent"]["phase"], "ready",
             "{activated}"
         );
-        let started = task_runtime::native::receiver::start(&env, &root, &json!({
+        let started = task_runtime::native::receiver::start(env, &root, &json!({
             "instruction":"This is scoped Recovery Agent acceptance. Reply READY RECOVERY-LIVE. Do not use tools, modify files, change queue state, finalize, or start/stop any operation. If a later recovery report arrives, summarize its facts, actual actions, current state and next step, explicitly preserving unknown original operations without replay. Remain waiting; the harness owns terminal cleanup."
         })).unwrap();
         assert_eq!(started["presentation"]["phase"], "ready", "{started}");
         await_value(|| turn(&mut client, &state["session"], &started["turn"]));
         let original = util::read_state_json(&root, "receiver-start.json").unwrap();
+        let registration = util::read_state_json(&root, "receiver.json").unwrap();
         let watcher = activated["pid"].as_u64().unwrap() as i32;
         assert!(env.owns_process(watcher));
         let identity = util::read_state_json(&guard, "watch.json").unwrap();
@@ -169,7 +229,13 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
             .status()
             .unwrap()
             .success());
-        eprintln!("stopped owned watcher {watcher}; environment lock remains held");
+        if repair {
+            drop(held_env.take());
+        }
+        eprintln!(
+            "stopped owned watcher {watcher}; environment lock held: {}",
+            held_env.is_some()
+        );
         let incident = await_value(|| {
             let status = task_runtime::recovery::status(&root).unwrap();
             util::atomic_write_json(&f.temp.path().join("latest-recovery.json"), &status).unwrap();
@@ -181,13 +247,18 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
         assert_eq!(incident["fault"]["operation_replay_allowed"], false);
         assert_ne!(incident["agent"]["session"], state["session"]);
         assert_eq!(incident["agent"]["model"], roles["recovery"]);
-        assert!(
-            matches!(
-                incident["result"]["disposition"].as_str(),
-                Some("needs_human" | "insufficient_evidence")
-            ),
-            "{incident}"
-        );
+        if repair {
+            verify_repair(&root, &incident, &original, &state);
+        } else {
+            assert!(
+                matches!(
+                    incident["result"]["disposition"].as_str(),
+                    Some("needs_human" | "insufficient_evidence")
+                ),
+                "{incident}"
+            );
+            assert!(incident["repair"]["watcher"].is_null(), "{incident}");
+        }
         for key in ["facts", "actions", "current_state", "next_step"] {
             assert!(!incident["result"][key].as_str().unwrap().trim().is_empty());
         }
@@ -206,12 +277,31 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
         assert!(agent
             .to_string()
             .contains(incident["agent"]["session"].as_str().unwrap()));
-        let visible = screen(pane, incident["result"]["incident"].as_str().unwrap());
+        let expected = if repair {
+            "recovered"
+        } else {
+            incident["result"]["incident"].as_str().unwrap()
+        };
+        let visible = screen(pane, expected);
+        assert!(visible
+            .as_str()
+            .unwrap()
+            .contains(incident["id"].as_str().unwrap()));
+        if repair {
+            assert!(visible
+                .as_str()
+                .unwrap()
+                .contains(&incident["repair"]["watcher"]["pid"].to_string()));
+        }
         let handoff =
             await_value(|| turn(&mut client, &state["session"], &incident["handoff"]["turn"]));
         assert_eq!(
             util::read_state_json(&root, "receiver-start.json").unwrap(),
             original
+        );
+        assert_eq!(
+            util::read_state_json(&root, "receiver.json").unwrap(),
+            registration
         );
         assert!(f.state()["tasks"]["task"]["final_outcome"].is_null());
         let recovery_thread = client
@@ -222,7 +312,11 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
             .unwrap();
         assert_eq!(
             recovery_thread["thread"]["turns"].as_array().unwrap().len(),
-            1
+            if incident["diagnosis"].is_null() {
+                1
+            } else {
+                2
+            }
         );
         let coordinator_thread = client
             .call(
@@ -240,10 +334,12 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
         util::atomic_write_json(&f.temp.path().join("result.json"), &json!({
             "incident":incident,"recovery_agent":agent,"recovery_screen":visible,"coordinator_response":handoff,
             "original":original,"coordinator_presentation":started["presentation"],
-            "environment_lock_held":true,"original_not_replayed":true,
+            "environment_lock_held":held_env.is_some(),"original_not_replayed":true,
             "recovery_thread":recovery_thread,"coordinator_thread":coordinator_thread
         })).unwrap();
     }));
+    let processes = util::read_json(&environment_file).unwrap()["child_processes"].clone();
+    util::atomic_write_json(&f.temp.path().join("processes.json"), &processes).unwrap();
     let mut inventory = Vec::new();
     for entry in fs::read_dir(scratch.join("rt")).unwrap() {
         let directory = entry.unwrap().path();
@@ -277,7 +373,7 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
     }
     // This explicitly selected fixture failure closes the diagnostic scenario;
     // neither a diagnosis nor a stopped watcher is a business success/failure.
-    drop(env);
+    drop(held_env);
     upstream_runtime::finalize_with_retry(&f);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -299,6 +395,13 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
     assert!(!workspace.exists() && !scratch.exists());
     assert!(!task_env::is_registered("task").unwrap());
     assert!(f.state()["tasks"]["task"].is_null());
+    for process in processes.as_array().unwrap() {
+        let record: task_env::RegisteredProcess = serde_json::from_value(process.clone()).unwrap();
+        assert!(
+            !task_env::process_is_alive(&record),
+            "owned process survived cleanup: {process}"
+        );
+    }
     assert!(
         fs::read(&config_path).unwrap() == config_before,
         "upstream user configuration changed"
@@ -316,7 +419,7 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
         &f.temp.path().join("cleanup.json"),
         &json!({
             "roots_removed":true,"queue_task_removed":true,"registration_removed":true,
-            "worktree_removed":true,"parent_terminal_unchanged":true,
+            "worktree_removed":true,"parent_terminal_unchanged":true,"owned_processes_removed":true,
             "final_outcome":"harness-selected failure; no business delivery claim"
         }),
     )

@@ -265,7 +265,7 @@ fn absent_broker(state: &J) -> Result<()> {
     Ok(())
 }
 
-fn no_unresolved_tools(root: &Path) -> Result<()> {
+pub(in crate::task_runtime) fn no_unresolved_tools(root: &Path) -> Result<()> {
     for (file, complete) in [
         ("broker-tools.json", "responded"),
         ("control-tools.json", "complete"),

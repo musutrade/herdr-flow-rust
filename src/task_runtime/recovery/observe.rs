@@ -114,7 +114,7 @@ fn selected_turn(root: &Path, q: &J) -> Result<Option<J>> {
     Ok(Some(json!({"session":turn["thread"],"turn":turn["turn"]})))
 }
 
-fn upstream_turn(runtime: &J, turn: &J) -> Result<Option<J>> {
+pub(super) fn upstream_turn(runtime: &J, turn: &J) -> Result<Option<J>> {
     let socket = upstream::endpoint(runtime)?;
     let mut client = crate::codex::rpc::Client::new(&socket.to_string_lossy());
     client.timeout = 3.0;
