@@ -141,6 +141,7 @@ pub(super) fn record(parent: &mut J, child: &J, spec: &J) -> Result<()> {
     if next["kind"] == "delivery" {
         parent["approved"] = json!({"candidate":child["candidate"],"revision":child["lineage"]["revision"],
             "round":child["lineage"]["round"],"activity":child["task"],"verdict":spec["verdict"]});
+        lineage::stage::copy_scope(&child["lineage"], &mut parent["approved"])?;
     }
     Ok(())
 }

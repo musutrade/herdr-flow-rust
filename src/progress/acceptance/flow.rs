@@ -42,6 +42,10 @@ fn validate_binding(parent: &J, spec: &J) -> Result<()> {
     let intent = &parent["continuation"];
     if intent["action"]["kind"] != "clarify" {
         ensure(
+            lineage::stage::current(parent, &intent["binding"]["lineage"]),
+            "continuation stage changed",
+        )?;
+        ensure(
             parent["candidate"] == intent["binding"]["candidate"]
                 && parent["acceptance_round"] == intent["binding"]["lineage"]["round"],
             "continuation candidate or round changed",

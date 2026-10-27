@@ -1,5 +1,7 @@
 //! Behavioral coverage for requirement revisions and independent activities.
 pub mod common;
+#[path = "common/lineage_stage.rs"]
+mod stage;
 use herdr_flow::{
     model::J,
     progress::{

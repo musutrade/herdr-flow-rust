@@ -11,6 +11,8 @@ mod cleanup;
 pub mod cli;
 pub mod local;
 pub mod publication;
+mod stage;
+pub use stage::complete as complete_stage;
 
 /// Only a customer adapter may establish an external outcome, by inspecting the
 /// actual endpoint. A normal process exit or a coordinator's claim is not proof.
@@ -121,7 +123,7 @@ fn new_intent(env: &TaskEnvironment, queue: &Path, spec: &J, state: &J) -> Resul
         json!({"id":util::uuid_hex(),"phase":"prepared","request":spec,
         "task":env.task_id,"instance":env.instance_id,"queue":queue,
         "workspace_root":env.workspace_root,"temp_root":env.temp_root,
-        "approval":parent["approved"],"artifact":artifact,
+        "approval":parent["approved"],"artifact":artifact,"stage":parent["stage"],
         "endpoint":requirement(parent)["basis"]["endpoint"],"receipt":null}),
     )
 }
@@ -156,6 +158,10 @@ fn validate_terms(parent: &J, spec: &J) -> Result<()> {
 
 fn validate_approval(parent: &J) -> Result<()> {
     let approval = &parent["approved"];
+    ensure(
+        lineage::stage::current(parent, approval),
+        "acceptance scope changed",
+    )?;
     ensure(
         !approval.is_null()
             && approval["candidate"] == parent["candidate"]
@@ -201,6 +207,7 @@ fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
 
 fn validate_freeze(state: &J, intent: &J) -> Result<()> {
     let parent = &state["tasks"][field(intent, "task")?];
+    ensure(parent["stage"] == intent["stage"], "delivery stage changed")?;
     ensure(
         state["stopped"] != true
             && lineage::is_parent(parent)
@@ -346,6 +353,18 @@ pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
 /// and resume cleanup instead of resubmitting. Success leaves no reusable task
 /// journal; this is not a repeatable publication call.
 pub fn finish(env: &mut TaskEnvironment) -> Result<()> {
+    validate_finish(env)?;
+    env.delivery["phase"] = json!("cleaning");
+    env.persist()?;
+    cleanup::run(env)?;
+    crate::task_env::destroy_environment(env)
+}
+
+fn validate_finish(env: &TaskEnvironment) -> Result<()> {
+    ensure(
+        env.delivery["stage"].is_null(),
+        "stage delivery must continue its parent requirement",
+    )?;
     if crate::task_env::isolation::owner(env).is_some() {
         return Err(FlowError::guard(
             "isolated delivery finish requires lifecycle cleanup; not implemented",
@@ -360,9 +379,5 @@ pub fn finish(env: &mut TaskEnvironment) -> Result<()> {
     ensure(
         env.delivery["phase"] == "confirmed" || env.delivery["phase"] == "cleaning",
         "delivery is not confirmed",
-    )?;
-    env.delivery["phase"] = json!("cleaning");
-    env.persist()?;
-    cleanup::run(env)?;
-    crate::task_env::destroy_environment(env)
+    )
 }

@@ -6,7 +6,7 @@ use crate::task_runtime as runtime;
 pub(super) fn external(request: &J) -> bool {
     matches!(
         request["params"]["arguments"]["action"].as_str(),
-        Some("run" | "deliver" | "finalize")
+        Some("run" | "deliver" | "stage-complete" | "finalize")
     )
 }
 
@@ -89,7 +89,7 @@ pub(super) fn lineage(q: &J, state: &J, owner: &Owner, spec: &J) -> Result<J> {
     ensure(
         matches!(
             spec["kind"].as_str(),
-            Some("artifact" | "candidate" | "activity" | "continue")
+            Some("artifact" | "candidate" | "activity" | "continue" | "stage")
         ),
         "control cannot create requirements or authorization",
     )?;
@@ -114,11 +114,27 @@ pub(super) fn execute(root: &Path, state: &J, owner: &Owner, args: &J) -> Result
         crate::task_env::isolation::owner(&env).as_ref() == Some(owner),
         "continuation environment changed",
     )?;
+    execute_owned(root, &mut env, owner, args, &spec)
+}
+
+fn execute_owned(
+    root: &Path,
+    env: &mut TaskEnvironment,
+    owner: &Owner,
+    args: &J,
+    spec: &J,
+) -> Result<J> {
     match args["action"].as_str() {
-        Some("run") => run(root, &mut env, owner, &spec),
-        Some("deliver") => deliver(&mut env, owner, &spec),
+        Some("run") => run(root, env, owner, spec),
+        Some("deliver") => deliver(env, owner, spec),
+        Some("stage-complete") => complete_stage(env, owner, spec),
         _ => Err(FlowError::guard("unsupported continuation")),
     }
+}
+
+fn complete_stage(env: &mut TaskEnvironment, owner: &Owner, spec: &J) -> Result<J> {
+    fields(spec, &["delivery"])?;
+    crate::delivery::complete_stage(env, &owner.queue_root, &required(spec, "delivery")?)
 }
 
 fn fields(spec: &J, allowed: &[&str]) -> Result<()> {
