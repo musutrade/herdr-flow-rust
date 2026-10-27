@@ -23,7 +23,7 @@
 //! through [`cleanup_failed_environment`], and items whose resources are
 //! already gone count as complete so a crash mid-retry can finish.
 
-mod observation;
+pub(super) mod observation;
 mod signals;
 pub mod terminal;
 

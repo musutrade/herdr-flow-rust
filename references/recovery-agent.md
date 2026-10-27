@@ -1,5 +1,62 @@
 # 独立故障观察与诊断入口
 
+## 受管 watcher 恢复与复核（2026-10-27，当前开发增量）
+
+PR #147 已合入 main `5ae45a1`。本轮继续 #130 的异常处理通路：恢复角色在只读诊断后，
+可以请求恢复同一任务中已经停止的 **receiver watcher**。宿主执行已有的受管 watcher
+启动入口；不授予模型 shell 写入、进程控制或开发工作区写入权限。
+
+诊断结构新增 `requested_action`。普通结论填写 `none`；请求修复必须同时使用
+`disposition: repair_requested` 和 `requested_action: restart_receiver_watch`。例如：
+
+```json
+{
+  "incident": "EXACT_INCIDENT_ID",
+  "disposition": "repair_requested",
+  "requested_action": "restart_receiver_watch",
+  "facts": "原接收端 watcher 已停止，任务和会话仍保留",
+  "actions": "只读取现场；尚未执行重启",
+  "current_state": "等待宿主核验原操作和进程身份",
+  "next_step": "恢复原 watcher 后复核实际状态"
+}
+```
+
+目标、可执行程序和启动参数均来自原任务登记，模型不能另行指定。执行前核验：
+
+- 原 Owner、runtime、receiver 与队列登记仍一致，任务未进入终态；原 broker 和上游会话可观察。
+- 异常来源确为该 receiver watcher；原 PID/start ticks 在任务进程登记中，且通过可报错的
+  进程观察确认旧执行已退出。心跳过期或读取失败不提供替换依据；不终止仍运行的 watcher。
+- 既有 watcher 锁可取得，原 coordinator 首次发送已记录提交，原 turn 能按同一会话读取；
+  未决控制执行或回复发送会阻止本次修复。原 turn 可以仍在执行，恢复的 watcher 仅只读观察。
+
+宿主先保存 `repair.phase: executing`，再创建并登记子进程；记录新 PID/start ticks 后为
+`started`，核验同一 watcher 的锁、心跳和接收端观察后为 `verified`。环境锁占用等执行前
+拒绝记录为 `blocked`；启动后结果不明记录为 `unknown`。不阻塞等待原环境锁，不循环重启。
+中断后已有 `started` 身份只允许重新观察；仅有启动意图、没有可信子进程身份时保留未知状态。
+
+同一恢复会话随后收到实际修复记录，进行一次复核并返回原三类结论。首次诊断及其 turn
+保存在 `diagnosis` / `diagnosis_turn`，实际动作保存在 `repair`；不能再次请求修复，也不能
+把未经宿主核验的动作报告为 `recovered`。复核发送不明时保留记录，不重新发送。
+最终结果仍通过既有一次性交接回原协调者；ACK、独立验收、交付和业务终态的含义不变。
+
+本轮范围只包含 receiver watcher。队列 watcher、broker、共享服务、Git、网络配置、
+人工写入权及累计记录接续仍按现有边界处理；该动作不会重发原开发、评审或交付操作。
+新 watcher 归原任务登记和统一终态回收，不新建任务或恢复角色来绕开故障。
+
+定向验证：首轮 14 项恢复模块单元回归通过；5 项独立进程协议回归通过（97.84 秒），覆盖正常诊断、
+模型失败、实际 watcher 重启及复核、环境锁占用、未决控制操作保留，以及两个会话和任务资源
+回收。协议回归运行真实 observer、broker 和 watcher，上游模型输出为夹具；最终失败由夹具
+显式选择用于收尾，不冒称业务成功。本轮尚无新增真实模型 / Herdr 修复动作验收，下面的
+109.26 秒诊断及 81.27 秒 tab 证据保持原覆盖范围。
+
+随后新增中断接续复验 **20.33 秒通过**：watcher 已启动、复核尚未发送时停止本次 observer，
+恢复到已登记新 PID 的 `started` 检查点，再启动同归属 observer；只核验并继续使用同一个
+watcher，没有重启原任务或再创建 watcher。启动记录按同一 session 和原/新 PID 幂等更新，
+其他身份不能被覆盖。交回协调者的消息包含宿主实际修复记录。最终提交的完整覆盖率、
+Clippy、release 和 CRAP 绝对阈值 10（无 baseline）由本轮 PR 跟踪。
+
+以下记录保留此前入口和实机验收历史；本节优先说明当前新增能力。
+
 > 状态查询修正（2026-10-27）：`recovery-status` 与观察者使用同一非阻塞状态锁。
 > 写入期间返回 `phase: updating`，只需稍后重新查询，不授权重发原操作；查询占锁时
 > 观察者保留心跳并留待下轮继续。无写入者的残缺文档或损坏 JSON 仍拒绝读取。

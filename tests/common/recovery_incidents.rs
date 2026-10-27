@@ -8,15 +8,58 @@ const RECOVERY: &str = "44444444-4444-4444-4444-444444444444";
 
 #[test]
 fn stopped_watcher_gets_one_independent_recovery_result_and_all_resources_are_reclaimed() {
-    exercise(false);
+    exercise(Mode::Diagnose);
 }
 
 #[test]
 fn recovery_model_failure_stays_visible_without_recursion_or_replay() {
-    exercise(true);
+    exercise(Mode::Failure);
 }
 
-fn exercise(failed: bool) {
+#[test]
+fn recovery_repairs_only_the_stopped_registered_watcher_then_verifies_and_hands_back() {
+    exercise(Mode::Repair);
+}
+
+#[test]
+fn recovery_repair_reports_environment_contention_without_restarting_or_replaying() {
+    exercise(Mode::Busy);
+}
+
+#[test]
+fn recovery_repair_keeps_unknown_control_operations_and_requests_human_verification() {
+    exercise(Mode::Unknown);
+}
+
+#[test]
+fn interrupted_recovery_reconciles_the_recorded_watcher_without_spawning_another() {
+    exercise(Mode::Reconcile);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Diagnose,
+    Failure,
+    Repair,
+    Busy,
+    Unknown,
+    Reconcile,
+}
+
+impl Mode {
+    fn requests_repair(self) -> bool {
+        matches!(
+            self,
+            Self::Repair | Self::Busy | Self::Unknown | Self::Reconcile
+        )
+    }
+    fn succeeds(self) -> bool {
+        matches!(self, Self::Repair | Self::Reconcile)
+    }
+}
+
+fn exercise(mode: Mode) {
+    let failed = mode == Mode::Failure;
     let f = Fixture::new();
     let mut env = isolated_runtime::linked(&f);
     let coordinator = task_runtime::prepare(&env, "coordinator").unwrap();
@@ -24,9 +67,10 @@ fn exercise(failed: bool) {
     let requests = Arc::new(Mutex::new(Vec::<J>::new()));
     let recorded = requests.clone();
     let server_cwd = cwd.clone();
-    let server = coordinator_continuation::parallel(5, move |peer| {
-        serve(peer, &server_cwd, &recorded, failed);
-    });
+    let server =
+        coordinator_continuation::parallel(if mode.succeeds() { 6 } else { 5 }, move |peer| {
+            serve(peer, &server_cwd, &recorded, mode);
+        });
     let config = f.temp.path().join("user-config");
     fs::write(&config, "must remain unchanged").unwrap();
     let mut broker = task_runtime::launch(
@@ -85,6 +129,20 @@ fn exercise(failed: bool) {
         .success());
     let workspace = env.workspace_root.clone();
     let scratch = env.temp_root.clone();
+    let original = util::read_state_json(&coordinator, "receiver-start.json").unwrap();
+    let registration = util::read_state_json(&coordinator, "receiver.json").unwrap();
+    let unknown = json!({"uncertain":{"phase":"executing","request":{"id":"uncertain"}}});
+    if mode == Mode::Unknown {
+        util::atomic_write_json(&coordinator.join("control-tools.json"), &unknown).unwrap();
+    }
+    let env = if mode.succeeds() || mode == Mode::Unknown {
+        drop(env);
+        None
+    } else {
+        Some(env)
+    };
+    let checkpoint_pid =
+        (mode == Mode::Reconcile).then(|| restart_from_spawn_checkpoint(&coordinator));
     // Deliberately retain the environment lock until the diagnostic result:
     // a stalled original operation must not prevent the independent role.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -103,8 +161,61 @@ fn exercise(failed: bool) {
             .unwrap()
             .contains("before any retry"));
     } else {
-        assert_eq!(incident["result"]["disposition"], "needs_human");
+        assert_eq!(
+            incident["result"]["disposition"],
+            if mode.succeeds() {
+                "recovered"
+            } else {
+                "needs_human"
+            },
+            "{incident}"
+        );
     }
+    if mode.requests_repair() {
+        assert_eq!(incident["diagnosis"]["disposition"], "repair_requested");
+        assert_ne!(incident["diagnosis_turn"], incident["turn"]);
+        assert_eq!(
+            incident["repair"]["phase"],
+            if mode.succeeds() {
+                "verified"
+            } else {
+                "blocked"
+            },
+            "{incident}"
+        );
+        let health = herdr_flow::watch_service::health(&guard);
+        assert_eq!(health["healthy"], mode.succeeds());
+        if mode.succeeds() {
+            assert_ne!(health["pid"], watcher);
+            let activation = util::read_state_json(&guard, "activation.json").unwrap();
+            assert_eq!(activation["pid"], health["pid"]);
+            assert_eq!(activation["session"], state["session"]);
+            assert_eq!(activation["recovery_incident"], incident["id"]);
+            assert_eq!(incident["repair"]["watcher"]["pid"], health["pid"]);
+            assert_eq!(
+                incident["repair"]["original_operation"]["binding"]["turn"],
+                original["turn"]
+            );
+            assert_eq!(incident["repair"]["operation_replay_allowed"], false);
+            if let Some(pid) = checkpoint_pid {
+                assert_eq!(health["pid"], pid);
+            }
+        }
+    }
+    if mode == Mode::Unknown {
+        assert_eq!(
+            util::read_state_json(&coordinator, "control-tools.json").unwrap(),
+            unknown
+        );
+    }
+    assert_eq!(
+        util::read_state_json(&coordinator, "receiver-start.json").unwrap(),
+        original
+    );
+    assert_eq!(
+        util::read_state_json(&coordinator, "receiver.json").unwrap(),
+        registration
+    );
     assert_eq!(incident["agent"]["session"], RECOVERY);
     assert_ne!(incident["agent"]["session"], state["session"]);
     assert!(f.state()["tasks"]["task"]["final_outcome"].is_null());
@@ -128,8 +239,19 @@ fn exercise(failed: bool) {
     drop(env);
     // A later observation of the same stopped watcher must not send another
     // recovery turn or another coordinator notification.
-    std::thread::sleep(Duration::from_millis(2300));
+    if !mode.succeeds() {
+        std::thread::sleep(Duration::from_millis(2300));
+    }
     let calls = requests.lock().unwrap().clone();
+    if mode.requests_repair() {
+        let handoff = calls
+            .iter()
+            .rev()
+            .find(|r| r["method"] == "turn/start" && r["params"]["threadId"] == COORD)
+            .unwrap();
+        let text = handoff["params"]["input"][0]["text"].as_str().unwrap();
+        assert!(text.contains(&format!("Repair record: {}", incident["repair"])));
+    }
     assert_eq!(
         calls
             .iter()
@@ -142,7 +264,7 @@ fn exercise(failed: bool) {
             .iter()
             .filter(|r| r["method"] == "turn/start" && r["params"]["threadId"] == RECOVERY)
             .count(),
-        1
+        if mode.requests_repair() { 2 } else { 1 }
     );
     assert_eq!(
         calls
@@ -183,6 +305,84 @@ fn exercise(failed: bool) {
     }
 }
 
+fn restart_from_spawn_checkpoint(coordinator: &Path) -> u64 {
+    let root = coordinator.join("recovery-observer");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (lock, mut incident) = loop {
+        if let Ok(lock) = guard::locked_existing(&root) {
+            if let Some(incident) =
+                util::read_state_json_bounded_if_exists(&root, "incident.json", 1024 * 1024)
+                    .unwrap()
+            {
+                if incident["phase"] == "pending" && incident["repair"]["phase"] == "verified" {
+                    break (lock, incident);
+                }
+                assert!(
+                    incident["diagnosis"].is_null() || incident["phase"] != "submitted",
+                    "verification started before the saved checkpoint: {incident}"
+                );
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "repair did not reach its saved spawn checkpoint"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let watch = util::read_state_json(&root, "watch.json").unwrap();
+    let old_pid = watch["pid"].as_u64().unwrap() as u32;
+    assert!(Command::new("kill")
+        .args(["-TERM", &old_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    while util::process::process_start_ticks(old_pid).as_deref() == watch["start_ticks"].as_str() {
+        assert!(Instant::now() < deadline, "old observer did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Restore the durable checkpoint immediately after registration. There has
+    // been no verification turn or handoff yet; the real watcher remains live.
+    let watcher = incident["repair"]["watcher"]["pid"].as_u64().unwrap();
+    incident["phase"] = json!("repairing");
+    incident["repair"]["phase"] = json!("started");
+    util::atomic_write_json(&root.join("incident.json"), &incident).unwrap();
+    drop(lock);
+    restart_observer(&root);
+    watcher
+}
+
+fn restart_observer(root: &Path) {
+    use std::os::unix::process::CommandExt;
+    let mut env = task_env::restore_environment("task").unwrap();
+    let owner = task_env::isolation::owner(&env).unwrap();
+    let _permit = lifecycle::write_permit(&owner).unwrap();
+    // This fixture restarts only its registered host observer, retaining the
+    // original lifecycle permit through spawn/registration. No model is run.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-flow"));
+    command
+        .env(task_env::MARKER_ENV, &env.instance_id)
+        .env(
+            "HERDR_LIFECYCLE_OWNER",
+            serde_json::to_string(&owner).unwrap(),
+        )
+        .env("TMPDIR", &env.temp_root)
+        .process_group(0);
+    let child = command
+        .args(["task-runtime", "recovery-watch", "--state-dir"])
+        .arg(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    env.register_process(child.id() as i32).unwrap();
+    util::process::BackgroundChild {
+        pid: child.id(),
+        child,
+        ready: None,
+    }
+    .reap();
+}
+
 fn status_reader_does_not_stop_observer(coordinator: &Path) {
     let observer = coordinator.join("recovery-observer");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -220,17 +420,19 @@ fn status_reader_does_not_stop_observer(coordinator: &Path) {
     );
 }
 
-fn serve(mut peer: rpc_server::Peer, cwd: &Path, requests: &Mutex<Vec<J>>, failed: bool) {
+fn serve(mut peer: rpc_server::Peer, cwd: &Path, requests: &Mutex<Vec<J>>, mode: Mode) {
     peer.initialize();
     let mut turns = json!([]);
     while let Some(request) = next(&mut peer) {
         requests.lock().unwrap().push(request.clone());
-        if failed && request["method"] == "turn/start" && request["params"]["threadId"] == RECOVERY
+        if mode == Mode::Failure
+            && request["method"] == "turn/start"
+            && request["params"]["threadId"] == RECOVERY
         {
             peer.json(&json!({"id":request["id"],"error":{"code":-32000,"message":"synthetic unavailable model"}}));
             continue;
         }
-        let result = response(&request, cwd, &mut turns);
+        let result = response(&request, cwd, &mut turns, mode);
         peer.json(&json!({"id":request["id"],"result":result}));
         if request["method"] == "thread/delete" {
             break;
@@ -238,7 +440,7 @@ fn serve(mut peer: rpc_server::Peer, cwd: &Path, requests: &Mutex<Vec<J>>, faile
     }
 }
 
-fn response(request: &J, cwd: &Path, turns: &mut J) -> J {
+fn response(request: &J, cwd: &Path, turns: &mut J, mode: Mode) -> J {
     let params = &request["params"];
     match request["method"].as_str().unwrap() {
         "thread/start" => {
@@ -254,16 +456,39 @@ fn response(request: &J, cwd: &Path, turns: &mut J) -> J {
         }
         "thread/read" => json!({"thread":{"id":params["threadId"],"cwd":cwd,
             "modelProvider":"existing","status":{"type":"idle"},"canAcceptDirectInput":true,"turns":turns}}),
+        "thread/turns/list" => {
+            json!({"data":[{"id":"coordinator-turn","status":"completed","items":[]}],"nextCursor":null})
+        }
         "turn/start" => {
             if params["threadId"] == RECOVERY {
                 assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+                let verifying = !turns.as_array().unwrap().is_empty();
+                let requested = mode.requests_repair() && !verifying;
+                if verifying {
+                    let text = params["input"][0]["text"].as_str().unwrap();
+                    assert!(text.contains("another repair request is not allowed"));
+                    assert!(text.contains(if mode.succeeds() {
+                        "verified"
+                    } else {
+                        "blocked"
+                    }));
+                }
                 let result = json!({"incident":params["outputSchema"]["properties"]["incident"]["enum"][0],
-                    "disposition":"needs_human","facts":"Recorded watcher stopped",
+                    "disposition":if requested {"repair_requested"} else if mode.succeeds() {"recovered"} else {"needs_human"},
+                    "requested_action":if requested {"restart_receiver_watch"} else {"none"},"facts":"Recorded watcher stopped",
                     "actions":"Read the original task evidence","current_state":"Original task retained",
                     "next_step":"Inspect original operations before restarting the exact watcher"});
-                *turns = json!([{"id":"diagnostic-turn","status":"completed",
-                    "items":[{"type":"agentMessage","text":result.to_string()}]}]);
-                json!({"turn":{"id":"diagnostic-turn"}})
+                let id = if verifying {
+                    "verification-turn"
+                } else {
+                    "diagnostic-turn"
+                };
+                turns
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":id,"status":"completed",
+                    "items":[{"type":"agentMessage","text":result.to_string()}]}));
+                json!({"turn":{"id":id}})
             } else {
                 json!({"turn":{"id":"coordinator-turn"}})
             }

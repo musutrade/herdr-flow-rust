@@ -4,10 +4,11 @@ use crate::herdr::ReceiverAdapter;
 
 pub(super) fn schema(id: &str) -> J {
     json!({"type":"object","additionalProperties":false,
-        "required":["incident","disposition","facts","actions","current_state","next_step"],
+        "required":["incident","disposition","facts","actions","current_state","next_step","requested_action"],
         "properties":{
             "incident":{"type":"string","enum":[id]},
-            "disposition":{"type":"string","enum":["recovered","needs_human","insufficient_evidence"]},
+            "disposition":{"type":"string","enum":["recovered","needs_human","insufficient_evidence","repair_requested"]},
+            "requested_action":{"type":"string","enum":["none","restart_receiver_watch"]},
             "facts":{"type":"string"},"actions":{"type":"string"},
             "current_state":{"type":"string"},"next_step":{"type":"string"}}})
 }
@@ -36,20 +37,37 @@ fn validate(result: &J, id: &str) -> Result<()> {
         .as_object()
         .ok_or_else(|| FlowError::guard("recovery result must be an object"))?;
     ensure(
-        fields.len() == 6 && result["incident"] == id,
+        (fields.len() == 6 || (fields.len() == 7 && fields.contains_key("requested_action")))
+            && result["incident"] == id,
         "recovery conclusion belongs to another incident",
     )?;
     ensure(
         matches!(
             result["disposition"].as_str(),
-            Some("recovered" | "needs_human" | "insufficient_evidence")
+            Some("recovered" | "needs_human" | "insufficient_evidence" | "repair_requested")
         ),
         "recovery disposition missing",
     )?;
+    validate_action(result)?;
     for field in ["facts", "actions", "current_state", "next_step"] {
         required(result, field)?;
     }
     Ok(())
+}
+
+fn validate_action(result: &J) -> Result<()> {
+    let action = result
+        .get("requested_action")
+        .cloned()
+        .unwrap_or(json!("none"));
+    ensure(
+        if result["disposition"] == "repair_requested" {
+            action == "restart_receiver_watch"
+        } else {
+            action == "none"
+        },
+        "recovery action does not match its disposition",
+    )
 }
 
 pub(super) fn notice(context: &J, text: &str) {
@@ -92,7 +110,7 @@ fn receiver_state(context: &J, q: &J) -> Result<J> {
 fn deliver(root: &Path, incident: &mut J, state: &J, adapter: &dyn ReceiverAdapter) -> Result<()> {
     incident["handoff"] = json!({"phase":"sending","session":state["session"]});
     save(root, "incident.json", incident)?;
-    let message = format!("Recovery result for your existing task (not a new assignment): {}. Original observation: {}. Verify the current original operation and existing authorization before continuing. An unknown send/Git result must be inspected, never blindly replayed. needs_human/insufficient_evidence mean report the waiting condition; do not mark the requirement complete or destroy its resources.", incident["result"], incident["fault"]);
+    let message = format!("Recovery result for your existing task (not a new assignment): {}. Original observation: {}. Repair record: {}. Verify the current original operation and existing authorization before continuing. An unknown send/Git result must be inspected, never blindly replayed. needs_human/insufficient_evidence mean report the waiting condition; do not mark the requirement complete or destroy its resources.", incident["result"], incident["fault"], incident["repair"]);
     let turn = adapter.prompt(&message)?;
     incident["handoff"]["phase"] = json!("submitted");
     incident["handoff"]["turn"] = json!(turn);
@@ -121,5 +139,27 @@ mod tests {
             "a"
         )
         .is_err());
+    }
+
+    #[test]
+    fn repair_requests_are_explicit_and_cannot_carry_commands_or_claim_completion() {
+        let result = json!({"incident":"a","disposition":"repair_requested","requested_action":"restart_receiver_watch",
+            "facts":"watcher stopped","actions":"none","current_state":"waiting for host checks","next_step":"verify the actual attempt"});
+        validate(&result, "a").unwrap();
+        for action in [
+            json!("none"),
+            json!("restart_broker"),
+            json!({"command":"anything"}),
+        ] {
+            let mut invalid = result.clone();
+            invalid["requested_action"] = action;
+            assert!(validate(&invalid, "a").is_err());
+        }
+        let mut invalid = result.clone();
+        invalid["command"] = json!("anything");
+        assert!(validate(&invalid, "a").is_err());
+        invalid = result;
+        invalid["disposition"] = json!("recovered");
+        assert!(validate(&invalid, "a").is_err());
     }
 }

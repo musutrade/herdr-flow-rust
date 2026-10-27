@@ -154,7 +154,7 @@ fn reserve_guard(guard: &Path, runtime: &J, journal: &J) -> Result<J> {
     crate::guard::save(guard, &mut state)?;
     Ok(state)
 }
-pub(super) fn spawn_watch(
+pub(in crate::task_runtime) fn spawn_watch(
     env: &mut TaskEnvironment,
     guard: &Path,
     spec: &J,

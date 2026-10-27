@@ -3,7 +3,7 @@ use std::io;
 
 use super::super::env::ProcessRecord;
 
-pub(super) fn is_alive(record: &ProcessRecord) -> io::Result<bool> {
+pub(crate) fn is_alive(record: &ProcessRecord) -> io::Result<bool> {
     if record.pid <= 1 {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }

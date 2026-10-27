@@ -9,6 +9,7 @@
 
 mod boundary;
 mod cleanup;
+pub(crate) use cleanup::observation::is_alive as observe_process_alive;
 pub use cleanup::terminal;
 pub mod cli;
 pub(crate) mod discovery;

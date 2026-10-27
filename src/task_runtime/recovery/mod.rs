@@ -4,6 +4,7 @@ use super::*;
 use crate::lifecycle::Owner;
 mod agent;
 mod observe;
+mod repair;
 mod report;
 #[cfg(test)]
 mod tests;
@@ -233,6 +234,7 @@ fn advance(root: &Path, context: &J, incident: &mut J, q: &J) -> Result<()> {
     match incident["phase"].as_str() {
         Some("pending") => agent::begin(root, context, incident)?,
         Some("submitted") => agent::collect(root, context, incident)?,
+        Some("repairing") => repair::advance(root, context, incident)?,
         Some("sending") => {
             incident["phase"] = json!("unavailable");
             incident["next_step"] = json!("Recovery send outcome is unknown; inspect the original recovery session before any retry.");
