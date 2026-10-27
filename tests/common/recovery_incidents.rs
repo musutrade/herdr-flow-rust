@@ -32,6 +32,16 @@ fn recovery_repair_keeps_unknown_control_operations_and_requests_human_verificat
 }
 
 #[test]
+fn recovery_waits_for_control_checkpoint_before_its_only_spawn() {
+    exercise(Mode::ControlBusy);
+}
+
+#[test]
+fn recovery_waits_for_watcher_lock_before_its_only_spawn() {
+    exercise(Mode::WatchBusy);
+}
+
+#[test]
 fn interrupted_recovery_reconciles_the_recorded_watcher_without_spawning_another() {
     exercise(Mode::Reconcile);
 }
@@ -44,17 +54,27 @@ enum Mode {
     Busy,
     Unknown,
     Reconcile,
+    ControlBusy,
+    WatchBusy,
 }
 
 impl Mode {
     fn requests_repair(self) -> bool {
         matches!(
             self,
-            Self::Repair | Self::Busy | Self::Unknown | Self::Reconcile
+            Self::Repair
+                | Self::Busy
+                | Self::Unknown
+                | Self::Reconcile
+                | Self::ControlBusy
+                | Self::WatchBusy
         )
     }
     fn succeeds(self) -> bool {
-        matches!(self, Self::Repair | Self::Reconcile)
+        matches!(
+            self,
+            Self::Repair | Self::Reconcile | Self::ControlBusy | Self::WatchBusy
+        )
     }
 }
 
@@ -131,6 +151,7 @@ fn exercise(mode: Mode) {
     let scratch = env.temp_root.clone();
     let original = util::read_state_json(&coordinator, "receiver-start.json").unwrap();
     let registration = util::read_state_json(&coordinator, "receiver.json").unwrap();
+    let waiting_lock = hold_repair_lock(&coordinator, &guard, mode);
     let unknown = json!({"uncertain":{"phase":"executing","request":{"id":"uncertain"}}});
     if mode == Mode::Unknown {
         util::atomic_write_json(&coordinator.join("control-tools.json"), &unknown).unwrap();
@@ -141,6 +162,36 @@ fn exercise(mode: Mode) {
     } else {
         Some(env)
     };
+    if let Some(lock) = waiting_lock {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let waiting = loop {
+            let status = task_runtime::recovery::status(&coordinator).unwrap();
+            if !status["incident"]["repair_wait"].is_null() {
+                break status["incident"].clone();
+            }
+            assert!(Instant::now() < deadline, "{status}");
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        std::thread::sleep(Duration::from_secs(3));
+        let current = read_incident(&coordinator);
+        assert_eq!(current["id"], waiting["id"]);
+        assert_eq!(current["phase"], "repairing");
+        assert!(current["repair"].is_null());
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "turn/start" && r["params"]["threadId"] == RECOVERY)
+                .count(),
+            1
+        );
+        assert_eq!(
+            util::read_state_json(&guard, "activation.json").unwrap()["pid"],
+            watcher
+        );
+        drop(lock);
+    }
     let checkpoint_pid =
         (mode == Mode::Reconcile).then(|| restart_from_spawn_checkpoint(&coordinator));
     // Deliberately retain the environment lock until the diagnostic result:
@@ -302,6 +353,55 @@ fn exercise(mode: Mode) {
         assert!(calls
             .iter()
             .any(|r| r["method"] == "thread/delete" && r["params"]["threadId"] == session));
+    }
+}
+
+fn hold_repair_lock(coordinator: &Path, guard: &Path, mode: Mode) -> Option<util::FileLock> {
+    let path = match mode {
+        Mode::ControlBusy => coordinator.join("control-service.lock"),
+        Mode::WatchBusy => guard.join("watch.lock"),
+        _ => return None,
+    };
+    if mode == Mode::WatchBusy {
+        // Do not make the old watcher's released lock look held until its
+        // actual outage has been recorded by the independent observer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let incident = read_incident(coordinator);
+            if incident["fault"]["source"] == json!(guard) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{incident}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let held = loop {
+        if let Some(lock) = util::FileLock::acquire(&path, false).unwrap() {
+            break lock;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if mode == Mode::ControlBusy {
+        util::atomic_write_json(
+            &coordinator.join("record-checkpoint.json"),
+            &json!({"phase":"pruning","generation":1,"active":{},"files":{}}),
+        )
+        .unwrap();
+    }
+    Some(held)
+}
+
+fn read_incident(coordinator: &Path) -> J {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = task_runtime::recovery::status(coordinator).unwrap();
+        if status["phase"] != "updating" {
+            return status["incident"].clone();
+        }
+        assert!(Instant::now() < deadline, "{status}");
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 

@@ -1,5 +1,29 @@
 # 独立故障观察与诊断入口
 
+## 检查点与修复动作争锁（2026-10-27）
+
+#152 已合入 main `5c46297`，候选提交的三项 CI 通过，但合并后的
+[Rust checks](https://github.com/musutrade/herdr-flow-rust/actions/runs/40524415526)
+在 `recovery_repairs_only_the_stopped_registered_watcher_then_verifies_and_hands_back`
+失败；CRAP 和依赖审计通过。失败记录为宿主执行前无法取得控制或 watcher 锁，
+修复被记为 `blocked`，夹具随后报告 `recovered`，被宿主正确拒绝。
+旧错误合并了两种锁，不能据此断言该次运行究竟占用哪一个。
+
+累计记录检查点会正常短暂持有 `control-service.lock`。现在，在尚未保存修复执行意图
+时，控制锁、watcher 锁或未完成检查点使原 incident 保持 `repairing`，并保存可查询的
+`repair_wait`。独立观察器后续周期重新核验同一 Owner、登记、进程和原操作；
+等待期间不进入模型复核、不创建 watcher，也不重发原操作。锁释放且检查点完成后，
+才进入原来唯一一次启动。环境锁占用、未决控制操作和身份变化仍按原规则拒绝。
+一旦保存 `repair.phase: executing`，后续只核验已记录的启动结果，不会回到等待分支
+再次启动；未经宿主核验的 `recovered` 仍拒绝。
+
+新增协议回归分别持续持有控制锁和 watcher 锁，控制锁场景同时保留 `pruning`
+检查点。跨观察周期核查 incident 不变、没有修复意图、只有一次诊断输入且 activation
+仍是原 PID；释放后验证实际新 watcher、一次同会话复核和交接，以及最终资源回收。
+watcher 锁夹具先等待原故障登记，避免它自己持锁影响原故障识别；初版夹具未做到这点，
+导致观察器转而诊断未启动的队列 watcher，该次测试失败保留，不计为通过。
+这些是协议与进程测试；真实模型 / Herdr 证据仍以下方 #151 的范围为准。
+
 ## PR #151 的真实模型 / Herdr 修复动作验收（2026-10-27）
 
 PR #151 的 `bf42d51` 已通过 Rust checks、CRAP gate 和依赖审计；这些 CI 结果仍是
