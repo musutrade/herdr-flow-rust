@@ -296,8 +296,17 @@ fn control_queue_never_grants_old_or_closing_owners_access() {
     assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
     env.instance_id = saved_instance;
     task_runtime::native::create(&env, &root, &create_spec(&f)).unwrap();
+    let owner = task_env::isolation::owner(&env).unwrap();
+    let held = lifecycle::write_permit(&owner).unwrap();
     drop(env);
-    f.finalize("failure").unwrap();
+    let before = f.state();
+    let error = f.finalize("failure").unwrap_err();
+    assert_eq!(error.kind, herdr_flow::ErrorKind::StateBusy);
+    assert_eq!(f.state(), before);
+    drop(held);
+    // The live broker may briefly hold another shared action permit. Retry
+    // only the established pre-mutation contention, not an unknown outcome.
+    upstream_runtime::finalize_with_retry(&f);
     let env = task_env::restore_environment("task").unwrap();
     assert!(task_runtime::native::create(&env, &root, &create_spec(&f)).is_err());
     assert!(task_runtime::native::recover(&env, &root).is_err());

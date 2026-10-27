@@ -114,6 +114,9 @@ impl Direction {
 
 fn selected_runtime(message: &J, runtime: &J) -> Result<()> {
     let params = &message["params"];
+    if runtime["recovery_role"] == true {
+        readonly_recovery(params)?;
+    }
     for (key, expected) in [
         ("cwd", &runtime["cwd"]),
         ("model", &runtime["model"]["id"]),
@@ -131,6 +134,22 @@ fn selected_runtime(message: &J, runtime: &J) -> Result<()> {
     ensure(
         params["config"].is_null(),
         "native task configuration is fixed by the task runtime",
+    )
+}
+
+fn readonly_recovery(params: &J) -> Result<()> {
+    ensure(
+        params["permissions"].is_null(),
+        "recovery cannot switch permission profiles",
+    )?;
+    ensure(
+        params["sandbox"].is_null() || params["sandbox"] == "read-only",
+        "recovery cannot acquire a workspace writer through the TUI",
+    )?;
+    ensure(
+        params["sandboxPolicy"].is_null()
+            || params["sandboxPolicy"] == json!({"type":"readOnly","networkAccess":false}),
+        "recovery sandbox is read-only; writing requires a separate authorized handoff",
     )
 }
 
@@ -296,6 +315,24 @@ mod tests {
         let mut request = valid;
         request["params"]["collaborationMode"]["settings"]["model"] = json!("other");
         assert!(selected_runtime(&request, &runtime).is_err());
+    }
+    #[test]
+    fn recovery_input_keeps_its_readonly_role() {
+        let runtime = json!({"recovery_role":true});
+        selected_runtime(&json!({"params":{}}), &runtime).unwrap();
+        selected_runtime(
+            &json!({"params":{"sandbox":"read-only",
+            "sandboxPolicy":{"type":"readOnly","networkAccess":false}}}),
+            &runtime,
+        )
+        .unwrap();
+        for params in [
+            json!({"sandbox":"workspace-write"}),
+            json!({"sandboxPolicy":{"type":"workspaceWrite","writableRoots":["/task"]}}),
+            json!({"sandboxPolicy":{"type":"readOnly","networkAccess":true}}),
+        ] {
+            assert!(selected_runtime(&json!({"params":params}), &runtime).is_err());
+        }
     }
     #[test]
     fn refusal_keeps_connection_usable_for_owned_turn() {

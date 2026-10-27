@@ -205,6 +205,20 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
     assert_eq!(open(&env, &root).unwrap(), ready);
     assert_eq!(status(&env, &root).unwrap()["processes_alive"], true);
     assert_eq!(obligations(&env).unwrap(), vec![ready.clone()]);
+    recovery_notice(&root, &runtime, "recovery result ready").unwrap();
+    let owner = crate::lifecycle::Owner {
+        queue_root: temp.path().join("queue"),
+        queue_id: "fixture".into(),
+        task_id: env.task_id.clone(),
+        epoch: 1,
+        instance_id: env.instance_id.clone(),
+    };
+    let mut recovery_runtime = runtime.clone();
+    assert!(verify_recovery_runtime(&root, &recovery_runtime, &owner).is_err());
+    recovery_runtime["recovery_role"] = json!(true);
+    verify_recovery_runtime(&root, &recovery_runtime, &owner).unwrap();
+    recovery_runtime["start_time"] = json!(0);
+    assert!(verify_recovery_runtime(&root, &recovery_runtime, &owner).is_err());
     {
         use crate::codex::tui::BridgePolicy;
         let mut policy = protocol::Policy::new(record.clone(), runtime.clone());
@@ -250,6 +264,7 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
     util::atomic_write_json(&directory.join("tui.json"), &marker).unwrap();
     server.state.lock().unwrap()["pane"]["agent_session"]["value"] = json!("user-session");
     assert!(close(&env, &root).is_err());
+    assert!(recovery_notice(&root, &runtime, "recovery pending").is_err());
     assert_eq!(server.state.lock().unwrap()["present"], true);
     server.state.lock().unwrap()["pane"]["agent_session"]["value"] = json!("owned");
 

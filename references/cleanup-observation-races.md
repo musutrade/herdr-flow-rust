@@ -1,5 +1,18 @@
 # Cleanup observation races — 2026-10-26
 
+## Additional closing-owner fixture race (2026-10-27)
+
+The first full recovery-feature coverage run reproduced `StateBusy` at
+`control_queue_never_grants_old_or_closing_owners_access`: the fixture unwrapped
+its first `finalize` while the live broker could still hold a shared lifecycle
+action permit. The finalizer correctly refused its exclusive transition before
+mutating task state. The test now explicitly holds a shared permit, requires
+`StateBusy` and unchanged queue state, releases it, and uses the existing bounded
+retry for that precise contention before checking that closing owners cannot
+create/recover runtimes. Production locks and timeouts are unchanged. The failed
+coverage attempt remains a failure; this does not resolve the separate historical
+Git reply-loss timeout described below.
+
 This supplements #130/#38. Full reclamation and preservation of unrelated user
 processes/assets remain simultaneous requirements. No login, configuration,
 provider, billing, proxy, installed entrypoint or existing watcher is changed.

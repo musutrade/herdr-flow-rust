@@ -550,7 +550,7 @@ fn complete_review_delivery(
     );
 }
 
-fn parallel(
+pub(super) fn parallel(
     count: usize,
     run: impl Fn(rpc_server::Peer) + Send + Sync + 'static,
 ) -> rpc_server::Server {

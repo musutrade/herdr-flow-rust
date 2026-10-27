@@ -1,5 +1,13 @@
 # Team configuration
 
+Current recovery-role mapping (2026-10-27): `roles.recovery` accepts the same
+explicit `agent`, `model`, and `reasoning_effort` fields as the other roles.
+The coordinator resolves it into `role_models.recovery` in the native launch
+spec, with the existing upstream `providerID`. Missing configuration is reported
+as `not_configured`; another role's model is never substituted. A separate
+observer and session are prepared at activation; only an observed incident starts
+a recovery model turn. See [recovery operation and limits](recovery-agent.md).
+
 Before assigning work, read the user defaults at
 `${XDG_CONFIG_HOME:-~/.config}/herdr-issue-flow/config.toml`, then the repository's
 `.herdr-issue-flow.toml` if present. Explicit task instructions take precedence.

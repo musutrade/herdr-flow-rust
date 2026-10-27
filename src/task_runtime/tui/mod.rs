@@ -124,15 +124,54 @@ fn binding(root: &Path) -> Result<Option<J>> {
 pub fn open(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let runtime = runtime(env, root)?;
-    let _lock = presentation_lock(root)?;
-    if let Some(previous) = existing_attachment(root, &runtime)? {
-        // Reconcile an existing attempt, never issue a second pane/run.
-        return await_ready(root, &runtime, previous);
+    open_bound(root, &runtime)
+}
+
+/// The recovery session was registered before primary work started. Opening
+/// its presentation must not require the environment lock held by a stuck
+/// primary operation. The same live Owner, broker and pane checks still apply.
+pub(in crate::task_runtime) fn open_recovery(root: &Path) -> Result<J> {
+    let permit = crate::lifecycle::runtime_permit(root)?
+        .ok_or_else(|| FlowError::guard("recovery presentation requires a task Owner"))?;
+    let runtime = util::read_state_json_bounded(root, "runtime.json", 1024 * 1024)?;
+    verify_recovery_runtime(root, &runtime, permit.owner())?;
+    if runtime.get("native_tui").is_none() {
+        return Ok(json!({"phase":"not_configured"}));
     }
-    let record = reserve_attachment(root, &runtime)?;
-    let record = split_pane(root, &runtime, record)?;
-    launch_frontend(&runtime, &record)?;
-    await_ready(root, &runtime, record)
+    upstream::endpoint(&runtime)?;
+    open_bound(root, &runtime)
+}
+
+fn verify_recovery_runtime(
+    root: &Path,
+    runtime: &J,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    ensure(
+        runtime["recovery_role"] == true
+            && runtime["root"] == json!(root)
+            && util::resolve_path(root) == root,
+        "recovery presentation runtime changed",
+    )?;
+    let pid = runtime["pid"].as_u64().unwrap_or(0) as i32;
+    ensure(
+        crate::task_env::process_has_marker(pid, &owner.instance_id)
+            && !runtime["start_time"].is_null()
+            && runtime["start_time"] == json!(crate::task_env::process_start_time(pid)),
+        "recovery presentation broker identity changed",
+    )
+}
+
+fn open_bound(root: &Path, runtime: &J) -> Result<J> {
+    let _lock = presentation_lock(root)?;
+    if let Some(previous) = existing_attachment(root, runtime)? {
+        // Reconcile an existing attempt, never issue a second pane/run.
+        return await_ready(root, runtime, previous);
+    }
+    let record = reserve_attachment(root, runtime)?;
+    let record = split_pane(root, runtime, record)?;
+    launch_frontend(runtime, &record)?;
+    await_ready(root, runtime, record)
 }
 
 fn existing_attachment(root: &Path, runtime: &J) -> Result<Option<J>> {
@@ -375,6 +414,26 @@ pub fn status(env: &TaskEnvironment, root: &Path) -> Result<J> {
         }
     }
     Ok(record)
+}
+
+pub(in crate::task_runtime) fn recovery_notice(
+    root: &Path,
+    runtime: &J,
+    message: &str,
+) -> Result<()> {
+    if runtime.get("native_tui").is_none() {
+        return Ok(());
+    }
+    let record = binding(root)?.ok_or_else(|| FlowError::guard("task pane not opened"))?;
+    validate_binding(runtime, &record)?;
+    ensure(herdr::pane(&record)?.is_some(), "task pane missing")?;
+    herdr::call(
+        &record,
+        "pane.rename",
+        json!({"pane_id":record["pane"],
+        "label":format!("flow:{} · {message}", root.file_name().unwrap_or_default().to_string_lossy())}),
+    )?;
+    Ok(())
 }
 
 pub fn close(env: &TaskEnvironment, root: &Path) -> Result<J> {

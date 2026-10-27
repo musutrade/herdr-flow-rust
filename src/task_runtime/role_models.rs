@@ -35,11 +35,18 @@ pub(super) fn validate(spec: &J) -> Result<()> {
         .as_object()
         .ok_or_else(|| FlowError::guard("role_models must be an object"))?;
     ensure(
-        fields.len() == 2 && fields.contains_key("developer") && fields.contains_key("reviewer"),
-        "role_models requires exactly developer and reviewer",
+        fields.contains_key("developer")
+            && fields.contains_key("reviewer")
+            && fields
+                .keys()
+                .all(|k| ["developer", "reviewer", "recovery"].contains(&k.as_str())),
+        "role_models requires developer/reviewer and accepts an explicit recovery model",
     )?;
     for role in ["developer", "reviewer"] {
         validate_model(&models[role])?;
+    }
+    if let Some(model) = models.get("recovery") {
+        validate_model(model)?;
     }
     Ok(())
 }

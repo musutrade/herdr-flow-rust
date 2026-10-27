@@ -112,8 +112,14 @@ pub fn activate(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let mut child = spawn_watch(env, &guard, spec, permit.as_deref())?;
     drop(lock);
     await_watch(&guard, &mut child)?;
-    let result = json!({"phase":"active","pid":child.id(),"session":state["session"],
+    let mut result = json!({"phase":"active","pid":child.id(),"session":state["session"],
         "safe_rotation":false,"context_telemetry":false});
+    result["recovery"] = match crate::task_runtime::recovery::start(env, root) {
+        Ok(value) => value,
+        Err(error) => {
+            json!({"phase":"unavailable","error":error.to_string(),"replay_allowed":false})
+        }
+    };
     util::atomic_write_json(&guard.join("activation.json"), &result)?;
     Ok(result)
 }
@@ -165,7 +171,7 @@ pub(super) fn spawn_watch(
     Ok(child)
 }
 
-pub(super) fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
+pub(in crate::task_runtime) fn await_watch(guard: &Path, child: &mut Child) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         ensure(

@@ -589,7 +589,7 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
         "Codex turn already attempted; reconcile without replay",
     )?;
     verify_native(root, state)?;
-    let mut turn = json!({"phase":"sending","session":state["session"],"binding":journal["packet"]["binding"],"created_at":util::now(),"deadline":util::now()+600.0});
+    let mut turn = json!({"phase":"sending","session":state["session"],"binding":journal["packet"]["binding"],"created_at":util::now()});
     util::atomic_write_json(&root.join("turn.json"), &turn)?;
     let mut connection = client(root)?;
     let result = connection.call(
@@ -639,8 +639,18 @@ fn collect_codex(root: &Path, state: &J) -> Result<J> {
     verify_queue(&q, &creation, state)?;
     let mut journal = util::read_state_json(root, "turn.json")?;
     verify_turn(&journal, &creation, state)?;
-    observe_codex(root, state, &mut journal)?;
+    observe_and_record(root, state, &mut journal)?;
     publish_codex(root, &queue_root, state, &creation, journal)
+}
+fn observe_and_record(root: &Path, state: &J, journal: &mut J) -> Result<()> {
+    if let Err(error) = observe_codex(root, state, journal) {
+        journal["observation_error"] = json!({"kind":error.kind.type_name(),
+            "message":error.to_string(),"observed_at":util::now()});
+        util::atomic_write_json(&root.join("turn.json"), journal)?;
+        return Err(error);
+    }
+    journal.as_object_mut().unwrap().remove("observation_error");
+    Ok(())
 }
 fn verify_turn(journal: &J, creation: &J, state: &J) -> Result<()> {
     ensure(
@@ -759,13 +769,14 @@ fn update_codex(journal: &mut J, actual: Option<&J>, state: &J) -> Result<()> {
         Some("failed") => journal["outcome"] = json!("failed"),
         Some("interrupted") => journal["outcome"] = json!("decision"),
         _ => {
-            journal["phase"] = json!(
-                if util::now() >= journal["deadline"].as_f64().unwrap_or(0.0) {
-                    "timed_out"
-                } else {
-                    "pending"
-                }
-            );
+            // A turn can legitimately run for hours. Legacy deadline fields
+            // are historical metadata, never evidence of failure or permission
+            // to interrupt/replay the operation.
+            journal["phase"] = json!(if turn["status"] == "inProgress" {
+                "pending"
+            } else {
+                "unknown"
+            });
             return Ok(());
         }
     }
@@ -971,7 +982,7 @@ mod tests {
         assert!(find_turn(&json!({}), &json!("t")).is_err());
     }
     #[test]
-    fn codex_partial_blocked_timeout_and_terminal_outcomes_are_distinct() {
+    fn codex_long_running_unknown_blocked_and_terminal_outcomes_are_distinct() {
         let state = json!({"cwd":"/unused"});
         for (status, outcome) in [
             ("completed", "complete"),
@@ -990,7 +1001,14 @@ mod tests {
         assert!(j["outcome"].is_null());
         j["deadline"] = json!(0);
         update_codex(&mut j, Some(&json!({"status":"inProgress"})), &state).unwrap();
-        assert_eq!(j["phase"], "timed_out");
+        assert_eq!(j["phase"], "pending");
+        assert!(j["outcome"].is_null());
+        j["phase"] = json!("timed_out");
+        update_codex(&mut j, Some(&json!({"status":"inProgress"})), &state).unwrap();
+        assert_eq!(j["phase"], "pending");
+        update_codex(&mut j, Some(&json!({"status":"unrecognized"})), &state).unwrap();
+        assert_eq!(j["phase"], "unknown");
+        assert!(j["outcome"].is_null());
         assert!(approval_pending(
             &json!({"status":{"activeFlags":["waitingOnApproval"]}})
         ));
