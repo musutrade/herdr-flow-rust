@@ -1,5 +1,65 @@
 # 独立故障观察与诊断入口
 
+## PR #151 的真实模型 / Herdr 修复动作验收（2026-10-27）
+
+PR #151 的 `bf42d51` 已通过 Rust checks、CRAP gate 和依赖审计；这些 CI 结果仍是
+协议夹具证据。本轮在同一实现上新增显式启用的真实修复用例，复用已有上游服务、
+角色模型与 Herdr 原生 TUI，不修改生产恢复协议。
+
+最终同进程串行复验 **2 通过、0 失败，157.48 秒**：使用 Herdr 0.9.5 客户端、
+Codex 0.164.0，协调者和恢复角色分别显式配置 `gpt-6.1-sol/high`。持锁场景中，
+真实模型请求修复，宿主记录 `blocked: environment busy`，同会话复核为 `needs_human`；
+释放锁的场景中，宿主恢复实际 watcher，同会话复核为 `recovered`，Herdr 中显示
+对应 incident 与新 PID，原协调者收到一次交接并保持等待。两个场景的配置字节检查均通过。
+
+独立回收核查覆盖本轮全部尝试的 **4 个任务、8 个会话、8 个窗格、18 个登记进程**；
+六个共享 SQLite 库中的 **17 类关联均无任务记录**。任务进程（含实例标记进程）、
+worktree、工作/临时根、rollout、shell snapshot 和 50 个 Herdr 保存/快照文件均无
+本任务残留。三个原有窗格的 terminal/tab/workspace 绑定、既有会话绑定与共享服务身份
+保持不变；最终复验前后的 Codex 配置、会话 `.env`、Cargo/curl/wget 配置哈希一致。
+验收驱动器只读比较这些配置，未手动回写或替换。任务外的验收夹具、临时原始记录和审计快照在核查后清理，
+不建立永久任务证据库。
+
+同轮六项恢复协议回归 **6 通过、0 失败，110.24 秒**；fmt、lint-policy、
+全 targets/features Clippy 和差异空白检查通过。生产源码未改动；此处不把 `bf42d51`
+的远端 CI 结果冒称为新增验收代码已经通过远端 CI。
+
+```sh
+# 只运行成功修复场景
+cargo test --locked --test lifecycle_authority \
+  recovery_live::stopped_watcher_real_repair_verification_handoff_and_cleanup \
+  -- --exact --ignored --nocapture
+
+# 连同保留环境锁的诊断场景串行运行
+cargo test --locked --test lifecycle_authority recovery_live:: \
+  -- --ignored --nocapture --test-threads=1
+```
+
+环境参数沿用下文真实诊断入口：显式提供已有 socket、协调者及 recovery 角色模型、
+匹配的原生二进制、Herdr session store 和只读配置校验路径。普通 CI 不调用真实模型。
+
+成功修复场景精确停止私有任务已登记的 receiver watcher，并释放驱动器持有的环境锁。
+恢复模型必须自行请求 `restart_receiver_watch`；宿主核验后产生新 PID/start ticks，
+再由同一恢复会话给出 `recovered`，最后交回原协调者。验收检查新 watcher 的健康状态、
+任务进程登记、activation 与同一 session 的绑定；原启动记录、receiver 登记和原 turn
+保持不变。恢复会话恰有诊断与复核两个 turn，协调会话恰有初始输入与交接两个 turn。
+Herdr 的独立 tab 必须显示对应 incident、`recovered` 和新 PID，不能只凭早期诊断画面通过。
+
+持锁场景保持原诊断边界：允许模型直接报告证据不足，也允许请求修复后由宿主拒绝并
+复核，但不得创建新 watcher。两个场景都检查最终业务状态未提前改变；驱动器随后
+显式选择最终失败以收尾，核查所属进程、两个任务根、worktree、登记与队列任务回收。
+配置字节比较继续是硬断言；诊断、修复或驱动器收尾均不代表业务成功交付。
+
+首次成功修复链路在 **121.81 秒**结束，但配置比较失败，因此整条验收记为失败。
+只读核对确认 `config.toml` 的唯一变化是 `model_reasoning_effort: max → xhigh`；
+没有本次任务 trust 条目，其他受保护配置哈希不变。期间另一个既有窗格启动了 Codex，
+变化来源尚不能确定；没有回写用户配置，也没有放宽断言，后续以保留的当前设置重新验收。
+
+首次串行运行中，持锁场景通过后，第二条用例被夹具自身的锁泄漏阻塞，尚未创建第二个
+任务。旧 `ManuallyDrop<Fixture>` 同时泄漏测试锁和 registry 环境覆盖；现改用
+`TempDir::disable_cleanup(true)` 仅保留待核查的证据目录，让 Fixture 正常析构。
+确认前一个任务已回收后，仅停止该验收驱动进程。此轮不计为两条通过；原始失败事实保留。
+
 ## 受管 watcher 恢复与复核（2026-10-27，当前开发增量）
 
 PR #147 已合入 main `5ae45a1`。本轮继续 #130 的异常处理通路：恢复角色在只读诊断后，
@@ -46,7 +106,7 @@ PR #147 已合入 main `5ae45a1`。本轮继续 #130 的异常处理通路：恢
 定向验证：首轮 14 项恢复模块单元回归通过；5 项独立进程协议回归通过（97.84 秒），覆盖正常诊断、
 模型失败、实际 watcher 重启及复核、环境锁占用、未决控制操作保留，以及两个会话和任务资源
 回收。协议回归运行真实 observer、broker 和 watcher，上游模型输出为夹具；最终失败由夹具
-显式选择用于收尾，不冒称业务成功。本轮尚无新增真实模型 / Herdr 修复动作验收，下面的
+显式选择用于收尾，不冒称业务成功。此协议基线当时尚无新增真实模型 / Herdr 修复动作验收，下面的
 109.26 秒诊断及 81.27 秒 tab 证据保持原覆盖范围。
 
 随后新增中断接续复验 **20.33 秒通过**：watcher 已启动、复核尚未发送时停止本次 observer，
