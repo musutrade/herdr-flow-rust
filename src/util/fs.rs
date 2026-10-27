@@ -36,14 +36,6 @@ pub fn read_json(path: &Path) -> Result<Value> {
     })
 }
 
-pub fn read_json_if_exists(path: &Path) -> Result<Option<Value>> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(Some(read_json(path)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Python `Path.resolve(strict=False)`: absolute, symlink-aware for the
 /// existing prefix, lexically normalized for the rest.
 pub fn resolve_path(path: &Path) -> PathBuf {

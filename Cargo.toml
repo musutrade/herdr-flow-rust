@@ -2,7 +2,6 @@
 name = "herdr-flow"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
 description = "Bounded agent sessions, durable handoffs, and read-only CI observation for Herdr"
 readme = "README.md"
 
@@ -16,8 +15,6 @@ sha1 = "0.11"
 sha2 = "0.11"
 tempfile = "3"
 syn = { version = "3", features = ["full", "visit"] }
-ureq = { version = "3.4.2", default-features = false, features = ["json"] }
-base64 = "0.23"
 
 [profile.release]
 lto = true

@@ -18,7 +18,6 @@ fn entrypoint_covers_help_version_and_all_dispatches() {
         "guard",
         "tui",
         "advisor",
-        "opencode",
         "crap",
         "lint-policy",
     ] {

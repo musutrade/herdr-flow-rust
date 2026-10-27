@@ -568,15 +568,15 @@ mod identity_tests {
     #[test]
     fn command_claim_checks_takeover_identity_and_records_writer_adapter() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = json!({"tasks":{},"waits":{"w":{"producer":{"adapter":"opencode","session":"sesworker"}}}});
+        let mut s = json!({"tasks":{},"waits":{"w":{"producer":{"adapter":"codex","session":"sesworker"}}}});
         let mut t = json!({"task":"d","wait":"w","assignment":"a"});
         assert!(claim_accept_next(&mut s, &t, "other", "evidence").is_err());
         claim_reserve_writer(&mut s, &mut t, dir.path().to_str().unwrap(), "sesworker").unwrap();
-        assert_eq!(t["writer"]["producer"]["adapter"], "opencode");
+        assert_eq!(t["writer"]["producer"]["adapter"], "codex");
     }
     #[test]
     fn managed_commands_require_the_adapter_qualified_session() {
-        let wait = json!({"producer":{"adapter":"opencode","session":"sesworker"}});
+        let wait = json!({"producer":{"adapter":"codex","session":"sesworker"}});
         assert!(ensure_producer_matches(&wait, "sesworker").is_ok());
         assert!(ensure_producer_matches(&wait, "other").is_err());
         assert!(ensure_producer_matches(&json!({}), "sesworker").is_err());

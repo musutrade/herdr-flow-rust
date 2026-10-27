@@ -1,5 +1,8 @@
 # Architecture and flows
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 The explicit [GitHub Actions lane policy](actions-batching.md) reuses the bounded
 lane with PR-head and merge-main workflow/job checks. The trusted Gate/App
 requirements below remain specific to Gate mode; modes are never mixed or

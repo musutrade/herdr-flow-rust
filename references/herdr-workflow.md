@@ -1,5 +1,8 @@
 # Herdr 工作流边界与最小验收
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 ## 当前职责（2026-10-26，覆盖下方历史拓扑要求）
 
 herdr-flow 自己管理任务实例、专属 Git worktree、受管进程与收尾；Herdr 仅为

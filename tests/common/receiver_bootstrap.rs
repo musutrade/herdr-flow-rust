@@ -1,6 +1,6 @@
 //! Synthetic native protocol through the real task-owned broker; no models.
 use super::*;
-use herdr_flow::{guard, herdr, opencode::session, runtime, util};
+use herdr_flow::{guard, herdr, identity, runtime, util};
 use task_runtime::native::receiver;
 
 fn start(env: &mut TaskEnvironment, control: &J) -> std::path::PathBuf {
@@ -8,20 +8,10 @@ fn start(env: &mut TaskEnvironment, control: &J) -> std::path::PathBuf {
     let cwd = env.workspace_root.clone();
     let binary = fixture_binary(&root, &cwd, 0);
     util::atomic_write_json(&root.join("receiver-fixture.json"), control).unwrap();
-    // Synthetic server, deliberately independent of host namespace support.
-    let spec = json!({"adapter":"opencode","binary":binary,"cwd":cwd,"port":1,
-        "model":{"providerID":"openai","id":"fixture"}});
+    let spec = json!({"adapter":"codex","configuration":"isolated-fixture","binary":binary,"cwd":cwd,
+        "driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),"model":{"providerID":"openai","id":"fixture"}});
     let mut child = task_runtime::launch(env, &root, &spec).unwrap();
     fixture_ready(&root, &mut child);
-    let mut record = util::read_json(&root.join("runtime.json")).unwrap();
-    record["adapter"] = json!("codex");
-    util::atomic_write_json(&root.join("runtime.json"), &record).unwrap();
-    task_runtime::start_broker(
-        env,
-        &root,
-        &json!({"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")}),
-    )
-    .unwrap();
     root
 }
 
@@ -197,7 +187,7 @@ fn bootstrap_never_borrows_ambient_session_or_becomes_ready() {
     assert!(!g.join("watch.json").exists());
     let ambient = std::env::var_os("CODEX_THREAD_ID");
     std::env::set_var("CODEX_THREAD_ID", "unrelated-ambient-session");
-    let session_result = session::receiver_session(&q);
+    let session_result = identity::receiver_session(&q);
     if let Some(value) = ambient {
         std::env::set_var("CODEX_THREAD_ID", value);
     } else {
@@ -264,12 +254,6 @@ fn bootstrap_scope_binds_native_identity_without_changing_legacy_scopes() {
         changed[key] = json!("changed");
         assert_ne!(guard::scope(&changed), scope, "{key}");
     }
-    state["adapter"] = json!("opencode");
-    state["endpoint"] = json!("http://127.0.0.1:1");
-    state["server_version"] = json!("1.19.4");
-    let scope = guard::scope(&state);
-    assert!(scope.get("codex_runtime").is_none());
-    assert_eq!(scope["opencode"]["session"], "session");
 }
 
 #[test]

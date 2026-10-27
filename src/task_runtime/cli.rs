@@ -1,7 +1,10 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|launch|create|receiver-bootstrap|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\nUses an existing owned task environment; never attaches to a shared server.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
+    if let Some(result) = special(args) {
+        return result;
+    }
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
     let options = parse_options(&args[1..])?;
     let task = options
@@ -20,10 +23,31 @@ fn run(args: &[String]) -> Result<J> {
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
 }
+fn special(args: &[String]) -> Option<Result<J>> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "configuration-status")
+    {
+        return Some(configuration_status(args));
+    }
+    match args {
+        [action, option, path] if action == "receiver-watch" && option == "--state-dir" => {
+            Some(native::receiver::active::watch(Path::new(path)).map(|_| json!({"stopped":true})))
+        }
+        _ => None,
+    }
+}
+
+fn configuration_status(args: &[String]) -> Result<J> {
+    match args {
+        [_, option, adapter] if option == "--adapter" => configuration::status(adapter),
+        _ => Err(FlowError::usage(USAGE)),
+    }
+}
 fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &str>> {
     let mut options = std::collections::BTreeMap::new();
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = args.as_chunks::<2>();
+    for pair in pairs {
         ensure(
             ["--task", "--state-dir", "--spec"].contains(&pair[0].as_str()),
             USAGE,
@@ -33,25 +57,45 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &st
             "duplicate runtime option",
         )?;
     }
-    ensure(pairs.remainder().is_empty(), USAGE)?;
+    ensure(remainder.is_empty(), USAGE)?;
     Ok(options)
 }
 
 fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     match action {
         "prepare" => Ok(json!({"root":prepare(env,&required(spec,"assignment")?)?})),
+        "review-snapshot" => review::prepare(env, root, spec),
         "launch" => {
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }
+        "status" => status::status(env, root),
+        _ => native_action(action, env, root, spec),
+    }
+}
+fn native_action(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    match action {
         "create" => native::create(env, root, spec),
-        "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
         "recover" => native::recover(env, root),
         "dispatch" => native::dispatch(env, root),
         "collect" => native::collect(env, root),
-        "status" => status::status(env, root),
+        _ => receiver_action(action, env, root, spec),
+    }
+}
+
+fn receiver_action(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    match action {
+        "receiver-bootstrap" => native::receiver::bootstrap(env, root, spec),
+        "receiver-start" => native::receiver::start(env, root, spec),
+        "receiver-activate" => native::receiver::active::activate(env, root, spec),
+        "receiver-recover" => native::receiver::recovery::recover(env, root, spec),
+        "broker-recover" => {
+            start_broker(env, root, spec)?;
+            verify(env, root)
+        }
         _ => Err(FlowError::usage(USAGE)),
     }
 }
+
 pub fn cli(args: &[String]) -> i32 {
     if args.iter().any(|v| v == "--help" || v == "-h") {
         println!("{USAGE}");
@@ -92,6 +136,17 @@ mod tests {
             );
         }
         assert_eq!(cli(&["--help".into()]), 0);
+        {
+            let adapter = "codex";
+            let report = run(&[
+                "configuration-status".into(),
+                "--adapter".into(),
+                adapter.into(),
+            ])
+            .unwrap();
+            assert_eq!(report["supported"], adapter == "codex");
+        }
+        assert!(run(&["configuration-status".into()]).is_err());
     }
 }
 
@@ -160,6 +215,10 @@ mod lifecycle_tests {
             "launch",
             "create",
             "receiver-bootstrap",
+            "receiver-start",
+            "receiver-activate",
+            "receiver-recover",
+            "broker-recover",
             "recover",
             "dispatch",
             "collect",

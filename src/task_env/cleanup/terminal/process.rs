@@ -23,15 +23,19 @@ fn gone(pid: i32) -> io::Result<bool> {
     Ok(signals::open(pid)?.is_none())
 }
 fn stat(pid: i32) -> io::Result<Option<(ProcessRecord, i32, bool)>> {
-    #[cfg(test)]
-    faults::check(pid, false)?;
-    let text = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+    let text = match read_stat(pid) {
         Ok(v) => v,
-        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(None),
+        Err(e) if observation::missing_proc(&e) && gone(pid)? => return Ok(None),
         Err(e) => return Err(e),
     };
     parse_stat(pid, &text)
 }
+fn read_stat(pid: i32) -> io::Result<String> {
+    #[cfg(test)]
+    faults::check(pid, false)?;
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+}
+
 fn marker(pid: i32, instance: &str) -> io::Result<Option<bool>> {
     #[cfg(test)]
     faults::check(pid, true)?;
@@ -39,7 +43,7 @@ fn marker(pid: i32, instance: &str) -> io::Result<Option<bool>> {
     let mut bytes = Vec::new();
     let result = fs::File::open(path).and_then(|f| f.take(1024 * 1024 + 1).read_to_end(&mut bytes));
     match result {
-        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(None),
+        Err(e) if observation::missing_proc(&e) && gone(pid)? => return Ok(None),
         Err(e) => return Err(e),
         Ok(_) => (),
     }
@@ -235,7 +239,12 @@ fn observe_entry(plan: &CleanupState, floor: u64, pid: i32, path: &Path) -> Resu
     if !same_uid_process(pid, path)? {
         return Ok(None);
     }
-    let Some((record, parent, dead)) = stat(pid)? else {
+    let Some((record, parent, dead)) = stat(pid).map_err(|error| {
+        FlowError::io(format!(
+            "cannot observe cleanup stat for pid {pid}: {error}"
+        ))
+    })?
+    else {
         return Ok(None);
     };
     if dead {
@@ -257,8 +266,12 @@ fn observe_entry(plan: &CleanupState, floor: u64, pid: i32, path: &Path) -> Resu
 fn same_uid_process(pid: i32, path: &Path) -> Result<bool> {
     let metadata = match fs::metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound && gone(pid)? => return Ok(false),
-        Err(e) => return Err(e.into()),
+        Err(e) if observation::missing_proc(&e) && gone(pid)? => return Ok(false),
+        Err(e) => {
+            return Err(FlowError::io(format!(
+                "cannot observe cleanup uid for pid {pid}: {e}"
+            )))
+        }
     };
     // Positive foreign UID evidence only. Same-UID permission/read errors
     // are not interpreted as a negative marker match.
@@ -269,20 +282,40 @@ fn same_uid_process(pid: i32, path: &Path) -> Result<bool> {
 }
 
 fn stable_marker(record: &ProcessRecord, instance: &str) -> Result<Option<bool>> {
-    let Some(marked) = marker(record.pid, instance)? else {
-        return Ok(None);
-    };
+    // Namespace/credential transitions can briefly deny environ reads. Retry
+    // only that error, with an unchanged PID/start identity on every attempt.
+    for attempt in 0..5 {
+        match marker_observation(record, instance) {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && attempt < 4 => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                return result.map_err(|error| {
+                    FlowError::io(format!(
+                        "cannot observe cleanup marker for pid {} start {:?}: {error}",
+                        record.pid, record.start_time
+                    ))
+                })
+            }
+        }
+    }
+    unreachable!("the final attempt always returns")
+}
+
+fn marker_observation(record: &ProcessRecord, instance: &str) -> io::Result<Option<bool>> {
+    let observed = marker(record.pid, instance);
     let Some((after, _, dead)) = stat(record.pid)? else {
         return Ok(None);
     };
-    require(
-        *record == after,
-        "process identity changed during observation; retry",
-    )?;
+    if *record != after {
+        return Err(invalid(
+            "process identity changed during observation; retry",
+        ));
+    }
     if dead {
         return Ok(None);
     }
-    Ok(Some(marked))
+    observed
 }
 
 fn freeze_registered(plan: &mut CleanupState) -> Result<()> {
@@ -387,8 +420,12 @@ fn freeze_round(plan: &mut CleanupState) -> Result<bool> {
 }
 #[cfg(test)]
 pub(super) mod faults {
-    use std::{cell::RefCell, io};
+    use std::{
+        cell::{Cell, RefCell},
+        io,
+    };
     thread_local! {static FAULT:RefCell<Option<(i32,bool,i32)>>=const{RefCell::new(None)};}
+    thread_local! {static REMAINING:Cell<usize>=const{Cell::new(usize::MAX)};}
     thread_local! {static STOP_READY:RefCell<Option<std::path::PathBuf>>=const{RefCell::new(None)};}
     pub fn pause_after_freeze(path: std::path::PathBuf) {
         STOP_READY.with(|slot| *slot.borrow_mut() = Some(path));
@@ -413,10 +450,26 @@ pub(super) mod faults {
         });
         Guard
     }
+    pub fn inject_times(pid: i32, environ: bool, errno: i32, count: usize) -> Guard {
+        let guard = inject(pid, environ, errno);
+        REMAINING.with(|remaining| remaining.set(count));
+        guard
+    }
+    pub fn remaining() -> usize {
+        REMAINING.with(Cell::get)
+    }
     pub(super) fn check(pid: i32, environ: bool) -> io::Result<()> {
         FAULT.with(|f| match *f.borrow() {
             Some((p, e, errno)) if p == pid && e == environ => {
-                Err(io::Error::from_raw_os_error(errno))
+                REMAINING.with(|remaining| match remaining.get() {
+                    0 => Ok(()),
+                    count => {
+                        if count != usize::MAX {
+                            remaining.set(count - 1);
+                        }
+                        Err(io::Error::from_raw_os_error(errno))
+                    }
+                })
             }
             _ => Ok(()),
         })
@@ -424,6 +477,51 @@ pub(super) mod faults {
     impl Drop for Guard {
         fn drop(&mut self) {
             FAULT.with(|f| *f.borrow_mut() = None);
+            REMAINING.with(|remaining| remaining.set(usize::MAX));
         }
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn marker_retry_is_bounded_and_never_accepts_a_reused_pid() {
+        let mut child = Child(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let record = stat(child.0.id() as i32).unwrap().unwrap().0;
+        {
+            let _fault = faults::inject_times(record.pid, true, libc::EACCES, 6);
+            assert!(stable_marker(&record, "unowned-test-marker").is_err());
+            assert_eq!(faults::remaining(), 1, "at most five reads per observation");
+            assert!(child.0.try_wait().unwrap().is_none());
+        }
+        let mut stale = record.clone();
+        stale.start_time = Some(record.start_time.unwrap() + 1);
+        let error = marker_observation(&stale, "unowned-test-marker").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(child.0.try_wait().unwrap().is_none());
+        let _fault = faults::inject(record.pid, false, libc::ESRCH);
+        assert_eq!(
+            stat(record.pid).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(stat(record.pid).unwrap().is_none());
+        assert_eq!(stable_marker(&record, "unowned-test-marker").unwrap(), None);
     }
 }

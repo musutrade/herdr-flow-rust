@@ -5,6 +5,8 @@ description: Coordinate task-owned issue development with bounded agent sessions
 
 # Herdr Issue Flow
 
+Only Codex is supported. OpenCode adapters and commands have been removed; reject old OpenCode registrations without migrating them or changing user files, accounts, configuration or running services.
+
 Use herdr-flow as the authority for task/epoch/instance, dedicated Git worktrees,
 managed Agent/child processes and finalization. Reuse the existing task runtime,
 guard, queue, ACK, task application and delivery commands; do not build another
@@ -25,28 +27,31 @@ installation checks, one real task, failure/recovery/parallel cases, then at lea
 CI or process fixture is not real-role or power-loss acceptance. Do not redo the
 merged slices or close #130/#112/#38/#32 on partial evidence.
 
-The Codex identity-only receiver bootstrap remains inactive. Select only supported
-roles/transports, and distinguish implementation, regression and actual integration
-evidence using [workflow boundaries](references/herdr-workflow.md).
+Fresh upstream Codex coordinators use bounded queue-tool-v2 continuations; existing
+v1 receivers remain inspect/ACK/apply only. Snapshot the resolved coordinator model
+in `model` and explicit developer/reviewer selections in `role_models` at launch;
+missing worker selections must not inherit the coordinator model. Use the explicit receiver-start entry
+for the first authorized turn, then let the existing queue watcher collect workers
+and deliver notifications. Follow [continuation and recovery boundaries](references/upstream-configuration.md#coordinator-continuation-implementation-2026-10-26); do not replay unknown creation/tool/delivery outcomes.
+
+Copy each resolved role's `reasoning_effort` into its model selection when specified;
+the task runtime sends it for thread creation and every turn and verifies the creation
+response. Terminal cleanup must include proven upstream Guardian descendants, not
+just Flow-created threads. See [real local acceptance and its limits](references/upstream-configuration.md#real-continuation-acceptance-and-guardian-cleanup-2026-10-26).
+
+Codex receiver activation requires its task-bound bootstrap, readiness checks and
+explicit activation. Select only supported roles/transports, and distinguish
+implementation, regression and actual integration evidence using
+[workflow boundaries](references/herdr-workflow.md).
 
 This is the pure-Rust implementation. There are no Python scripts. All operations
 use one binary, with subcommands: `herdr-flow guard`, `herdr-flow queue`,
-`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`, `herdr-flow opencode`
+`herdr-flow ci`, `herdr-flow tui`, `herdr-flow advisor`
 `herdr-flow task-env`, `herdr-flow task-runtime`, `herdr-flow delivery` and `herdr-flow crap`. Build it once with `cargo build --release --locked`;
 use `herdr-flow <command> --help` for the exact options. Run
 `cargo test --all-targets --locked` after changing the implementation.
 
-This automated path is for local Codex sessions. The OpenCode baseline is
-1.19.3; at the user's direction, 2.0 integration is deferred because of reported
-bugs. Do not upgrade to 2.0 or use its API workflow for this integration.
-The native adapter supports 1.19.x >= 1.19.3 after operation-level schema checks,
-with exact session/model/directory binding, HTTP
-submission/status, durable result collection and queue delivery/ACK/application.
-Use `opencode register` and its independent `opencode watch`; OpenCode receiver
-commands use `OPENCODE_SESSION_ID`, never a fabricated `CODEX_THREAD_ID`.
-Context telemetry, runtime restoration and automatic rotation remain unsupported.
-Keep the legacy pane/shell diagnostics distinct. Follow
-[OpenCode integration](references/opencode-v2.md).
+This automated path supports only local Codex sessions. Historical OpenCode evidence is retained in [the retired integration record](references/opencode-v2.md); it is not an executable workflow.
 
 Use one issue per worker session, and durable task state across sessions. Keep the user's existing authorization and repository gates intact. This skill does not itself authorize publication, merging, messages to people, or infrastructure changes.
 
@@ -150,7 +155,7 @@ terminates; all task logs and native session storage must remain disposable.
 
 ## Rotate sessions
 
-For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Use `opencode register` / `opencode watch` for OpenCode; the Codex context guard and automatic rotation are unsupported for it. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
+For each managed local Codex role (including the coordinator), register and enable the [context guard](references/context-rotation.md) once its session/transcript identity is available. Start its independent watcher and record its state directory in the handoff. Use resolved context thresholds from team configuration. Treat fallback thresholds as provisional; calibrate from observed context occupancy, automatic compaction, handoff cost, and interruptions using the context-rotation procedure. Record evidence before changing limits. The guard automates checkpoint requests and fresh-session handoff; do not rely on prose reminders alone. Do not dispatch into a role during its handoff phases.
 
 After a worker publishes and signals its completed assignment, checkpoint a handoff with `assignment: {id, status: "completed", evidence}` (absolute existing report path). This parks the worker without a fresh-session wakeup, even at the context limit. Do not infer completion from Herdr idle/done. Before its next assignment, the coordinator supplies a new assignment ID; the parked worker checkpoints that new `pending` assignment and ends its turn so rotation can proceed. Never reuse a completed assignment ID. Coordinators waiting for events must remain monitoring, not parked.
 

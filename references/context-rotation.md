@@ -1,5 +1,8 @@
 # Context monitoring and safe rotation
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 Use `herdr-flow guard` for registered local Codex agents in Herdr. The
 monitor is a local supervisor process, not another model. Version 2 uses Codex
 app-server JSON-RPC over a Unix WebSocket for thread identity, runtime settings

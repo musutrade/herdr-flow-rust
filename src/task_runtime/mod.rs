@@ -1,4 +1,4 @@
-//! Task-owned native runtimes. Shared servers cannot provide deletion guarantees.
+//! Task-owned runtimes and bounded attachments to existing upstream services.
 use crate::{
     error::FlowError,
     model::{self, J},
@@ -12,10 +12,14 @@ use std::{
 };
 pub mod broker;
 pub mod cli;
+pub mod configuration;
 mod launcher;
+mod role_models;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
+pub mod review;
 pub mod status;
+pub(crate) mod upstream;
 
 fn ensure(ok: bool, message: &str) -> Result<()> {
     if ok {
@@ -25,9 +29,8 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
     }
 }
 
-/// Redirect default storage before starting a runtime; inherited configuration,
-/// credentials, plugins and remote server addresses are intentionally not copied.
-/// Callers may provision explicit configuration inside the returned private root.
+/// Prepare disposable runtime storage, without importing user configuration or
+/// credentials. This does not establish support for an upstream login.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     verify_instance_owner(env)?;
@@ -45,7 +48,7 @@ pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
 
 fn prepare_runtime_dirs(root: &Path) -> Result<()> {
     for name in [
-        "home", "config", "data", "cache", "state", "tmp", "c", "opencode", "runtime",
+        "home", "config", "data", "cache", "state", "tmp", "c", "runtime",
     ] {
         util::ensure_private_dir(&root.join(name), true)?;
     }
@@ -105,7 +108,6 @@ fn configure_environment(
         ("XDG_RUNTIME_DIR", "runtime"),
         ("TMPDIR", "tmp"),
         ("CODEX_HOME", "c"),
-        ("OPENCODE_CONFIG_DIR", "opencode"),
     ] {
         let target = root.join(dir);
         crate::task_env::validate_path(env, &target)?;
@@ -128,17 +130,14 @@ fn configure_environment(
             command.env(key, value);
         }
     }
-    command.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
-    command.env("OPENCODE_DISABLE_CLAUDE_CODE", "true");
-    command.env("OPENCODE_DISABLE_AUTOUPDATE", "true");
-    command.env("OPENCODE_DISABLE_MODELS_FETCH", "true");
-    command.env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true");
     Ok(command)
 }
 
-/// Start only a dedicated server. Its process and all defaults belong to env.
+/// Start an explicitly labelled, credential-free isolated protocol fixture.
+/// Real native launches require a supported upstream configuration contract.
 /// A persisted starting marker makes ambiguous launch non-replayable.
 pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child> {
+    configuration::validate_launch(spec)?;
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     let _lock = util::FileLock::acquire(&root.join("runtime.lock"), false)?
@@ -155,6 +154,9 @@ fn launch_owned(
         !root.join("runtime.json").exists(),
         "runtime launch already attempted; inspect/recover, do not replay",
     )?;
+    if upstream::selected(spec) {
+        return upstream::attach(env, root, spec, permit);
+    }
     let mut cmd = launch_command_permitted(env, root, spec, permit)?;
     let record = starting_record(env, root, spec)?;
     util::atomic_write_json(&root.join("runtime.json"), &record)?;
@@ -210,11 +212,14 @@ fn launch_command_permitted(
     verify_instance_owner(env)?;
     let binary = PathBuf::from(required(spec, "binary")?);
     let cwd = PathBuf::from(required(spec, "cwd")?);
-    validate_launch_cwd(env, &cwd)?;
+    validate_launch_cwd(env, root, &cwd, spec)?;
     configured_server_command(env, root, &cwd, &binary, spec, permit)
 }
 
-fn validate_launch_cwd(env: &TaskEnvironment, cwd: &Path) -> Result<()> {
+fn validate_launch_cwd(env: &TaskEnvironment, root: &Path, cwd: &Path, spec: &J) -> Result<()> {
+    if review::selected(env, root, cwd, spec)? {
+        return Ok(());
+    }
     if env.creation.is_some() {
         ensure(
             cwd == env.workspace_root.join("checkout"),
@@ -234,26 +239,11 @@ fn configured_server_command(
     permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
     let mut cmd = server_command(env, root, cwd, binary, spec, permit)?;
-    confine_server(&mut cmd, root, cwd, spec)?;
     let adapter = required(spec, "adapter")?;
-    configure_server(&mut cmd, root, spec, &adapter)?;
+    configure_server(&mut cmd, root, &adapter)?;
     cmd.current_dir(cwd);
     Ok(cmd)
 }
-fn confine_server(cmd: &mut Command, root: &Path, cwd: &Path, spec: &J) -> Result<()> {
-    let roots = vec![root.to_path_buf(), cwd.to_path_buf()];
-    if spec["adapter"] != "codex" {
-        let policy = crate::task_env::PreparedConfinement::new(&roots)?;
-        // SAFETY: preparation opens paths and builds rules before fork. The
-        // callback only borrows its ruleset and performs confinement syscalls.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(move || policy.apply());
-        }
-    }
-    Ok(())
-}
-
 fn register_child(env: &mut TaskEnvironment, child: &mut Child) -> Result<()> {
     if let Err(error) = env.register_process(child.id() as i32) {
         let _ = child.kill();
@@ -271,13 +261,7 @@ fn server_command(
     spec: &J,
     permit: Option<&crate::lifecycle::Permit>,
 ) -> Result<Command> {
-    if spec["adapter"] != "codex" {
-        ensure(
-            spec.get("namespace_launcher").is_none(),
-            "namespace launcher is only supported for Codex",
-        )?;
-        return configured_permitted_command(env, root, binary, permit);
-    }
+    ensure(spec["adapter"] == "codex", "only Codex is supported")?;
     // Codex 0.163 uses an absolute /tmp/codex-daemon-UID fallback even with
     // CODEX_HOME/TMPDIR/XDG_RUNTIME_DIR redirected. A private mount is required.
     let launcher = launcher::resolve(spec)?;
@@ -324,28 +308,11 @@ fn namespace_environment(
     )
 }
 
-fn configure_server(cmd: &mut Command, root: &Path, spec: &J, adapter: &str) -> Result<()> {
+fn configure_server(cmd: &mut Command, root: &Path, adapter: &str) -> Result<()> {
     match adapter {
         "codex" => {
             cmd.args(["app-server", "--listen"])
                 .arg(format!("unix://{}", root.join("server.sock").display()));
-        }
-        "opencode" => {
-            let port = model::u64_field(spec, "port").unwrap_or(0);
-            ensure(
-                (1..=65535).contains(&port),
-                "explicit OpenCode loopback port required",
-            )?;
-            cmd.args([
-                "--print-logs",
-                "--log-level",
-                "DEBUG",
-                "serve",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-            ])
-            .arg(port.to_string());
         }
         _ => return Err(FlowError::guard("unsupported runtime adapter")),
     }
@@ -376,11 +343,18 @@ fn verify_environment(env: &TaskEnvironment, root: &Path) -> Result<()> {
 }
 
 fn validate_runtime_record(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
+    ensure(
+        record["adapter"] == "codex",
+        "unsupported runtime adapter; only Codex is supported",
+    )?;
     verify_owner_record(env, record)?;
     ensure(
         record["instance"] == env.instance_id && record["root"] == json!(root),
         "runtime belongs to another environment",
     )?;
+    if env.creation.is_some() || record.get("review_snapshot").is_some() {
+        validate_launch_cwd(env, root, Path::new(&required(record, "cwd")?), record)?;
+    }
     let pid = model::u64_field(record, "pid").unwrap_or(0) as i32;
     ensure(
         env.owns_process(pid),
@@ -422,17 +396,57 @@ pub(super) fn required(value: &J, key: &str) -> Result<String> {
 pub fn start_broker(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<()> {
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    // The child owns the exclusive broker lock and validates any stale socket.
-    // Existing creation/turn journals remain untouched during transport restart.
+    let mut record = util::read_state_json(root, "runtime.json")?;
+    ensure(
+        record["adapter"] == "codex",
+        "unsupported runtime adapter; only Codex is supported",
+    )?;
+    verify_owner_record(env, &record)?;
+    ensure(
+        record["instance"] == env.instance_id && record["root"] == json!(root),
+        "broker restart runtime binding changed",
+    )?;
+    if let Some(binary) = spec.get("driver_binary") {
+        record["driver_binary"] = binary.clone();
+    }
+    restart_broker(env, root, record, permit.as_deref())
+}
+fn restart_broker(
+    env: &mut TaskEnvironment,
+    root: &Path,
+    record: J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<()> {
+    let child = broker_child(env, root, &record, permit)?;
+    if upstream::selected(&record) {
+        upstream::finish_attachment(root, record, child).map(|_| ())
+    } else {
+        Ok(())
+    }
+}
+fn broker_child(
+    env: &mut TaskEnvironment,
+    root: &Path,
+    spec: &J,
+    permit: Option<&crate::lifecycle::Permit>,
+) -> Result<Child> {
     let binary = model::string(spec, "driver_binary")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
-    let mut cmd = configured_permitted_command(env, root, &binary, permit.as_deref())?;
+    let mut cmd = if upstream::selected(spec) {
+        // Inherit the existing environment; the broker never needs a private
+        // HOME or copies of upstream credentials. Landlock still confines writes.
+        env.permitted_command(binary.as_os_str(), true, permit)?
+    } else {
+        configured_permitted_command(env, root, &binary, permit)?
+    };
     cmd.args(["task-runtime-broker", "--state-dir"]).arg(root);
     let mut child = spawn_broker(root, cmd)?;
     register_child(env, &mut child)?;
-    await_broker(root, &mut child)
+    await_broker(root, &mut child)?;
+    Ok(child)
 }
+
 fn await_broker(root: &Path, child: &mut Child) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

@@ -135,6 +135,9 @@ pub struct TaskEnvironment {
     pub created_at: f64,
     pub updated_at: f64,
     pub worktree_registrations: Vec<WorktreeRegistration>,
+    /// Fixed independent acceptance checkouts, always below the owned workspace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub review_workspaces: BTreeMap<String, super::review::ReviewWorkspace>,
     pub child_processes: Vec<RegisteredProcess>,
     pub open_files: Vec<PathBuf>,
     pub state_file: PathBuf,
@@ -1154,6 +1157,7 @@ fn build_environment(
         created_at: now,
         updated_at: now,
         worktree_registrations: Vec::new(),
+        review_workspaces: BTreeMap::new(),
         child_processes: Vec::new(),
         open_files: Vec::new(),
         state_file,
@@ -1656,7 +1660,7 @@ fn restore_lock(task_id: &str, state_file: &Path) -> Result<File> {
     Ok(
         if crate::util::protected::is_namespace(state_file.parent().unwrap())? {
             registry::try_lock_existing_task(task_id)?
-                .ok_or_else(|| FlowError::guard("environment busy"))?
+                .ok_or_else(|| FlowError::new(crate::ErrorKind::StateBusy, "environment busy"))?
         } else {
             acquire_task_lock(task_id)?
         },

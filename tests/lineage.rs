@@ -580,7 +580,7 @@ fn linked_activity_cannot_be_migrated_into_an_unrelated_parent() {
 }
 
 #[test]
-fn opencode_successor_preserves_adapter_through_writer_and_takeover() {
+fn codex_successor_preserves_adapter_through_writer_and_takeover() {
     let dir = common::tempdir().unwrap();
     let a = file(dir.path(), "a", "A", None);
     let mut s = state();
@@ -592,19 +592,16 @@ fn opencode_successor_preserves_adapter_through_writer_and_takeover() {
     w["assignment"] = json!("dev-a2");
     w["lineage"]["session_epoch"] = json!(2);
     w.as_object_mut().unwrap().remove("producer_session");
-    w["producer"] = json!({"adapter":"opencode","session":"sesnew"});
+    w["producer"] = json!({"adapter":"codex","session":"sesnew"});
     s["waits"]["second"] = w;
     let mut spec = apply_spec(&s, "dev", &e);
-    spec["next_action"] = json!({"kind":"dispatch","operation":"op2","assignment":"dev-a2","adapter":"opencode","session":"sesnew",
+    spec["next_action"] = json!({"kind":"dispatch","operation":"op2","assignment":"dev-a2","adapter":"codex","session":"sesnew",
         "owner":"developer","writes":true,"workspace":dir.path(),"authorization":"develop","action":"development","instruction":"continue","wait":"second"});
     let mut wrong = spec.clone();
-    wrong["next_action"]["adapter"] = json!("codex");
+    wrong["next_action"]["adapter"] = json!("unsupported");
     assert!(progress::apply(&mut s, &wrong, 4.0).is_err());
     progress::apply(&mut s, &spec, 4.0).unwrap();
-    assert_eq!(
-        s["tasks"]["dev"]["writer"]["producer"]["adapter"],
-        "opencode"
-    );
+    assert_eq!(s["tasks"]["dev"]["writer"]["producer"]["adapter"], "codex");
     let v = s["tasks"]["dev"]["state_version"].clone();
     progress::begin(
         &mut s,
@@ -615,11 +612,8 @@ fn opencode_successor_preserves_adapter_through_writer_and_takeover() {
     )
     .unwrap();
     let v = s["tasks"]["dev"]["state_version"].clone();
-    progress::accept_identity(&mut s,&json!({"task":"dev","state_version":v,"operation":"op2","assignment":"dev-a2","evidence":"actual native takeover"}),&json!({"adapter":"opencode","session":"sesnew"}),6.0).unwrap();
-    assert_eq!(
-        s["tasks"]["dev"]["operations"]["op2"]["adapter"],
-        "opencode"
-    );
+    progress::accept_identity(&mut s,&json!({"task":"dev","state_version":v,"operation":"op2","assignment":"dev-a2","evidence":"actual native takeover"}),&json!({"adapter":"codex","session":"sesnew"}),6.0).unwrap();
+    assert_eq!(s["tasks"]["dev"]["operations"]["op2"]["adapter"], "codex");
 }
 
 #[test]

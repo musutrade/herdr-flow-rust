@@ -1,7 +1,20 @@
 # End-to-end acceptance readiness (#38)
 
+> **2026-10-26 最新补充（优先适用）：** Codex 单条真实本地成功链路、真实评审失败后的最终失败回收、worker 提交后的监督进程重启接续、失败首稿的修复和新会话复审已分别通过。两队列并行测试一条通过、一条超时，整组不计通过；超时任务另行恢复并回收。连续验收在第 3 条超时后停止，仅 2/20 通过；恢复收尾不补计通过次数。新失败/恢复夹具的失败记录、修复及未完成项见[当前验收记录](upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。历史 OpenCode 记录不充当当前 Codex 矩阵证据；全局迁移和远端发布未完成。
+
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 This checklist separates protocol evidence from real agent completion. #38
 remains open. It does not replace its issue acceptance matrix or close #32.
+
+The latest dependency order is configuration/task isolation decoupling (#130),
+queue-control, reviewer snapshot, then one real task in a new private acceptance
+queue. Global entrypoints, old watchers and old queues remain untouched.
+The [upstream configuration boundary](upstream-configuration.md) currently rejects
+real native launches: preventing credential-copy workarounds is implemented, but
+supported existing-login reuse with full cleanup remains unimplemented. Historical
+steps and runs below do not override this status or count as new acceptance.
 
 ## Current execution order (2026-10-26)
 

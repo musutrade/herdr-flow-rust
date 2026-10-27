@@ -1,4 +1,15 @@
 //! Instance admission and crash checkpoints over isolated Git/queue fixtures.
+pub mod common;
+#[path = "common/coordinator_continuation.rs"]
+mod coordinator_continuation;
+#[path = "common/rpc_server.rs"]
+pub mod rpc_server;
+#[path = "common/upstream_live_campaign.rs"]
+mod upstream_live_campaign;
+#[path = "common/upstream_live_review.rs"]
+mod upstream_live_review;
+#[path = "common/upstream_runtime.rs"]
+mod upstream_runtime;
 use herdr_flow::{guard, lifecycle, model::J, progress, queue, task_env, task_runtime, util};
 use serde_json::json;
 use std::{
@@ -11,6 +22,10 @@ use std::{
 use tempfile::TempDir;
 
 static LOCK: Mutex<()> = Mutex::new(());
+#[path = "common/isolated_review.rs"]
+mod isolated_review;
+#[path = "common/isolated_runtime.rs"]
+mod isolated_runtime;
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 
 struct Fixture {
@@ -283,8 +298,14 @@ fn action_permit_excludes_terminal_then_terminal_blocks_late_actions() {
     let owner = task_env::isolation::owner(&env).unwrap();
     drop(env);
     let permit = lifecycle::write_permit(&owner).unwrap();
-    assert!(lifecycle::acquire(&owner, true).is_err());
-    assert!(f.finalize("failure").is_err());
+    assert_eq!(
+        lifecycle::acquire(&owner, true).err().unwrap().kind,
+        herdr_flow::ErrorKind::StateBusy
+    );
+    assert_eq!(
+        f.finalize("failure").unwrap_err().kind,
+        herdr_flow::ErrorKind::StateBusy
+    );
     drop(permit);
     let s = f.finalize("failure").unwrap();
     assert_eq!(s["tasks"]["task"]["final_outcome"], "failure");
@@ -565,8 +586,8 @@ fn managed_fixture_spawn_registers_under_permit_and_closing_refuses_new_spawn() 
     fs::write(&binary, b"#!/bin/sh\nexec sleep 30\n").unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     // This synthetic executable ignores server arguments; no model or HTTP server.
-    let spec = json!({"adapter":"opencode","binary":binary,
-        "cwd":env.workspace_root.join("checkout"),"port":1,
+    let spec = json!({"adapter":"codex","configuration":"isolated-fixture","binary":binary,
+        "cwd":env.workspace_root.join("checkout"),"driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
         "model":{"providerID":"fixture","id":"no-model"}});
     let mut child = FixtureChild(task_runtime::launch(&mut env, &root, &spec).unwrap());
     let owner = task_env::isolation::owner(&env).unwrap();

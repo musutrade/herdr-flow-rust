@@ -226,8 +226,7 @@ fn cli_uses_coordinator_identity_lock_and_persistent_state() {
             .arg(&root)
             .arg("--spec")
             .arg(&path)
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("OPENCODE_SESSION_ID");
+            .env_remove("CODEX_THREAD_ID");
         if let Some(session) = session {
             c.env("CODEX_THREAD_ID", session);
         }

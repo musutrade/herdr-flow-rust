@@ -15,7 +15,7 @@ fn mutate(s: &mut J, mut value: J) -> herdr_flow::Result<J> {
 fn request(name: &str, role: &str, input: &J) -> J {
     json!({"activity":name,"role":role,"input":input,"session_epoch":1,"result_wait":{
         "id":name,"epoch":1,"assignment":name,"owner":role,"kind":"signal","timeout_seconds":30,
-        "reason":"result","condition":"execution finished","producer":{"adapter":"opencode","session":if role=="acceptance" {REVIEW} else {"developer-session"}}}})
+        "reason":"result","condition":"execution finished","producer":{"adapter":"codex","session":if role=="acceptance" {REVIEW} else {"developer-session"}}}})
 }
 fn fixture() -> (tempfile::TempDir, J, J) {
     let dir = common::tempdir().unwrap();
@@ -62,7 +62,7 @@ fn report(conclusion: &str) -> J {
     r
 }
 fn submit(s: &mut J, name: &str, r: &J) -> herdr_flow::Result<J> {
-    acceptance::submit(s, name, &json!({"adapter":"opencode","session":REVIEW}), r)
+    acceptance::submit(s, name, &json!({"adapter":"codex","session":REVIEW}), r)
 }
 fn event(s: &mut J, name: &str, outcome: &str) -> String {
     let id = format!("event-{name}");
@@ -140,7 +140,7 @@ fn basis_scope_identity_and_prior_agreements_are_checked() {
     assert!(acceptance::submit(
         &mut s,
         "review",
-        &json!({"adapter":"codex","session":REVIEW}),
+        &json!({"adapter":"unsupported","session":REVIEW}),
         &report("passed")
     )
     .is_err());

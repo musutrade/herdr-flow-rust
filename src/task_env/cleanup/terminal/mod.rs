@@ -40,6 +40,8 @@ pub struct TerminalState {
     pub environment_digest: String,
     pub registry: Option<registry::RegistryEntry>,
     pub targets: Vec<ProcessRecord>,
+    #[serde(default)]
+    pub upstream_sessions: Vec<J>,
 }
 
 fn require(ok: bool, message: &str) -> Result<()> {
@@ -71,8 +73,12 @@ fn check(owner: &Owner, permit: &Permit) -> Result<()> {
     )
 }
 fn lock(owner: &Owner) -> Result<std::fs::File> {
-    registry::try_lock_task(&owner.task_id)?
-        .ok_or_else(|| FlowError::guard("environment busy; retry cleanup"))
+    registry::try_lock_task(&owner.task_id)?.ok_or_else(|| {
+        FlowError::new(
+            crate::ErrorKind::StateBusy,
+            "environment busy; retry cleanup",
+        )
+    })
 }
 
 /// Freeze associations once; callers must hold the queue lock as well as EX.
@@ -99,6 +105,7 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
             environment_digest: environment_digest(env.state_file())?,
             registry: entry,
             targets: vec![],
+            upstream_sessions: crate::task_runtime::upstream::obligations(&env)?,
         }),
         task_id: owner.task_id.clone(),
         instance_id: owner.instance_id.clone(),
@@ -169,6 +176,7 @@ pub fn resume_terminal(owner: &Owner, permit: &Permit) -> Result<()> {
 }
 fn resources(plan: &mut CleanupState) -> Result<()> {
     process::quiesce(plan)?;
+    reclaim_upstream(plan)?;
     storage::verify_pending_roots(plan)?;
     remove_git_registration(plan)?;
     // Files and runtime journals are part of the whole owned roots, not a
@@ -178,6 +186,41 @@ fn resources(plan: &mut CleanupState) -> Result<()> {
     storage::verify_absent(plan)?;
     plan.terminal.as_mut().unwrap().phase = Phase::ResourcesRemoved;
     storage::save(plan)
+}
+
+fn reclaim_upstream(plan: &mut CleanupState) -> Result<()> {
+    loop {
+        reclaim_recorded_upstream(plan)?;
+        let descendants =
+            crate::task_runtime::upstream::discover(&terminal(plan)?.upstream_sessions)?;
+        if descendants.is_empty() {
+            return Ok(());
+        }
+        let sessions = &mut plan.terminal.as_mut().unwrap().upstream_sessions;
+        require(
+            sessions.len() + descendants.len() <= 128,
+            "upstream descendant bound exceeded",
+        )?;
+        sessions.extend(descendants);
+        // Persist exact descendant identities before any deletion attempt.
+        storage::save(plan)?;
+    }
+}
+
+fn reclaim_recorded_upstream(plan: &mut CleanupState) -> Result<()> {
+    let count = terminal(plan)?.upstream_sessions.len();
+    for index in 0..count {
+        let journal = &mut plan.terminal.as_mut().unwrap().upstream_sessions[index];
+        if journal["phase"] == "created" {
+            journal["phase"] = serde_json::json!("deleting");
+            storage::save(plan)?;
+        }
+        crate::task_runtime::upstream::reclaim(
+            &mut plan.terminal.as_mut().unwrap().upstream_sessions[index],
+        )?;
+        storage::save(plan)?;
+    }
+    Ok(())
 }
 
 /// Retain the plan until the queue has persisted its removal proof.
@@ -557,6 +600,28 @@ mod tests {
     }
 
     #[test]
+    fn held_environment_is_retryable_without_changing_identity() {
+        let f = Fixture::new();
+        let owner = f.create();
+        let env = task_env::restore_environment("task").unwrap();
+        let before = f.state();
+        let error = task_env::restore_environment("task").err().unwrap();
+        assert_eq!(error.kind, crate::ErrorKind::StateBusy);
+        assert_eq!(
+            super::lock(&owner).err().unwrap().kind,
+            crate::ErrorKind::StateBusy
+        );
+        assert_eq!(f.state(), before);
+        drop(env);
+        let env = task_env::restore_environment("task").unwrap();
+        assert_eq!(env.instance_id, owner.instance_id);
+        drop(env);
+        f.record(&owner);
+        assert_eq!(queue::finalization::drive(&f.queue).unwrap().completed, 1);
+        f.clean(&owner);
+    }
+
+    #[test]
     fn owned_process_and_markerless_child_exit_before_whole_root_cleanup() {
         use std::io::{BufRead, BufReader};
         use std::process::Stdio;
@@ -754,6 +819,26 @@ mod tests {
         // This unmarked, unregistered independent process was never signalled.
         assert!(worker.0.try_wait().unwrap().is_none());
         f.clean(&owner);
+    }
+
+    #[test]
+    fn transient_marker_denial_rechecks_identity_and_preserves_foreign_processes() {
+        for marked in [false, true] {
+            let f = Fixture::new();
+            let owner = f.create();
+            let mut worker = ReadyWorker::new(marked.then_some(owner.instance_id.as_str()));
+            f.record(&owner);
+            let _fault = super::process::faults::inject_times(worker.pid(), true, libc::EACCES, 2);
+            let report = queue::finalization::drive(&f.queue).unwrap();
+            assert_eq!(super::process::faults::remaining(), 0);
+            assert_eq!(report.completed, 1, "{report:?}");
+            if marked {
+                worker.0.wait().unwrap();
+            } else {
+                assert!(worker.0.try_wait().unwrap().is_none());
+            }
+            f.clean(&owner);
+        }
     }
 
     #[test]
@@ -1227,8 +1312,10 @@ read -r ignored < "$REMOVAL_FIXTURE_FIFO"
         fs::write(
             bin.join("git"),
             br#"#!/bin/sh
+printf 'git-start pid=%s args=%s\n' "$$" "$*" >> "$RECOVERY_FIXTURE_TRACE"
 /usr/bin/git "$@"
 status=$?
+printf 'git-exit pid=%s status=%s\n' "$$" "$status" >> "$RECOVERY_FIXTURE_TRACE"
 [ "$status" = 0 ] || exit "$status"
 if [ "$3" = worktree ] && [ "$4" = "$RECOVERY_FIXTURE_ACTION" ]; then
     printf '%s\n' "$$" > "$RECOVERY_FIXTURE_PID"
@@ -1256,6 +1343,10 @@ fi
                 .env("RECOVERY_FIXTURE_ACTION", action)
                 .env("RECOVERY_FIXTURE_PID", &pidfile)
                 .env("RECOVERY_FIXTURE_FIFO", &fifo)
+                .env(
+                    "RECOVERY_FIXTURE_TRACE",
+                    f.temp.path().join(format!("{action}-git-trace.log")),
+                )
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
                 .spawn()
@@ -1275,7 +1366,12 @@ fi
             );
             assert!(
                 std::time::Instant::now() < deadline,
-                "real Git mutation did not complete"
+                "real Git mutation did not complete; action={action}; worker={}; wait={:?}; log={}; trace={}; queue={}",
+                worker.0.id(),
+                fs::read_to_string(format!("/proc/{}/wchan", worker.0.id())),
+                fs::read_to_string(f.temp.path().join(format!("{action}-worker.log"))).unwrap_or_default(),
+                fs::read_to_string(f.temp.path().join(format!("{action}-git-trace.log"))).unwrap_or_default(),
+                f.state()
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
@@ -1594,10 +1690,10 @@ fi
         );
         lineage_step(
             f,
-            json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"opencode","session":"independent"}}}),
+            json!({"kind":"activity","activity":"review","role":"acceptance","input":artifact["id"],"session_epoch":1,"result_wait":{"id":"review","epoch":1,"assignment":"review","owner":"reviewer","kind":"signal","timeout_seconds":30,"reason":"review result","condition":"done","producer":{"adapter":"codex","session":"independent"}}}),
         );
         let mut s = f.state();
-        let verdict = acceptance::submit(&mut s,"review",&json!({"adapter":"opencode","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"fixture request","status":"passed","evidence":"protocol fixture only"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
+        let verdict = acceptance::submit(&mut s,"review",&json!({"adapter":"codex","session":"independent"}),&json!({"conclusion":"passed","scope":"A","checks":[{"id":"content","criterion":"goal","source":"fixture request","status":"passed","evidence":"protocol fixture only"}],"gaps":[],"reuses":[],"resolutions":[]})).unwrap();
         let mut event = json!({"id":"result","task":"review","wait":"review","acknowledged":true,"outcome":"complete"});
         let wait = s["waits"]["review"].clone();
         event["epoch"] = wait["epoch"].clone();

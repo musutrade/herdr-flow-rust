@@ -2,13 +2,7 @@
 use super::*;
 pub mod receiver;
 mod rollout;
-use crate::opencode::http::HttpApi;
-use crate::{
-    codex::rpc::Client,
-    identity,
-    opencode::session::{Api, SessionAdapter},
-    progress, queue,
-};
+use crate::{codex::rpc::Client, identity, progress, queue};
 
 /// The packet contains current requirement references, specifications, an
 /// explicit instruction and evidence. No session transcript/fork is accepted.
@@ -58,7 +52,7 @@ pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
 fn create_owned(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let runtime = super::verify(env, root)?;
     let queue_root = PathBuf::from(required(spec, "queue_dir")?);
-    crate::task_env::validate_path(env, &queue_root)?;
+    validate_queue_control(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
     let _session_lock = crate::guard::locked(root)?;
     validate_unused_runtime(root)?;
@@ -102,6 +96,7 @@ fn creation_input(env: &TaskEnvironment, runtime: &J, q: &J, wait: &J, spec: &J)
 
 fn validate_creation_input(env: &TaskEnvironment, runtime: &J, q: &J, binding: &J) -> Result<()> {
     progress::environment::runtime_owner(q, env, binding)?;
+    super::review::binding(env, runtime, binding)?;
     verify_snapshot(runtime, binding)?;
     verify_acceptance_workspace(q, runtime, binding)?;
     fresh_report_path(runtime, binding)
@@ -127,38 +122,17 @@ fn base_state(root: &Path, runtime: &J, journal: &J) -> J {
     json!({"version":2,"adapter":runtime["adapter"],"state_dir":root,"cwd":runtime["cwd"],
         "model":runtime["model"],"approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),"auto_rotate":false,"task":journal["packet"]["binding"]["task"],
         "role":journal["packet"]["binding"]["lineage"]["role"],"server_version":null,
-        "endpoint":format!("http://127.0.0.1:{}",runtime["port"]),"phase":"monitoring"})
+        "phase":"monitoring"})
 }
 
 fn create_native(root: &Path, runtime: &J, journal: &J) -> Result<J> {
     let mut state = base_state(root, runtime, journal);
     match runtime["adapter"].as_str() {
-        Some("opencode") => create_opencode(&mut state)?,
         Some("codex") => create_codex(root, &mut state)?,
         _ => return Err(FlowError::guard("unsupported native adapter")),
     }
     util::atomic_write_json(&root.join("state.json"), &state)?;
     Ok(state)
-}
-
-fn create_opencode(state: &mut J) -> Result<()> {
-    let api = HttpApi::from_state(state)?;
-    let health = healthy_opencode(&api)?;
-    let server_version = crate::opencode::session::health_version(&health)?;
-    state["server_version"] = json!(server_version);
-    let created = api
-        .post(
-            "/session",
-            &json!({"title":"Independent task activity","model":state["model"]}),
-        )
-        .map_err(|e| FlowError::guard(format!("native session creation: {e}")))?;
-    state["session"] = created["id"].clone();
-    SessionAdapter::new(state)?.verify_binding()?;
-    let rows = api.get(&format!("/session/{}/message", required(state, "session")?))?;
-    ensure(
-        rows.as_array().is_some_and(|r| r.is_empty()),
-        "new OpenCode session contains prior conversation",
-    )
 }
 
 pub(super) struct DirectClient {
@@ -228,6 +202,16 @@ pub fn socket_present(root: &Path) -> bool {
 }
 
 fn native_socket(root: &Path) -> Result<PathBuf> {
+    if let Some(runtime) =
+        util::read_state_json_bounded_if_exists(root, "runtime.json", 1024 * 1024)?
+    {
+        if super::upstream::selected(&runtime) {
+            return super::upstream::endpoint(&runtime);
+        }
+    }
+    private_native_socket(root)
+}
+fn private_native_socket(root: &Path) -> Result<PathBuf> {
     let socket = root.join("server.sock");
     if !std::fs::symlink_metadata(&socket)?.file_type().is_symlink() {
         return Ok(socket);
@@ -271,8 +255,8 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
     let observed = client(root)?.call_observed("thread/start", &json!({"cwd":state["cwd"],"model":model,
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
         "baseInstructions":instructions,
-        "developerInstructions":"","config":{"project_doc_max_bytes":0,"memories":{"use_memories":false,"generate_memories":false}},
-        "dynamicTools":[],"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
+        "developerInstructions":"","config":super::role_models::thread_config(&state["model"]),
+        "dynamicTools":receiver::control::definitions(state),"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
     let result = observed.result;
     state["session"] = result["thread"]["id"].clone();
     state["transcript"] = result["thread"]["path"].clone();
@@ -286,6 +270,7 @@ fn verify_created_codex(state: &J, result: &J, model: &str, provider: &str) -> R
         result["model"] == model && result["modelProvider"] == provider,
         "Codex selected another model/provider",
     )?;
+    super::role_models::verify_effort(&state["model"], result)?;
     verify_thread(state, &result["thread"])?;
     ensure(
         result["thread"]["turns"]
@@ -349,30 +334,51 @@ fn reserve_developer(q: &mut J, wait_id: &str, state: &J) -> Result<()> {
 pub fn recover(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    super::verify(env, root)?;
-    let journal = util::read_state_json(root, "creation.json")?;
-    super::verify_owner_record(env, &journal)?;
+    let (journal, queue_root) = recovery_input(env, root)?;
     let mut state = recovered_state(root, &journal)?;
-    recover_binding(env, root, &journal, &mut state)?;
+    recover_binding(env, root, &queue_root, &journal, &mut state)?;
     Ok(state)
 }
 
-fn recover_binding(env: &TaskEnvironment, root: &Path, journal: &J, state: &mut J) -> Result<()> {
-    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
-    crate::task_env::validate_path(env, &queue_root)?;
-    let _lock = queue::locked(&queue_root, false)?;
-    let mut q = queue::load_queue(&queue_root)?;
+fn recovery_input(env: &TaskEnvironment, root: &Path) -> Result<(J, PathBuf)> {
+    let runtime = super::verify(env, root)?;
+    let journal = util::read_state_json(root, "creation.json")?;
+    super::verify_owner_record(env, &journal)?;
+    super::review::binding(env, &runtime, &journal["packet"]["binding"])?;
+    let queue_root = PathBuf::from(required(&journal, "queue_dir")?);
+    validate_queue_control(env, &queue_root)?;
+    Ok((journal, queue_root))
+}
+
+fn recover_binding(
+    env: &TaskEnvironment,
+    root: &Path,
+    queue_root: &Path,
+    journal: &J,
+    state: &mut J,
+) -> Result<()> {
+    let _lock = queue::locked(queue_root, false)?;
+    let mut q = queue::load_queue(queue_root)?;
     progress::environment::runtime_owner(&q, env, &journal["packet"]["binding"])?;
     verify_queue(&q, journal, state)?;
     bind_created(root, &mut q, journal, state)?;
     refresh_observed_version(root, state)
 }
 
-fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
-    if state["adapter"] == "opencode" {
-        let observed = SessionAdapter::new(state)?.server_version()?;
-        state["server_version"] = json!(observed);
+// Control authority is not a workspace or a deliverable. Only the durable
+// isolated Owner grants this exact path; callers retain mutation/runtime permits
+// and still check the current queue/task/epoch/instance before any queue save.
+pub(super) fn validate_queue_control(env: &TaskEnvironment, path: &Path) -> Result<()> {
+    match crate::task_env::isolation::owner(env) {
+        Some(owner) => ensure(
+            path == owner.queue_root && util::resolve_path(path) == owner.queue_root,
+            "runtime queue differs from its bound lifecycle authority",
+        ),
+        None => crate::task_env::validate_path(env, path),
     }
+}
+
+fn refresh_observed_version(root: &Path, state: &mut J) -> Result<()> {
     // Codex metadata was observed while verifying this thread on the broker's
     // existing connection; persist only after queue/Owner validation above.
     util::atomic_write_json(&root.join("state.json"), state)
@@ -396,18 +402,16 @@ fn recovered_state(root: &Path, journal: &J) -> Result<J> {
 }
 
 fn verify_native(root: &Path, state: &J) -> Result<J> {
-    if state["adapter"] == "opencode" {
-        SessionAdapter::new(state)?
-            .verify_binding()
-            .map(|_| J::Null)
-    } else {
-        let response = client(root)?.call_observed(
-            "thread/read",
-            &json!({"threadId":state["session"],"includeTurns":false}),
-        )?;
-        verify_thread(state, &response.result["thread"])?;
-        Ok(response.server_version)
-    }
+    ensure(
+        state["adapter"] == "codex",
+        "unsupported native adapter; only Codex is supported",
+    )?;
+    let response = client(root)?.call_observed(
+        "thread/read",
+        &json!({"threadId":state["session"],"includeTurns":false}),
+    )?;
+    verify_thread(state, &response.result["thread"])?;
+    Ok(response.server_version)
 }
 
 fn verify_queue(q: &J, journal: &J, state: &J) -> Result<()> {
@@ -528,8 +532,7 @@ fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
     ensure(diff.is_empty(), "runtime snapshot tracked contents changed")
 }
 
-/// Dispatch the immutable packet once. OpenCode's existing durable collector is
-/// reused; Codex retains a turn journal and never resumes an uncertain send.
+/// Dispatch once; retain the Codex turn journal without replaying uncertain sends.
 pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
@@ -542,9 +545,6 @@ pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
 fn dispatch_record(root: &Path, journal: &J, state: &J) -> Result<J> {
     let queue_root = PathBuf::from(required(journal, "queue_dir")?);
     let prompt = dispatch_packet(&queue_root, journal, state)?;
-    if state["adapter"] == "opencode" {
-        return dispatch_opencode(root, journal, state);
-    }
     dispatch_codex_in_queue(root, &queue_root, journal, state, &prompt)
 }
 
@@ -580,54 +580,6 @@ fn dispatch_packet(queue_root: &Path, journal: &J, state: &J) -> Result<String> 
     )?;
     Ok(prompt)
 }
-fn dispatch_opencode(root: &Path, journal: &J, state: &J) -> Result<J> {
-    let queue_root = PathBuf::from(required(journal, "queue_dir")?);
-    ensure_receiver(&queue_root, &queue::load_queue(&queue_root)?)?;
-    let _lock = crate::guard::locked(root)?;
-    ensure(
-        !root.join("dispatch.json").exists(),
-        "native dispatch already attempted; reconcile without replay",
-    )?;
-    util::atomic_write_json(
-        &root.join("dispatch.json"),
-        &json!({"phase":"sending","session":state["session"],"packet_sha256":journal["packet_sha256"]}),
-    )?;
-    let path = root.join("input.txt");
-    util::atomic_write_bytes(&path, serde_json::to_string(&journal["packet"])?.as_bytes())?;
-    // Keep this runtime's guard lock while retrying only pre-submission lock
-    // contention. The adapter durably writes submission.json before its POST;
-    // once that file exists, even a StateBusy error must never trigger a resend.
-    retry_unsent(root, std::time::Duration::from_secs(15), || {
-        crate::opencode::session::dispatch(
-            root,
-            &json!({"queue_dir":journal["queue_dir"],"wait":journal["wait"],"prompt_file":path,"lifecycle_owner":journal["lifecycle_owner"]}),
-        )
-    })
-}
-
-fn retry_unsent(
-    root: &Path,
-    timeout: std::time::Duration,
-    mut send: impl FnMut() -> Result<J>,
-) -> Result<J> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match send() {
-            Err(error) if unsent_contention(root, &error, deadline) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
-}
-
-fn unsent_contention(root: &Path, error: &FlowError, deadline: std::time::Instant) -> bool {
-    error.kind == crate::error::ErrorKind::StateBusy
-        && std::time::Instant::now() < deadline
-        && matches!(std::fs::symlink_metadata(root.join("submission.json")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-}
-
 fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J> {
     let _lock = crate::guard::locked(root)?;
     ensure(
@@ -641,8 +593,8 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
     let result = connection.call(
         "turn/start",
         &json!({"threadId":state["session"],
-        "input":[{"type":"text","text":prompt,"text_elements":[]}],"model":state["model"]["id"],
-        "sandboxPolicy":{"type":"externalSandbox","networkAccess":"enabled"}}),
+        "input":[{"type":"text","text":prompt,"text_elements":[]}],"model":state["model"]["id"],"effort":state["model"]["reasoning_effort"],
+        "sandboxPolicy":turn_sandbox(root, state)?}),
     )?;
     turn["turn"] = result["turn"]["id"].clone();
     ensure(
@@ -654,6 +606,18 @@ fn dispatch_codex(root: &Path, state: &J, journal: &J, prompt: &str) -> Result<J
     Ok(turn)
 }
 
+fn turn_sandbox(root: &Path, state: &J) -> Result<J> {
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    if super::upstream::selected(&runtime) {
+        Ok(
+            json!({"type":"workspaceWrite","writableRoots":[state["cwd"]],
+            "networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}),
+        )
+    } else {
+        Ok(json!({"type":"externalSandbox","networkAccess":"enabled"}))
+    }
+}
+
 pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
@@ -661,11 +625,6 @@ pub fn collect(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let creation = util::read_state_json(root, "creation.json")?;
     super::verify_owner_record(env, &creation)?;
     let state = util::read_state_json(root, "state.json")?;
-    if state["adapter"] == "opencode" {
-        let creation = util::read_state_json(root, "creation.json")?;
-        verify_state(&creation, &state)?;
-        return crate::opencode::session::collect(root);
-    }
     collect_codex(root, &state)
 }
 
@@ -717,15 +676,30 @@ fn read_codex_turn(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
     );
     match page {
         Ok(page) => find_turn(&page, turn),
-        Err(error) if error.rpc_code == Some(-32601) => {
-            if let Some(actual) = super::broker::turn(root, state, turn)? {
-                return Ok(Some(actual));
-            }
-            rollout::read(root, state, turn)
-        }
+        Err(error) if error.rpc_code == Some(-32601) => fallback_turn(root, state, turn),
         Err(error) => Err(error),
     }
 }
+fn fallback_turn(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
+    if let Some(actual) = super::broker::turn(root, state, turn)? {
+        return Ok(Some(actual));
+    }
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    if super::upstream::selected(&runtime) {
+        shared_history(root, state, turn)
+    } else {
+        rollout::read(root, state, turn)
+    }
+}
+fn shared_history(root: &Path, state: &J, turn: &J) -> Result<Option<J>> {
+    let result = client(root)?.call(
+        "thread/read",
+        &json!({"threadId":state["session"],"includeTurns":true}),
+    )?;
+    verify_thread(state, &result["thread"])?;
+    find_turn(&json!({"data":result["thread"]["turns"]}), turn)
+}
+
 fn find_turn(page: &J, turn: &J) -> Result<Option<J>> {
     let turns = page["data"]
         .as_array()
@@ -802,7 +776,7 @@ fn update_codex(journal: &mut J, actual: Option<&J>, state: &J) -> Result<()> {
     Ok(())
 }
 
-fn verify_acceptance_workspace(q: &J, runtime: &J, binding: &J) -> Result<()> {
+pub(super) fn verify_acceptance_workspace(q: &J, runtime: &J, binding: &J) -> Result<()> {
     if binding["lineage"]["role"] != "acceptance" {
         return Ok(());
     }
@@ -842,21 +816,66 @@ fn ensure_receiver(root: &Path, q: &J) -> Result<()> {
     )
 }
 
-fn healthy_opencode(api: &dyn Api) -> Result<J> {
-    // The supported OpenCode 1.19.x family can accept TCP before its first HTTP handler is ready.
-    // Only this read-only readiness probe is retried, never session creation.
-    let mut last = None;
-    for _ in 0..3 {
-        match api.get("/global/health") {
-            Ok(value) => return Ok(value),
-            Err(error) => last = Some(error),
-        }
-    }
-    Err(last.unwrap())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+    #[test]
+    fn created_model_must_match_selection_without_accepting_substitution() {
+        let state = json!({"session":"12345678-1234-1234-1234-123456789abc",
+            "cwd":"/task","model":{"id":"selected","providerID":"configured"}});
+        let result = json!({"model":"selected","modelProvider":"configured",
+            "thread":{"id":state["session"],"cwd":"/task","modelProvider":"configured","turns":[]}});
+        verify_created_codex(&state, &result, "selected", "configured").unwrap();
+        for key in ["model", "modelProvider"] {
+            let mut wrong = result.clone();
+            wrong[key] = json!("substitute");
+            assert!(verify_created_codex(&state, &wrong, "selected", "configured").is_err());
+        }
+    }
+
+    #[test]
+    fn shared_history_rejects_foreign_thread_before_reading_turns() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let root = util::fs::test_tempdir();
+        let listener = UnixListener::bind(root.path().join("broker.sock")).unwrap();
+        let session = "12345678-1234-1234-1234-123456789abc";
+        let server = std::thread::spawn(move || {
+            for id in [session, "12345678-1234-1234-1234-123456789def"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&mut stream).read_line(&mut request).unwrap();
+                let request: J = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "thread/read");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId":session,"includeTurns":true})
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"result":{"thread":{
+                        "id":id,"cwd":"/task","modelProvider":"openai",
+                        "turns":[{"id":"other"},{"id":"wanted","status":"completed"}]
+                    }}})
+                )
+                .unwrap();
+            }
+        });
+        let state = json!({"session":session,"cwd":"/task","model":{"providerID":"openai"}});
+        assert_eq!(
+            super::shared_history(root.path(), &state, &json!("wanted"))
+                .unwrap()
+                .unwrap()["status"],
+            "completed"
+        );
+        assert!(super::shared_history(root.path(), &state, &json!("wanted")).is_err());
+        server.join().unwrap();
+    }
+
     fn bound_owner_fixture() -> (super::J, super::J) {
         let binding = serde_json::json!({"queue_id":"queue","task_id":"task","epoch":7});
         let owner = serde_json::json!({"binding":binding,"instance_id":"instance"});
@@ -926,66 +945,12 @@ mod tests {
         assert!(super::verify_queue_owner(&q, &changed).is_err());
     }
     #[test]
-    fn dispatch_retries_only_before_the_submission_journal() {
-        use crate::error::ErrorKind;
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("dispatch.json"), "sending").unwrap();
-        let mut calls = 0;
-        let value = retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            if calls == 1 {
-                return Err(FlowError::new(ErrorKind::StateBusy, "queue busy"));
-            }
-            std::fs::write(dir.path().join("submission.json"), "sending").unwrap();
-            Ok(json!({"sent":true}))
-        })
-        .unwrap();
-        assert_eq!(value["sent"], true);
-        assert_eq!(calls, 2);
-        assert_eq!(
-            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
-            b"sending"
-        );
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            Err(FlowError::new(
-                ErrorKind::StateBusy,
-                "busy after possible send",
-            ))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        std::fs::remove_file(dir.path().join("submission.json")).unwrap();
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::from_secs(1), || {
-            calls += 1;
-            Err(FlowError::io("transport outcome unknown"))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        calls = 0;
-        assert!(retry_unsent(dir.path(), Duration::ZERO, || {
-            calls += 1;
-            Err(FlowError::new(ErrorKind::StateBusy, "queue busy"))
-        })
-        .is_err());
-        assert_eq!(calls, 1);
-        assert_eq!(
-            std::fs::read(dir.path().join("dispatch.json")).unwrap(),
-            b"sending"
-        );
-    }
-
-    use super::*;
-    #[test]
     fn native_development_claims_one_writer_and_recovers_only_that_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let mut q = json!({"tasks":{"d":{"writer":null}},"waits":{"w":{"task":"d","assignment":"a","lineage":{"role":"development"},"producer":{"adapter":"opencode","session":"sesdev"}}}});
+        let mut q = json!({"tasks":{"d":{"writer":null}},"waits":{"w":{"task":"d","assignment":"a","lineage":{"role":"development"},"producer":{"adapter":"codex","session":"sesdev"}}}});
         let state = json!({"cwd":dir.path(),"session":"sesdev"});
         reserve_developer(&mut q, "w", &state).unwrap();
-        assert_eq!(q["tasks"]["d"]["writer"]["producer"]["adapter"], "opencode");
+        assert_eq!(q["tasks"]["d"]["writer"]["producer"]["adapter"], "codex");
         reserve_developer(&mut q, "w", &state).unwrap();
         q["tasks"]["d"]["writer"]["producer"]["session"] = json!("other");
         assert!(reserve_developer(&mut q, "w", &state).is_err());
@@ -1035,7 +1000,7 @@ mod tests {
     #[test]
     fn private_tmp_socket_mapping_rejects_escape_and_keeps_long_paths_usable() {
         use std::os::unix::{fs::symlink, net::UnixListener};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::util::fs::test_tempdir();
         let root = dir.path();
         let target = root.join("tmp/codex-daemon-1000");
         assert!(!socket_present(root));

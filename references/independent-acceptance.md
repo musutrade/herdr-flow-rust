@@ -1,5 +1,8 @@
 # Independent acceptance and continuation (#36)
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 This protocol extends [task lineage](task-lineage.md) and
 [owned native runtimes](task-runtime.md). It does not change legacy unlinked tasks.
 An execution outcome (`complete`, `failed`, `decision`), delivered notification,

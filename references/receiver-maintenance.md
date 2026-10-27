@@ -1,5 +1,8 @@
 # Receiver and watcher maintenance
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 Plan maintenance against the exact queue ID, receiver session and executable.
 Use Herdr for the visible agent lifecycle and the existing OpenCode or Codex
 adapter for its verified native binding. A running terminal or a stored

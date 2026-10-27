@@ -1,5 +1,8 @@
 # Minimal startup, result, and recovery tutorial
 
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
 This tutorial builds one coordinator receiver, one queue and one unique task
 with two accepted steps. It exercises the current V1 path: a result actively
 arrives, the receiver ACKs it, the result is applied, and the next step is

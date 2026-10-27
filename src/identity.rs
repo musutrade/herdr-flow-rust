@@ -9,8 +9,10 @@ use serde_json::json;
 pub fn validate(value: &J) -> Result<J> {
     let adapter = model::string(value, "adapter").unwrap_or_default();
     let session = model::string(value, "session").unwrap_or_default();
-    if !matches!(adapter.as_str(), "codex" | "opencode") {
-        return Err(FlowError::guard("unsupported session adapter"));
+    if adapter != "codex" {
+        return Err(FlowError::guard(
+            "unsupported session adapter; only Codex is supported",
+        ));
     }
     if session.is_empty()
         || session.len() > 128
@@ -45,11 +47,7 @@ pub fn required_producer(wait: &J) -> Result<J> {
 
 pub fn environment(identity: &J) -> Result<String> {
     let identity = validate(identity)?;
-    let key = if identity["adapter"] == "opencode" {
-        "OPENCODE_SESSION_ID"
-    } else {
-        "CODEX_THREAD_ID"
-    };
+    let key = "CODEX_THREAD_ID";
     let actual = std::env::var(key).unwrap_or_default();
     if identity["session"] != actual {
         return Err(FlowError::guard("producer session mismatch"));
@@ -62,6 +60,21 @@ pub fn check_environment(wait: &J) -> Result<()> {
         .map(|id| environment(&id))
         .transpose()
         .map(|_| ())
+}
+
+/// Resolve only a Codex receiver; legacy foreign registrations never fall back.
+pub fn receiver_session(root: &std::path::Path) -> Result<Option<String>> {
+    let queue = crate::queue::load_queue(root)?;
+    if let Some(path) = model::string(&queue, "guard_dir") {
+        let state = crate::util::read_state_json(std::path::Path::new(&path), "state.json")?;
+        if state.get("adapter").is_some_and(|value| value != "codex") {
+            return Err(FlowError::guard(
+                "unsupported receiver adapter; only Codex is supported",
+            ));
+        }
+        crate::task_runtime::native::receiver::require_adapter(&state)?;
+    }
+    Ok(std::env::var("CODEX_THREAD_ID").ok())
 }
 
 #[cfg(test)]

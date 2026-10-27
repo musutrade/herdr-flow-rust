@@ -3,6 +3,7 @@
 use super::*;
 use crate::codex::rpc::Client;
 mod owner;
+mod tools;
 mod transport;
 use std::{
     os::unix::net::{UnixListener, UnixStream},
@@ -127,6 +128,7 @@ fn request_method(request: &J) -> Result<String> {
             "thread/resume",
             "thread/turns/list",
             "turn/start",
+            "tool/respond",
         ]
         .contains(&method.as_str()),
         "unsupported broker operation",
@@ -145,11 +147,26 @@ fn execute(
 ) -> Result<J> {
     let method = request_method(request)?;
     validate_stored_journal(root)?;
+    if method == "tool/respond" {
+        return tools::respond(root, connection, &request["params"]);
+    }
+    execute_native(root, connection, request, &method)
+}
+fn execute_native(
+    root: &Path,
+    connection: &mut Option<super::native::DirectClient>,
+    request: &J,
+    method: &str,
+) -> Result<J> {
     if connection.is_none() {
         *connection = Some(super::native::direct_client(root)?);
     }
     let client = connection.as_mut().unwrap();
-    let result = client.call(&method, &request["params"]);
+    super::upstream::before(root, method, &request["params"])?;
+    let result = client.call(method, &request["params"]);
+    if let Ok(value) = &result {
+        super::upstream::after(root, method, value)?;
+    }
     observe(root, client)?;
     result
 }
@@ -163,13 +180,17 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
     if events.is_empty() && root.join("broker-events.json").exists() {
         return transport;
     }
+    save_events(root, &mut journal, events)?;
+    transport
+}
+fn save_events(root: &Path, journal: &mut J, events: Vec<J>) -> Result<()> {
     // Events buffered while awaiting a response must also survive a restart.
     for event in events {
-        record(&mut journal, &event)?;
-        validate_journal(&journal)?;
+        tools::record(root, &event)?;
+        record(journal, &event)?;
+        validate_journal(journal)?;
     }
-    util::atomic_write_json(&root.join("broker-events.json"), &journal)?;
-    transport
+    util::atomic_write_json(&root.join("broker-events.json"), journal)
 }
 fn observation_journal(root: &Path) -> Result<J> {
     let journal = if root.join("broker-events.json").exists() {

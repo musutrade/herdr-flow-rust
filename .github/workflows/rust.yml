@@ -14,6 +14,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install isolated Codex fixture dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          profile_dir="$(mktemp -d "$RUNNER_TEMP/herdr-apparmor.XXXXXX")"
+          (
+            cd "$profile_dir"
+            apt-get download apparmor-profiles
+            dpkg-deb -x apparmor-profiles_*.deb extracted
+          )
+          sudo apparmor_parser -r "$profile_dir/extracted/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+          /usr/bin/bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
@@ -27,18 +39,4 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
       - name: Release build
-        run: cargo build --release --locked
-
-  msrv:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: 1.85.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Test minimum supported Rust version
-        run: cargo test --all-targets --locked
-      - name: Build minimum supported Rust version
         run: cargo build --release --locked

@@ -1,6 +1,65 @@
-//! A fresh coordinator thread is an identity, not an activated receiver.
-//! No queue mutation, model turn, approval response or implicit recovery.
+//! Fresh coordinator identities, explicit activation/start and bounded recovery.
+//! Bootstrap alone never starts a model turn or activates a receiver.
 use super::*;
+pub mod active;
+pub(crate) mod control;
+pub mod recovery;
+
+/// Explicit first coordinator turn. Notifications drive later turns. Persist
+/// intent before sending so a lost response never starts a duplicate task.
+pub fn start(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
+    let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    let runtime = started_runtime(env, root)?;
+    let owner = crate::task_env::isolation::owner(env)
+        .ok_or_else(|| FlowError::guard("coordinator start requires isolated owner"))?;
+    let _queue_lock = queue::locked(&owner.queue_root, false)?;
+    let state = start_state(env, root, &runtime, &owner)?;
+    start_reserved(root, &state, spec)
+}
+
+fn start_state(
+    env: &TaskEnvironment,
+    root: &Path,
+    runtime: &J,
+    owner: &crate::lifecycle::Owner,
+) -> Result<J> {
+    let journal = util::read_state_json(root, "receiver.json")?;
+    let guard = PathBuf::from(required(&journal, "guard_dir")?);
+    crate::task_env::validate_path(env, &guard)?;
+    let state = util::read_state_json(&guard, "state.json")?;
+    let q = queue::load_queue(&owner.queue_root)?;
+    ensure(
+        q["receiver"] == crate::guard::scope(&state) && runtime["instance"] == state["instance"],
+        "coordinator registration changed",
+    )?;
+    Ok(state)
+}
+
+fn start_reserved(root: &Path, state: &J, spec: &J) -> Result<J> {
+    use crate::herdr::ReceiverAdapter;
+    let _lock = crate::guard::locked_existing(root)?;
+    ensure_absent(&root.join("receiver-start.json"))?;
+    ensure_absent(&root.join("receiver-turn.json"))?;
+    let instruction = start_instruction(spec)?;
+    let adapter = active::Adapter::new(state)?;
+    let mut attempt =
+        json!({"phase":"sending","session":state["session"],"instruction":instruction});
+    util::atomic_write_json(&root.join("receiver-start.json"), &attempt)?;
+    let turn = adapter.prompt(&instruction)?;
+    attempt["phase"] = json!("submitted");
+    attempt["turn"] = json!(turn);
+    util::atomic_write_json(&root.join("receiver-start.json"), &attempt)?;
+    Ok(attempt)
+}
+
+fn start_instruction(spec: &J) -> Result<String> {
+    let instruction = required(spec, "instruction")?;
+    ensure(
+        instruction.len() <= 65536 && spec.as_object().is_some_and(|o| o.len() == 1),
+        "coordinator start accepts only a bounded instruction",
+    )?;
+    Ok(instruction)
+}
 
 pub fn is_task_owned(state: &J) -> bool {
     state["adapter"] == "codex" && state["receiver_kind"] == "task-runtime"
@@ -14,7 +73,7 @@ pub fn require_adapter(state: &J) -> Result<()> {
 }
 
 /// Even a dangling symlink or an unreadable marker reserves the attempt.
-pub(super) fn ensure_absent(path: &Path) -> Result<()> {
+pub(in crate::task_runtime) fn ensure_absent(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
@@ -115,6 +174,7 @@ fn initial_state(root: &Path, guard: &Path, runtime: &J, spec: &J) -> J {
         "runtime_pid":runtime["pid"],"runtime_start_time":runtime["start_time"],
         "cwd":runtime["cwd"],"model":runtime["model"],
         "approval_policy":runtime.get("approval_policy").cloned().unwrap_or(json!("untrusted")),
+        "control_protocol":if super::super::upstream::selected(runtime) {json!("queue-tool-v2")} else {J::Null},
         "task":spec["task"],"role":spec["role"],"auto_rotate":false,"phase":"bootstrap"})
 }
 

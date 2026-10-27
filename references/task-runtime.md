@@ -1,5 +1,19 @@
 # Task-owned Codex and OpenCode runtimes (#35)
 
+> **故障与恢复实测补充（2026-10-26，优先适用）：** 真实最终失败回收、worker 提交后监督进程重启接续、失败首稿修复与新会话复审分别通过。并行测试一过一超时；连续验收为 2/20，第 3 条超时即停，未计为通过。超时任务另行恢复后完成回收，见[逐次证据和未完成项](upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。
+
+> **真实验收补充（2026-10-26，优先适用）：** 已完成一条 Sol/high 开发、Astra/high 独立评审、协调者自动本地交付及回收的真实任务；修复了上游 Guardian 子会话遗漏回收，见[两次运行记录及边界](upstream-configuration.md#real-continuation-acceptance-and-guardian-cleanup-2026-10-26)。远端发布、故障/并行矩阵和连续 20 条无残留仍未完成。
+
+> **角色模型修正（优先适用）：** coordinator 使用启动 spec 的 `model`，开发/评审分别使用 `role_models.developer` / `role_models.reviewer`。缺失时不继承 coordinator；见[配置示例](upstream-configuration.md#role-model-configuration-2026-10-26-current)。
+
+> **2026-10-26 接续更新：** 新建上游 Codex 接收者使用 queue-tool-v2，由原队列驱动器执行有界开发/评审/本地交付/终态接续。新增 receiver-start、broker-recover、receiver-recover；详见[实现与恢复边界](upstream-configuration.md#coordinator-continuation-implementation-2026-10-26)。下方旧 bootstrap/控制能力限制作为历史保留，本段优先。
+
+> **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
+
+
+Current upstream configuration and cleanup rules take precedence over historical
+dedicated-runtime examples below: see [upstream configuration](upstream-configuration.md).
+
 The linked task model is described in [task-lineage.md](task-lineage.md).
 A producer is now an explicit `{ "adapter": "codex" | "opencode", "session": "..." }`
 object on its result wait. Legacy `producer_session` remains Codex-only. Supplying
@@ -25,6 +39,82 @@ not deployment approval or automatic finalization. The opt-in
 write/spawn permits, followed by PR3 automatic finalization of fresh isolated
 owners. That path stops proved managed resources and deletes dedicated roots;
 it does not migrate these legacy entries or infer shared session ownership.
+
+### Queue-control access (#130 integration)
+
+Native `create` and `recover` treat queue authority separately from workspace
+paths. A fresh isolated runtime accepts only its durable Owner's exact canonical
+`queue_root`, with the existing current queue/task/epoch/instance and lifecycle
+permit checks. This permits the protected queue/control skeleton to remain
+outside both disposable roots. It neither makes that control directory a formal
+delivery target nor grants ordinary model tools permission to write it.
+Aliases, child paths and foreign queues are refused before opening a queue lock
+or creating directories. Legacy runtimes retain the ordinary managed-boundary
+check; no old environment gains isolated authority. General `validate_path`
+continues to refuse the external control path.
+
+Regression tests first reproduced external-control rejection and an unwanted
+foreign queue-directory creation. Synthetic native HTTP then verifies exact
+create/recovery, foreign/alias refusal and stale/closing owner refusal. These are
+protocol/ownership regressions, not real-model ACK/application or deployment.
+The independent registered reviewer snapshot entry below is the second #130
+integration slice; #112, #38 and #32 depend on both slices before their pending
+single-task and broader acceptance. No issue is completed by these changes.
+
+### Registered acceptance snapshot (#130 integration)
+
+An isolated instance's developer retains `workspace_root/checkout`. A reviewer
+uses a separately registered, fixed-commit Git clone at
+`workspace_root/reviews/ASSIGNMENT`, with its own `.git` and no shared object
+alternates/hardlinks. This is an additional disposable workspace of the **same**
+Owner, not a second environment or arbitrary-cwd exception.
+
+First register the current acceptance activity and its result wait, then use the
+existing runtime prepare and the new resource entry (placeholders, not a script):
+
+```text
+herdr-flow task-runtime prepare --task OWNER --state-dir UNUSED --spec PREPARE_SPEC
+herdr-flow task-runtime review-snapshot --task OWNER --state-dir TEMP/rt/ASSIGNMENT --spec SNAPSHOT_SPEC
+```
+
+`PREPARE_SPEC` is `{"assignment":"ASSIGNMENT"}`. `SNAPSHOT_SPEC` has exactly
+`{"queue_dir":"/absolute/bound-queue","wait":"acceptance-result-wait"}`.
+The command derives the path and full candidate from that current, same-Owner
+acceptance binding; it does not accept `cwd`, a different commit or an owner
+override. It journals reservation before directory/Git work and records directory
+and Git identities. Unknown pre-existing directories are not adopted.
+
+Launch through `task-runtime launch` with the returned `cwd` and
+`"review_snapshot":"ASSIGNMENT"` in the normal launch spec. Only that registered
+ready snapshot may replace the instance's developer cwd. Native create/recover
+also require the exact acceptance binding; a reviewer runtime cannot execute a
+development activity. Launch, observation and recovery recheck the current Owner,
+activity/wait, candidate, inode identities, HEAD and tracked contents. The existing
+source/active-writer overlap check remains required. Register a fresh snapshot for
+a new assignment; do not repoint an old one.
+
+Repeat `review-snapshot` with the identical request to verify or resume its saved
+resource intent. Completed-but-uncheckpointed clone/checkout results can be
+reconciled. An incomplete/unknown clone or mismatching checkout is refused rather
+than repeated, overwritten or deleted; retain it for inspection/terminal cleanup.
+An uncheckpointed directory without its inode proof is likewise not adopted.
+An in-flight marked snapshot Git command blocks reconciliation. Git commands use
+the existing bounded executor, instance/task/epoch/queue markers and direct-child
+parent-death protection. These are process-crash boundaries, not power-loss proof.
+
+Snapshots, dirty/untracked files, private Git data and registration metadata are
+inside the existing environment's disposable ownership. The existing terminal
+finalizer stops its registered native processes, removes both roots and the
+environment document; no extra scheduler or cleanup journal is introduced.
+The coordinator still ACKs/applies results and records the business final outcome.
+An external cleanup driver only resumes an already recorded terminal obligation.
+
+Regression-first tests cover the missing entry, independent fixed contents,
+launch/native recovery, role/path/Owner/wait mismatch, active-writer overlap,
+lost-checkpoint reconciliation, unknown-clone non-replay and actual cleanup before
+fixture destruction. Native HTTP is synthetic; real-role tools, model permission,
+ACK/application and one genuine task remain pending for #112/#38/#32. No login,
+model choice, old queue, default CLI or global skill is changed.
 
 ## Owned environment and fresh activity
 
@@ -101,14 +191,20 @@ explicitly here, while the generic lineage API still supports its own adapters.
 
 1. Create/restore a task environment. Create the linked requirement, input artifact
    and activity through `task-lineage`. Its signal wait initially has no producer.
-   Put the queue and coordinator state inside the disposable environment.
-2. `task_runtime::prepare(&environment, assignment)` creates a private runtime root.
-   Provision only the explicitly required provider configuration/credentials into
-   that root (`c/config.toml`, `c/auth.json` for Codex;
-   `config/opencode/opencode.json` for OpenCode). No user conversation, memory,
-   plugins or global configuration is copied automatically.
+   Legacy environments put their queue and coordinator state inside the disposable
+   boundary. Fresh isolated owners keep queue/control outside the disposable
+   roots, using only the exact bound authority described above.
+2. `task_runtime::prepare(&environment, assignment)` creates disposable storage.
+   Never provision a new login, copy auth/token or provider configuration, or
+   change a billing route to make this directory usable. Upstream configuration
+   remains with the existing service; see [the configuration boundary](upstream-configuration.md).
+
 3. `task_runtime::launch(&mut environment, &root, &spec)` starts a dedicated native
-   server and records the marked process. `spec` contains `adapter`, absolute
+   protocol fixture and records the marked process. Explicit
+   `configuration: "isolated-fixture"` is required for credential-free fixtures;
+   omitted configuration means upstream and currently fails before any launch
+   journal or process is created. This is not a production escape hatch or
+   real-task acceptance. `spec` contains `adapter`, absolute
    `binary`, owned `cwd`, and `model: {providerID, id}`. OpenCode also needs an
    explicit loopback `port`. Library embedders provide `driver_binary` pointing to
    herdr-flow for the Codex connection process; the CLI uses its own executable.
@@ -273,19 +369,19 @@ model inference, and destroy the entire environment. Their coordinator is a
 protocol fixture; they are not evidence of a fully autonomous multi-agent
 acceptance/delivery loop (that remains the later end-to-end scope).
 
-The installed test takes `HERDR_LIVE_{CODEX,OPENCODE}_BINARY`, corresponding
-`_MODEL` JSON objects and optional `_CONFIG` paths. `HERDR_LIVE_CODEX_AUTH` supplies
-an explicitly selected auth copy; `HERDR_LIVE_INFERENCE=1` requires an actual
-successful native model response. `HERDR_LIVE_ADAPTER` can select one adapter.
+The historical installed tests used `HERDR_LIVE_{CODEX,OPENCODE}_BINARY` and
+corresponding `_MODEL` JSON objects. They now reject unsupported upstream
+configuration before reading or copying credentials. Auth/config copies are no
+longer accepted as an integration workaround. `HERDR_LIVE_ADAPTER` can select one adapter.
 `HERDR_LIVE_ROLE=development` additionally requires native tools to modify the
 fixture file and create a new Git commit, collected as the activity's output.
-These inputs are copied only into disposable test environments. Failures are
-reported and the test environment is cancelled/destroyed, not marked delivered.
+Failures are reported and the test environment is cancelled/destroyed, not marked delivered.
 
 A separate opt-in mixed test is designed to run the Codex developer through task-owned
 `native::create/dispatch/collect` and then the existing real OpenCode coordinator
-and reviewer. It copies only selected Codex config/auth into the worker `c/`
-directory, uses Codex `on-request` approvals without automatic answers, and
+and reviewer. Its former Codex config/auth copying has been removed; the test
+now fails the upstream capability check. Its historical flow used Codex
+`on-request` approvals without automatic answers, and
 checks the actual `turn.json`/queue event/apply evidence. Its intended scope is a
 mixed Codex-worker/OpenCode-coordinator flow, not a Codex coordinator or twenty-task
 claim. It has not completed on the tested host; the startup blocker is described below.

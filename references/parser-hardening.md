@@ -1,5 +1,8 @@
 # Bounded parser and dependency review (#48)
 
+> Current policy: CI uses Rust stable only; the fixed Rust 1.85 requirement and
+> separate MSRV job have been removed. Checkpoint evidence below is historical.
+
 ## Existing supply-chain controls
 
 Source review checkpoint: main `fcf13bd67697ac5e00ffe1b905993cdd6e76c9a5`.
@@ -27,7 +30,7 @@ field and no repository license/allowlist policy was found.
 
 Do not introduce a cargo-deny license allowlist by guessing a policy. A license
 approval decision remains with the project owner; no blanket allow/ignore list
-or exception is added here. The existing audit and lock/MSRV controls remain.
+or exception is added here. The audit and lockfile controls remain; current Rust validation uses stable.
 Revisit source/duplicate enforcement if the lockfile introduces a git/path source
 or multiple versions; neither is currently a demonstrated gap requiring a new
 tool. Re-run the inventory whenever dependency resolution changes.
