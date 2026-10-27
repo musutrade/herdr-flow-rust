@@ -1,5 +1,26 @@
 # 任务接入原生 Codex TUI
 
+> 2026-10-27 最新布局要求：每个新会话在父窗格所属工作区的新 tab 中打开，并标注
+> `flow:角色/任务标识`，保持当前焦点，方便人工查看与接手。关闭后重开同一会话也使用新 tab。
+> 先完成旧展示的保存记录回收，再登记新 tab；同一 tab 内后来加入的用户窗格继续保留。
+> 以下分屏布局的历史实测按原范围保留，不能当作新 tab 的实测。
+
+本轮新 tab 真实验收 **81.27 秒通过**：现有服务和 `gpt-6.1-sol/high` 下，首次展示与
+关闭重开分别进入同一工作区的两个不同 tab，标签为 `flow:native-coordinator`；重开保持
+同一 session、原始 turn 与首条消息的上下文。三个真实 turn 验证首条消息、原生输入的
+队列工具调用、重开后继续输入，末尾由夹具明确选定最终失败以回收验收任务。
+独立核查该会话的 17 类共享数据库关联为零，任务进程、tab/pane、根目录及保存记录均
+无残留，原有 pane/tab 绑定、受保护配置与共享服务身份保持一致。临时夹具和原始材料
+在结果登记后清理，不新增永久证据目录。
+
+本轮完整覆盖率首轮在既有分配中断夹具
+`allocation_transfer_process_interruptions_resume_or_finalize_and_really_clear` 的
+`intent:allocation-workspace` 等待点达到 15 秒。相同覆盖率构建下单独复核 21.47 秒通过，
+未修改该用例、生产逻辑或时限；首次原因未确认，保留该失败事实。此事与历史 Git 10 秒
+回收超时分别记录，不追认为后者已修复。最终完整 all-targets 覆盖率回归通过；格式、
+lint-policy、全 targets/features Clippy、release 和 CRAP 绝对阈值 10（无 baseline，
+6148 个函数、零违规）通过。远端 CI 按 PR 最终提交单独跟踪。
+
 > 2026-10-27 本轮更新：恢复角色已有真实模型诊断及原协调者接收证据，见
 > [恢复验收](recovery-agent.md)。新增显式 `native_tui.session_store`，以现有 Herdr
 > `session.json` 的路径和目录身份绑定 v3 共享快照回收；只关闭窗格不足以证明无残留。
@@ -31,15 +52,16 @@ OpenCode 不支持。
   "native_tui": {
     "binary": "/absolute/path/to/matching/codex",
     "session_store": "/absolute/path/to/existing/herdr/session.json",
-    "parent_pane": "YOUR_HERDR_PANE_ID",
-    "direction": "right"
+    "parent_pane": "YOUR_HERDR_PANE_ID"
   }
 }
 ```
 
 `socket` 必须是现有 Codex 服务的规范 Unix socket 路径；`binary` 使用与服务匹配的
 原生 Codex。Herdr socket 从现有 `HERDR_SOCKET_PATH` 取得并记录 inode/设备/所有者。
-`parent_pane` 明确指定父窗格，`direction` 为 `right` 或 `down`，新窗格不抢焦点。
+`parent_pane` 明确指定父窗格；从其实时信息获取工作区 ID，在该工作区新建 tab，
+记录返回的 tab/pane/terminal 身份，不使用当前 UI 焦点或自行解析公开 ID。
+旧配置的 `direction: right/down` 仍可读取，但不再改变新会话的 tab 布局；新配置无需此字段。
 工作目录继续使用任务隔离工作树，审查角色继续使用自己的快照。
 
 协调者首次 `receiver-start`、开发/审查角色 `dispatch` 提交成功后自动打开原生界面。
@@ -54,7 +76,8 @@ herdr-flow task-runtime tui-close --task TASK --state-dir RUNTIME_DIR
 herdr-flow task-runtime tui-open --task TASK --state-dir RUNTIME_DIR
 ```
 
-`tui-close` 只关闭本次创建的窗格和前端，不取消任务；`tui-open` 恢复同一会话。
+`tui-close` 只关闭本次创建的窗格和前端，独占 tab 随之关闭，不取消任务；
+`tui-open` 先核实旧 tab 关闭已保存、清理其快照引用，再在同工作区的新 tab 恢复同一会话。
 关闭前检查服务、终端、会话和前台进程归属。窗格已被其他会话/进程使用时拒绝关闭。
 启动结果不明确时只检查原尝试，不自动新建第二个窗格或重发输入。
 
@@ -98,6 +121,10 @@ SessionStart 上报 hook，并由实际前端上报所属窗格；其他 hook �
 写入；格式或身份不符、关闭尚未落盘均保留回收义务。未配置该字段的历史绑定不猜测
 外部保存位置，也不能作为“共享存储已清空”的证明。
 
+新 tab 的归属同时核对工作区与 Herdr 返回的 tab number。独占任务 tab 回收时同步
+修正快照中的 tab/pane 映射和选中索引；若用户增加了其他窗格，仅移除任务窗格并保留
+用户布局。不能借此删除其他 tab 的根窗格或整个用户工作区。
+
 自动化测试覆盖协议分片、动态工具响应权、原生审批消息透传、会话边界与 hook 选择。
 真实验收入口（默认 ignored，必须显式指定现有服务和模型）：
 
@@ -108,7 +135,8 @@ cargo test --locked --test lifecycle_authority \
 ```
 
 环境参数：`HERDR_UPSTREAM_SOCKET`、`HERDR_UPSTREAM_MODEL`（模型对象 JSON）、
-`HERDR_NATIVE_BINARY` 以及现有 Herdr 环境。测试在独立队列里验证原生显示、同会话输入、
+`HERDR_NATIVE_BINARY`、`HERDR_SESSION_STORE`、`HERDR_UPSTREAM_CONFIG`（只读比较）以及现有 Herdr 环境。
+测试在独立队列里验证同工作区新 tab、原生显示、同会话输入、
 队列工具处理、关闭重开、上下文连续性和终态回收；不代表整个业务流程已验收。
 
 本次使用 Herdr 客户端 0.9.5 / 服务 0.9.4、Codex 0.164.0、显式选择的

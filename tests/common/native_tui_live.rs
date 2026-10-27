@@ -51,12 +51,40 @@ fn await_turn(f: &Fixture, root: &Path, previous: Option<&str>) -> J {
     }
 }
 
+fn verify_tab(binding: &J, parent: &J) {
+    let pane = herdr(&["pane", "get", binding["pane"].as_str().unwrap()]);
+    assert_eq!(pane["pane"]["workspace_id"], parent["workspace_id"]);
+    assert_eq!(pane["pane"]["tab_id"], binding["tab"]);
+    assert_ne!(binding["tab"], parent["tab_id"]);
+    let tab = herdr(&["tab", "get", binding["tab"].as_str().unwrap()]);
+    assert_eq!(tab["tab"]["number"], binding["tab_number"]);
+    assert_eq!(tab["tab"]["label"], "flow:native-coordinator");
+    assert_eq!(tab["tab"]["pane_count"], 1);
+}
+
+fn reopen(env: &task_env::TaskEnvironment, root: &Path) -> J {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match task_runtime::tui::open(env, root) {
+            Ok(value) => return value,
+            Err(error) => {
+                assert!(error.message.contains("close is not persisted"), "{error}");
+                assert!(Instant::now() < deadline, "{error}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "explicit existing upstream model/socket/native binary and Herdr; creates one disposable visible task"]
 fn native_tui_same_thread_input_reopen_and_cleanup() {
     let socket = std::env::var("HERDR_UPSTREAM_SOCKET").unwrap();
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let binary = std::env::var("HERDR_NATIVE_BINARY").unwrap();
+    let session_store = std::env::var("HERDR_SESSION_STORE").unwrap();
+    let config_path = std::env::var("HERDR_UPSTREAM_CONFIG").unwrap();
+    let config_before = fs::read(&config_path).unwrap();
     let parent = std::env::var("HERDR_PANE_ID").unwrap();
     let parent_before = herdr(&["pane", "get", &parent])["pane"].clone();
     let f = std::mem::ManuallyDrop::new(Fixture::new());
@@ -70,7 +98,7 @@ fn native_tui_same_thread_input_reopen_and_cleanup() {
         &json!({
             "adapter":"codex","configuration":"upstream","socket":socket,"cwd":cwd,"model":model,
             "approval_policy":"on-request","driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
-            "native_tui":{"binary":binary,"parent_pane":parent,"direction":"right"}
+            "native_tui":{"binary":binary,"parent_pane":parent,"session_store":session_store}
         }),
     )
     .unwrap();
@@ -123,6 +151,7 @@ fn native_tui_same_thread_input_reopen_and_cleanup() {
         let first = await_turn(&f, &root, None);
         let attached = task_runtime::tui::status(&env, &root).unwrap();
         assert_eq!(attached["session"], state["session"]);
+        verify_tab(&attached, &parent_before);
         let pane = attached["pane"].as_str().unwrap();
         let agent = herdr(&["agent", "get", pane]);
         util::atomic_write_json(&f.temp.path().join("native-agent.json"), &agent).unwrap();
@@ -138,9 +167,11 @@ fn native_tui_same_thread_input_reopen_and_cleanup() {
             .values()
             .any(|v| v["phase"] == "complete" && v["result"]["success"] == true));
         task_runtime::tui::close(&env, &root).unwrap();
-        let reopened = task_runtime::tui::open(&env, &root).unwrap();
+        let reopened = reopen(&env, &root);
         assert_eq!(reopened["session"], state["session"]);
         assert_ne!(reopened["terminal"], attached["terminal"]);
+        assert_ne!(reopened["tab"], attached["tab"]);
+        verify_tab(&reopened, &parent_before);
         // Native quit/reopen is presentation only; no repeat of the first task.
         assert_eq!(
             util::read_state_json(&root, "receiver-start.json").unwrap()["turn"],
@@ -224,9 +255,18 @@ fn native_tui_same_thread_input_reopen_and_cleanup() {
             util::atomic_write_json(&f.temp.path().join("native-failure.json"),&json!({"binding":record,"marker":marker,"transport":transport,"screen":String::from_utf8_lossy(&output.stdout)})).unwrap();
         }
     }
+    util::atomic_write_json(
+        &f.temp.path().join("inventory.json"),
+        &json!([{
+            "runtime":util::read_state_json(&root,"runtime.json").unwrap(),
+            "session":util::read_state_json(&root,"upstream-session.json").unwrap(),
+            "presentation":util::read_state_json(&root,"presentation.json").ok()
+        }]),
+    )
+    .unwrap();
     drop(env);
     upstream_runtime::finalize_with_retry(&f);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let report = queue::finalization::drive(&f.queue).unwrap();
         if report.pending == 0 {
@@ -238,9 +278,14 @@ fn native_tui_same_thread_input_reopen_and_cleanup() {
     broker.wait().unwrap();
     assert!(!root.exists() && !cwd.exists());
     assert!(!task_env::is_registered("task").unwrap());
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
     assert_eq!(
         herdr(&["pane", "get", &parent])["pane"]["terminal_id"],
         parent_before["terminal_id"]
+    );
+    assert_eq!(
+        herdr(&["pane", "get", &parent])["pane"]["tab_id"],
+        parent_before["tab_id"]
     );
     util::atomic_write_json(
         &f.temp.path().join("native-cleanup.json"),

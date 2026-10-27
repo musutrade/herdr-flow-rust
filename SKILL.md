@@ -16,6 +16,11 @@ with verifiable ownership and release; otherwise report that capability unsuppor
 Do not wait for Herdr upstream to implement the core lifecycle, guess ownership of
 shared resources or label a native backend run as Herdr-visible acceptance.
 
+Open each new Herdr role session in a separate tab within the calling/parent
+pane's workspace. Label the tab with its role/task and preserve the user's focus.
+Reopening a presentation keeps the same agent session and uses a new tab after
+the old presentation's saved records have been reclaimed. See [native TUI](references/native-tui.md).
+
 PR #131–#136 deliver the lifecycle slices on main `5645b695`. Preserve their fresh
 format-3 / initialized protected queue / per-transfer same-mount boundary; do not
 migrate legacy or old isolated objects. Read [task creation](references/task-instance.md)

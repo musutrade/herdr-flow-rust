@@ -1,5 +1,5 @@
 //! Native Codex presentation for isolated task runtimes. The upstream service
-//! and broker keep their existing identities; only a new Herdr pane is owned.
+//! and broker keep their existing identities; each attachment owns a new tab.
 use super::*;
 use std::time::{Duration, Instant};
 #[cfg(test)]
@@ -38,10 +38,13 @@ fn validate_config(config: &J) -> Result<()> {
         }),
         "invalid native_tui configuration",
     )?;
-    ensure(
-        matches!(config["direction"].as_str(), Some("right" | "down")),
-        "native_tui direction must be right or down",
-    )?;
+    // Accept old launch specs, but all new attachments now use separate tabs.
+    if let Some(direction) = config.get("direction") {
+        ensure(
+            matches!(direction.as_str(), Some("right" | "down")),
+            "legacy native_tui direction must be right or down",
+        )?;
+    }
     let binary = PathBuf::from(required(config, "binary")?);
     ensure(
         binary.is_absolute() && binary.is_file(),
@@ -178,36 +181,50 @@ fn open_bound(root: &Path, runtime: &J) -> Result<J> {
         return await_ready(root, runtime, previous);
     }
     let record = reserve_attachment(root, runtime)?;
-    let record = split_pane(root, runtime, record)?;
+    let record = create_tab(root, runtime, record)?;
     launch_frontend(runtime, &record)?;
     await_ready(root, runtime, record)
 }
 
 fn existing_attachment(root: &Path, runtime: &J) -> Result<Option<J>> {
-    let previous = binding(root)?.filter(|record| record["phase"] != "closed");
-    if let Some(record) = &previous {
-        validate_binding(runtime, record)?;
+    let Some(previous) = binding(root)? else {
+        return Ok(None);
+    };
+    validate_binding(runtime, &previous)?;
+    if previous["phase"] == "closed" {
+        // Finish the old presentation's saved copies before replacing its
+        // identity. Reopening preserves the upstream session, not an old tab.
+        persistence::reclaim(&previous)?;
+        return Ok(None);
     }
-    Ok(previous)
+    Ok(Some(previous))
 }
 
 fn reserve_attachment(root: &Path, runtime: &J) -> Result<J> {
     let session = materialized_session(root, runtime)?;
     let config = &runtime["native_tui"];
-    let parent = herdr::call(config, "pane.get", json!({"pane_id":config["parent_pane"]}))?;
-    ensure(
-        parent["pane"]["terminal_id"] == config["parent_terminal"],
-        "parent terminal changed",
-    )?;
+    let parent = parent_pane(config)?;
+    let workspace = required(&parent, "workspace_id")?;
+    let parent_tab = required(&parent, "tab_id")?;
     let nonce = util::pyjson::uuid_hex();
     let directory = root.join(format!("tui-{nonce}"));
     util::ensure_private_dir(&directory, true)?;
     let record = json!({"phase":"creating","instance":runtime["instance"],"session":session,
         "nonce":nonce,"directory":directory,"herdr_socket":config["herdr_socket"],
         "runtime":root,"pane":null,"terminal":null,"cwd":runtime["cwd"],
+        "workspace":workspace,"parent_tab":parent_tab,"tab":null,"tab_number":null,
         "session_store":config.get("session_store")});
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     Ok(record)
+}
+
+fn parent_pane(config: &J) -> Result<J> {
+    let parent = herdr::call(config, "pane.get", json!({"pane_id":config["parent_pane"]}))?;
+    ensure(
+        parent["pane"]["terminal_id"] == config["parent_terminal"],
+        "parent terminal changed",
+    )?;
+    Ok(parent["pane"].clone())
 }
 
 fn presentation_lock(root: &Path) -> Result<util::FileLock> {
@@ -226,18 +243,18 @@ fn materialized_session(root: &Path, runtime: &J) -> Result<String> {
     Ok(session)
 }
 
-fn split_pane(root: &Path, runtime: &J, mut record: J) -> Result<J> {
-    let config = &runtime["native_tui"];
+fn create_tab(root: &Path, runtime: &J, mut record: J) -> Result<J> {
+    let label = format!(
+        "flow:{}",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    );
     let created = herdr::call(
-        config,
-        "pane.split",
-        json!({"target_pane_id":config["parent_pane"],
-        "direction":config["direction"],"cwd":runtime["cwd"],"focus":false}),
+        &record,
+        "tab.create",
+        json!({"workspace_id":record["workspace"],"cwd":runtime["cwd"],
+        "label":label,"focus":false}),
     )?;
-    record["pane"] = created["pane"]["pane_id"].clone();
-    record["terminal"] = created["pane"]["terminal_id"].clone();
-    required(&record, "pane")?;
-    required(&record, "terminal")?;
+    bind_created_tab(&mut record, &created)?;
     record["phase"] = json!("launching");
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     util::atomic_write_json(
@@ -247,9 +264,27 @@ fn split_pane(root: &Path, runtime: &J, mut record: J) -> Result<J> {
     herdr::call(
         &record,
         "pane.rename",
-        json!({"pane_id":record["pane"],"label":format!("flow:{}",root.file_name().unwrap_or_default().to_string_lossy())}),
+        json!({"pane_id":record["pane"],"label":label}),
     )?;
     Ok(record)
+}
+
+fn bind_created_tab(record: &mut J, created: &J) -> Result<()> {
+    record["pane"] = created["root_pane"]["pane_id"].clone();
+    record["terminal"] = created["root_pane"]["terminal_id"].clone();
+    record["tab"] = created["tab"]["tab_id"].clone();
+    record["tab_number"] = created["tab"]["number"].clone();
+    required(record, "pane")?;
+    required(record, "terminal")?;
+    required(record, "tab")?;
+    ensure(
+        created["root_pane"]["workspace_id"] == record["workspace"]
+            && created["tab"]["workspace_id"] == record["workspace"]
+            && created["root_pane"]["tab_id"] == record["tab"]
+            && record["tab"] != record["parent_tab"]
+            && record["tab_number"].is_u64(),
+        "Herdr did not create a separate tab in the parent workspace",
+    )
 }
 
 fn launch_frontend(runtime: &J, record: &J) -> Result<()> {
@@ -585,6 +620,26 @@ pub(super) fn observe_turn(root: &Path, event: &J) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn separate_tab_binding_rejects_parent_tab_or_other_workspace() {
+        let config = json!({"binary":"/bin/true","parent_pane":"parent"});
+        validate_config(&config).unwrap();
+        let mut legacy = config.clone();
+        legacy["direction"] = json!("right");
+        validate_config(&legacy).unwrap();
+        let binding = json!({"workspace":"workspace","parent_tab":"original"});
+        let created = json!({"tab":{"tab_id":"new","workspace_id":"workspace","number":42},
+            "root_pane":{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"new"}});
+        bind_created_tab(&mut binding.clone(), &created).unwrap();
+        let mut wrong = created.clone();
+        wrong["tab"]["workspace_id"] = json!("other");
+        assert!(bind_created_tab(&mut binding.clone(), &wrong).is_err());
+        wrong = created;
+        wrong["tab"]["tab_id"] = json!("original");
+        wrong["root_pane"]["tab_id"] = json!("original");
+        assert!(bind_created_tab(&mut binding.clone(), &wrong).is_err());
+    }
+
     #[test]
     fn upstream_project_trust_is_explicitly_scoped_to_the_thread() {
         let root = util::fs::test_tempdir();

@@ -69,6 +69,9 @@ fn reply(request: &J, state: &mut J) -> J {
         return materialized_reply(state);
     }
     match request["method"].as_str().unwrap() {
+        "pane.get" if request["params"]["pane_id"] == "parent-pane" => {
+            json!({"result":{"pane":state["parent"]}})
+        }
         "pane.get" | "agent.get" if state["present"] == false => {
             json!({"error":{"code":"pane_not_found","message":"removed"}})
         }
@@ -76,7 +79,14 @@ fn reply(request: &J, state: &mut J) -> J {
             state["agent_pending"] = json!(false);
             json!({"error":{"code":"agent_not_found","message":"still starting"}})
         }
-        "pane.get" | "pane.split" => json!({"result":{"pane":state["pane"]}}),
+        "pane.get" => json!({"result":{"pane":state["pane"]}}),
+        "tab.create" => {
+            assert_eq!(request["params"]["workspace_id"], "parent-workspace");
+            assert_eq!(request["params"]["cwd"], state["cwd"]);
+            assert_eq!(request["params"]["focus"], false);
+            assert_eq!(request["params"]["label"], "flow:native");
+            json!({"result":{"tab":{"tab_id":"owned-tab","workspace_id":"parent-workspace","number":42},"root_pane":state["pane"]}})
+        }
         "agent.get" => json!({"result":{"agent":state["pane"]}}),
         "pane.process_info" => {
             json!({"result":{"process_info":{"shell_pid":std::process::id(),"foreground_processes":[]}}})
@@ -158,7 +168,9 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
     let root = super::super::prepare(&env, "native").unwrap();
     let server = Server::new(
         &temp.path().join("herdr.sock"),
-        json!({"methods":[],"present":true,"agent_pending":true,"pane":{
+        json!({"methods":[],"present":true,"agent_pending":true,"cwd":env.workspace_root,
+        "parent":{"pane_id":"parent-pane","terminal_id":"parent-terminal","workspace_id":"parent-workspace","tab_id":"parent-tab"},
+        "pane":{"workspace_id":"parent-workspace","tab_id":"owned-tab",
         "pane_id":"owned-pane","terminal_id":"owned-terminal","agent":"codex","agent_status":"idle","agent_session":{"value":"owned"}}}),
     );
     let mut owned_child = Child(env.command("/bin/sleep").arg("120").spawn().unwrap());
@@ -166,7 +178,7 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
     env.register_process(child.id() as i32).unwrap();
     let mut runtime = json!({"adapter":"codex","configuration":"upstream","root":root,"instance":env.instance_id,"pid":child.id(),
         "start_time":crate::task_env::process_start_time(child.id() as i32),"cwd":env.workspace_root,"model":{"id":"selected","providerID":"existing","reasoning_effort":"high"},
-        "upstream_socket":server.socket,"native_tui":{"binary":"/bin/true","direction":"right","parent_pane":"owned-pane","parent_terminal":"owned-terminal","herdr_socket":server.socket},"native_tui_hooks":{}});
+        "upstream_socket":server.socket,"native_tui":{"binary":"/bin/true","parent_pane":"parent-pane","parent_terminal":"parent-terminal","herdr_socket":server.socket},"native_tui_hooks":{}});
     util::atomic_write_json(&root.join("runtime.json"), &runtime).unwrap();
     util::atomic_write_json(
         &root.join("upstream-session.json"),
@@ -189,6 +201,9 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
     assert!(open(&env, &root).is_err()); // Failed launch retains exactly one attempt.
     let record = binding(&root).unwrap().unwrap();
     assert_eq!(record["phase"], "launching");
+    assert_eq!(record["workspace"], "parent-workspace");
+    assert_eq!(record["tab"], "owned-tab");
+    assert_ne!(record["tab"], record["parent_tab"]);
     assert!(!attachment_ready(&record, &runtime).unwrap());
     let ticks = util::process::process_start_ticks(child.id()).unwrap();
     let mut marker = json!({"status":"ready","nonce":record["nonce"],"session":"owned","binary":"/bin/true","server_socket":server.socket["path"],
@@ -251,7 +266,7 @@ fn attachment_recovery_checks_real_identity_and_never_recreates_a_pane() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|m| *m == "pane.split")
+            .filter(|m| *m == "tab.create")
             .count(),
         1
     );

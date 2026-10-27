@@ -155,6 +155,83 @@ fn saved_shell_is_reclaimed_without_session_text_or_deleting_another_shell() {
     );
 }
 
+fn tab_fixture() -> (tempfile::TempDir, J, J) {
+    let (dir, value, mut binding) = fixture();
+    let mut value = value.clone();
+    let workspace = &mut value["workspaces"][0];
+    let mut owned = workspace["tabs"][0].clone();
+    owned["root_pane"] = json!(2);
+    owned["layout"] = json!({"Pane":2});
+    owned["panes"].as_object_mut().unwrap().remove("1");
+    let mut user = workspace["tabs"][0].clone();
+    snapshot::prune(&mut value, &binding).unwrap();
+    user["panes"].as_object_mut().unwrap().remove("2");
+    user["layout"] = json!({"Pane":1});
+    user["focused"] = json!(1);
+    let workspace = &mut value["workspaces"][0];
+    workspace["tabs"] = json!([owned, user]);
+    workspace["public_pane_numbers"] = json!({"1":1,"2":2});
+    workspace["public_tab_numbers"] = json!([42, 3]);
+    workspace["active_tab"] = json!(1);
+    binding["workspace"] = json!("user");
+    binding["tab_number"] = json!(42);
+    (dir, value, binding)
+}
+
+#[test]
+fn owned_tab_is_removed_with_maps_and_active_user_tab_preserved() {
+    let (dir, value, binding) = tab_fixture();
+    let user = value["workspaces"][0]["tabs"][1].clone();
+    let mut expected = value.clone();
+    assert!(snapshot::prune(&mut expected, &binding).unwrap());
+    let workspace = &expected["workspaces"][0];
+    assert_eq!(workspace["tabs"], json!([user]));
+    assert_eq!(workspace["public_tab_numbers"], json!([3]));
+    assert_eq!(workspace["public_pane_numbers"], json!({"1":1}));
+    assert_eq!(workspace["active_tab"], 0);
+    fs::write(
+        dir.path().join("session.json"),
+        serde_json::to_vec(&expected).unwrap(),
+    )
+    .unwrap();
+    let folder = dir.path().join("session-snapshots");
+    util::ensure_private_dir(&folder, true).unwrap();
+    let path = folder.join("session-1.json");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    reclaim(&binding).unwrap();
+    assert_eq!(util::read_json(&path).unwrap(), expected);
+
+    let mut active_owned = value.clone();
+    active_owned["workspaces"][0]["active_tab"] = json!(0);
+    snapshot::prune(&mut active_owned, &binding).unwrap();
+    assert_eq!(active_owned["workspaces"][0]["active_tab"], 0);
+    let mut foreign = binding.clone();
+    foreign["tab_number"] = json!(3);
+    assert!(snapshot::prune(&mut value.clone(), &foreign).is_err());
+    foreign["tab_number"] = binding["tab_number"].clone();
+    foreign["workspace"] = json!("different");
+    assert!(snapshot::prune(&mut value.clone(), &foreign).is_err());
+}
+
+#[test]
+fn user_pane_added_to_owned_tab_survives_owned_root_cleanup() {
+    let (_, mut value, binding) = tab_fixture();
+    let original = value["workspaces"][0]["tabs"][1].clone();
+    let user_pane = original["panes"]["1"].clone();
+    let tab = &mut value["workspaces"][0]["tabs"][0];
+    tab["panes"]["3"] = user_pane.clone();
+    tab["layout"] = json!({"Split":{"first":{"Pane":2},"second":{"Pane":3}}});
+    value["workspaces"][0]["public_pane_numbers"]["3"] = json!(9);
+    snapshot::prune(&mut value, &binding).unwrap();
+    let workspace = &value["workspaces"][0];
+    assert_eq!(workspace["tabs"][1], original);
+    assert_eq!(workspace["public_tab_numbers"], json!([42, 3]));
+    assert_eq!(workspace["active_tab"], 1);
+    assert_eq!(workspace["tabs"][0]["root_pane"], 3);
+    assert_eq!(workspace["tabs"][0]["focused"], 3);
+    assert_eq!(workspace["tabs"][0]["panes"], json!({"3":user_pane}));
+}
+
 #[test]
 fn replaced_deleted_and_symlinked_copies_are_preserved_or_refused() {
     use std::os::unix::fs::symlink;

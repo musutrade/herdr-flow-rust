@@ -19,14 +19,24 @@ pub(super) fn prune(value: &mut J, binding: &J) -> Result<bool> {
 }
 
 fn prune_workspace(workspace: &mut J, binding: &J) -> Result<bool> {
-    let scope = json!({"workspace":workspace["id"],"numbers":workspace["public_pane_numbers"]});
+    let scope = json!({"workspace":workspace["id"],"numbers":workspace["public_pane_numbers"],
+        "tabs":workspace["public_tab_numbers"]});
     let tabs = workspace["tabs"]
         .as_array_mut()
         .ok_or_else(|| FlowError::guard("Herdr tabs missing"))?;
     let mut removed = Vec::new();
-    for tab in tabs {
-        removed.extend(prune_tab(tab, binding, &scope)?);
+    let mut retired = Vec::new();
+    for (index, tab) in tabs.iter_mut().enumerate() {
+        let (ids, whole_tab) = prune_tab(tab, binding, &scope, index)?;
+        removed.extend(ids);
+        if whole_tab {
+            retired.push(index);
+        }
     }
+    finish_workspace(workspace, removed, retired)
+}
+
+fn finish_workspace(workspace: &mut J, removed: Vec<String>, retired: Vec<usize>) -> Result<bool> {
     if removed.is_empty() {
         return Ok(false);
     }
@@ -36,7 +46,34 @@ fn prune_workspace(workspace: &mut J, binding: &J) -> Result<bool> {
     for id in removed {
         numbers.remove(&id);
     }
+    for index in retired.into_iter().rev() {
+        remove_tab(workspace, index)?;
+    }
     Ok(true)
+}
+
+fn remove_tab(workspace: &mut J, index: usize) -> Result<()> {
+    let length = workspace["tabs"].as_array().unwrap().len();
+    ensure(
+        length > 1,
+        "cannot remove the last tab from a user workspace",
+    )?;
+    let active = workspace["active_tab"]
+        .as_u64()
+        .ok_or_else(|| FlowError::guard("Herdr active tab missing"))? as usize;
+    ensure(active < length, "Herdr active tab is out of range")?;
+    let numbers = workspace["public_tab_numbers"]
+        .as_array_mut()
+        .ok_or_else(|| FlowError::guard("Herdr tab map missing"))?;
+    ensure(numbers.len() == length, "Herdr tab map length changed")?;
+    numbers.remove(index);
+    workspace["tabs"].as_array_mut().unwrap().remove(index);
+    workspace["active_tab"] = json!(if active > index {
+        active - 1
+    } else {
+        active.min(length - 2)
+    });
+    Ok(())
 }
 
 fn owned_ids(tab: &J, binding: &J, scope: &J) -> Result<Vec<String>> {
@@ -52,12 +89,27 @@ fn owned_ids(tab: &J, binding: &J, scope: &J) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-fn prune_tab(tab: &mut J, binding: &J, scope: &J) -> Result<Vec<String>> {
+fn prune_tab(tab: &mut J, binding: &J, scope: &J, index: usize) -> Result<(Vec<String>, bool)> {
     let ids = owned_ids(tab, binding, scope)?;
+    if ids.contains(&tab["root_pane"].to_string()) {
+        owned_tab(binding, scope, index)?;
+        if tab["panes"].as_object().unwrap().len() == ids.len() {
+            return Ok((ids, true));
+        }
+    }
     for id in &ids {
         remove_pane(tab, id)?;
     }
-    Ok(ids)
+    Ok((ids, false))
+}
+
+fn owned_tab(binding: &J, scope: &J, index: usize) -> Result<()> {
+    ensure(
+        binding["workspace"] == scope["workspace"]
+            && binding["tab_number"].is_u64()
+            && binding["tab_number"] == scope["tabs"][index],
+        "cannot reclaim another tab's root from a recovery copy",
+    )
 }
 
 fn matches_saved_pane(id: &str, pane: &J, binding: &J, scope: &J) -> Result<bool> {
@@ -119,18 +171,25 @@ fn remove_pane(tab: &mut J, id: &str) -> Result<()> {
     let number: u64 = id
         .parse()
         .map_err(|_| FlowError::guard("invalid Herdr internal pane id"))?;
-    ensure(
-        tab["root_pane"] != number,
-        "cannot reclaim another tab's root from a recovery copy",
-    )?;
     tab["layout"] = without(&tab["layout"], number)?
         .ok_or_else(|| FlowError::guard("cannot remove an entire user tab"))?;
     tab["panes"].as_object_mut().unwrap().remove(id);
+    if tab["root_pane"] == number {
+        tab["root_pane"] = first_pane(&tab["layout"])?;
+    }
     if tab["focused"] == number {
         tab["focused"] = tab["root_pane"].clone();
         tab["zoomed"] = json!(false);
     }
     Ok(())
+}
+
+fn first_pane(node: &J) -> Result<J> {
+    if node["Pane"].is_u64() {
+        return Ok(node["Pane"].clone());
+    }
+    ensure(node["Split"].is_object(), "unknown Herdr layout node")?;
+    first_pane(&node["Split"]["first"])
 }
 
 fn without(node: &J, id: u64) -> Result<Option<J>> {

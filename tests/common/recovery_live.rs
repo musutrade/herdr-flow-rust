@@ -107,7 +107,7 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
             "adapter":"codex","configuration":"upstream","socket":socket,
             "cwd":workspace.join("checkout"),"model":model,"role_models":roles,
             "approval_policy":"on-request","driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),
-        "native_tui":{"binary":binary,"parent_pane":parent,"direction":"down","session_store":session_store}
+        "native_tui":{"binary":binary,"parent_pane":parent,"session_store":session_store}
         }),
     )
     .unwrap();
@@ -192,6 +192,15 @@ fn stopped_watcher_real_diagnosis_handoff_and_cleanup() {
             assert!(!incident["result"][key].as_str().unwrap().trim().is_empty());
         }
         assert_eq!(incident["presentation"]["phase"], "ready", "{incident}");
+        assert_eq!(
+            incident["presentation"]["workspace"],
+            parent_before["workspace_id"]
+        );
+        assert_ne!(incident["presentation"]["tab"], parent_before["tab_id"]);
+        assert_ne!(
+            incident["presentation"]["tab"],
+            started["presentation"]["tab"]
+        );
         let pane = incident["presentation"]["pane"].as_str().unwrap();
         let agent = herdr(&["agent", "get", pane]);
         assert!(agent
