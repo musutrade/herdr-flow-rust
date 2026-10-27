@@ -50,13 +50,17 @@ pub(crate) fn service(queue_root: &Path) -> Result<()> {
 fn serve_pending(queue_root: &Path, q: &J, state: &J) -> Result<()> {
     let root = PathBuf::from(required(state, "runtime")?);
     let _permit = bound_permit(queue_root, q, &root, state)?;
+    let Some(_service) = util::FileLock::acquire(&root.join("control-service.lock"), false)? else {
+        return Ok(());
+    };
+    if !crate::task_runtime::broker::checkpoint::available(&root)? {
+        return Ok(());
+    }
     let Some(requests) =
         util::read_state_json_bounded_if_exists(&root, "broker-tools.json", 1024 * 1024)?
     else {
         return Ok(());
     };
-    let _service = util::FileLock::acquire(&root.join("control-service.lock"), false)?
-        .ok_or_else(|| FlowError::new(crate::ErrorKind::StateBusy, "control service busy"))?;
     serve_bound(queue_root, q, &root, state, &requests)
 }
 
@@ -99,6 +103,7 @@ fn bound_permit(
 }
 
 fn serve_request(root: &Path, state: &J, owner: &Owner, request: &J) -> Result<()> {
+    crate::task_runtime::broker::checkpoint::ready(root)?;
     let mut journal =
         util::read_state_json_bounded_if_exists(root, "control-tools.json", 1024 * 1024)?
             .unwrap_or(json!({}));
@@ -130,10 +135,6 @@ fn execute_once(
     journal: &mut J,
     key: &str,
 ) -> Result<J> {
-    ensure(
-        journal.as_object().unwrap().len() < 64,
-        "control request bound reached",
-    )?;
     journal[key] = json!({"phase":"executing","request":request});
     save(root, journal)?;
     let result = response(execute(root, state, owner, request));
@@ -144,10 +145,7 @@ fn execute_once(
 }
 
 fn save(root: &Path, journal: &J) -> Result<()> {
-    ensure(
-        serde_json::to_vec(journal)?.len() <= 1024 * 1024,
-        "control journal exceeds byte bound",
-    )?;
+    crate::task_runtime::broker::capacity::tools(root, "control-tools.json", journal)?;
     util::atomic_write_json(&root.join("control-tools.json"), journal)
 }
 
@@ -185,6 +183,12 @@ fn inspect_runtime(root: &Path, q: &J, owner: &Owner) -> Result<J> {
     let mut view = inspect(q, owner)?;
     view["runtime_results"] = continuation::results(root)?;
     view["recovery"] = crate::task_runtime::recovery::status(root)?;
+    view["record_checkpoint"] =
+        util::read_state_json_bounded_if_exists(root, "record-checkpoint.json", 1024 * 1024)?
+            .unwrap_or(J::Null);
+    view["record_capacity"] =
+        util::read_state_json_bounded_if_exists(root, "record-capacity.json", 1024 * 1024)?
+            .unwrap_or(J::Null);
     Ok(view)
 }
 
@@ -198,6 +202,7 @@ fn parse_spec(args: &J) -> Result<J> {
 }
 
 fn validate_request<'a>(root: &Path, state: &J, request: &'a J) -> Result<&'a J> {
+    crate::task_runtime::broker::checkpoint::current_request(root, request)?;
     let params = &request["params"];
     let turn = util::read_state_json(root, "receiver-turn.json")?;
     ensure(

@@ -284,7 +284,16 @@ fn exercise(success: bool) {
 fn tool(send: &mpsc::Sender<J>, receive: &mpsc::Receiver<J>, id: u64, action: &str, spec: J) -> J {
     send.send(json!({"id":id,"method":"item/tool/call","params":{"threadId":COORD,
         "turnId":"coordinator-turn","tool":"herdr_queue","arguments":{"action":action,"delivery":if action == "ack" {spec["delivery"].as_str().unwrap_or("")} else {""},"spec":spec.to_string()}}})).unwrap();
-    let reply = receive.recv_timeout(Duration::from_secs(30)).unwrap();
+    let reply = receive
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|error| {
+            let registry = PathBuf::from(std::env::var_os("HERDR_TASK_ENV_ROOT").unwrap());
+            let fixture = registry.ancestors().nth(3).unwrap();
+            panic!(
+                "tool {id} ({action}): {error}; watcher: {}",
+                fs::read_to_string(fixture.join("continuation-watch.log")).unwrap_or_default()
+            );
+        });
     assert_eq!(reply["id"], id);
     reply["result"].clone()
 }

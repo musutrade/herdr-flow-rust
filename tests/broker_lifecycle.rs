@@ -71,6 +71,59 @@ fn fixture() -> tempfile::TempDir {
     .unwrap();
     dir
 }
+
+#[test]
+fn restarted_broker_finishes_each_partial_record_checkpoint_without_native_calls() {
+    for prefix in 0..=3 {
+        let dir = fixture();
+        let root = dir.path();
+        let entry = json!({"phase":"complete","request":{"id":1},"result":{"success":true}});
+        let turn = json!({"thread":"s","turn":{"id":"old","status":"completed"}});
+        let mut files = json!({});
+        for (index, name) in [
+            "control-tools.json",
+            "broker-tools.json",
+            "broker-events.json",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (key, value) = if index == 2 {
+                ("old", &turn)
+            } else {
+                ("1", &entry)
+            };
+            files[*name] = json!({key:util::pyjson::sha256_hex(value.to_string().as_bytes())});
+            let entries = if index < prefix {
+                json!({})
+            } else {
+                json!({key:value})
+            };
+            let journal = if index == 2 {
+                json!({"turns":entries,"pending":{}})
+            } else {
+                entries
+            };
+            util::atomic_write_json(&root.join(name), &journal).unwrap();
+        }
+        util::atomic_write_json(&root.join("record-checkpoint.json"), &json!({"phase":"pruning","generation":7,"active":{"thread":"s","turn":"next"},"files":files})).unwrap();
+        let mut broker = spawn(root);
+        ready(root, &mut broker);
+        healthy(root);
+        let checkpoint = util::read_state_json(root, "record-checkpoint.json").unwrap();
+        assert_eq!(checkpoint["phase"], "complete");
+        assert_eq!(checkpoint["generation"], 7);
+        assert!(checkpoint["files"].is_null());
+        for name in ["control-tools.json", "broker-tools.json"] {
+            assert_eq!(util::read_state_json(root, name).unwrap(), json!({}));
+        }
+        assert_eq!(
+            util::read_state_json(root, "broker-events.json").unwrap()["turns"],
+            json!({})
+        );
+        assert!(!root.join("server.sock").exists());
+    }
+}
 fn exited(broker: &mut Broker) -> std::process::ExitStatus {
     let start = Instant::now();
     loop {

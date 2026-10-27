@@ -540,7 +540,11 @@ receive no write permission to the external control directory. Existing queues
 without a task-runtime receiver never enter this service. No session environment
 variable is forged. Approval and user-input requests are never answered by it.
 
-Request and result journals are bounded to 64 calls and 1 MiB reads. Mutation
+Request and result journals retain at most 64 current/referenced calls and 1 MiB
+of serialized JSON each. Completed previous turns are reclaimed through a
+[restartable task-local checkpoint](record-continuation.md); the limits no longer
+count every call over the task's lifetime. An unfinished turn and unresolved
+operations still consume the bounded window. Mutation
 intent precedes execution; an interrupted operation with unknown outcome blocks
 without replay. Completed results can be returned again, but a response whose
 send outcome is unknown is not sent again automatically. Changed request IDs,
