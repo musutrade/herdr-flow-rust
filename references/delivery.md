@@ -1,5 +1,39 @@
 # Correct delivery and disposable completion
 
+## Queue availability during external delivery (2026-10-27)
+
+The #130 / #112 continuation first removes external work from the shared queue
+transaction. Preparation snapshots the queue under its lock, then verifies the
+artifact and runs the read-only adapter preflight without that lock. Before
+saving an intent, it reloads the queue, requires the same parent and queue identity,
+and rechecks cleanup references. Updates to unrelated tasks are preserved.
+
+Execution performs its read-only checks outside the queue transaction. It then
+revalidates the current approval, version, authorization, queue/control state and
+PR/batch/writer prerequisites, freezes that same parent, and persists `unknown`
+before releasing the lock and submitting. Adapter execution and observation do
+not hold the queue lock. The environment handle and instance lifecycle permit
+still exclude another writer or terminal cleanup of this operation. A crash after
+reservation leaves the original intent for observation; it does not authorize a
+second submission. An ordinary control resume cannot reopen the frozen parent.
+
+Four new regression tests cover adapter calls, concurrent changes during both
+preparation and execution, and an actual Git push paused in a private receive
+hook. While that hook is held, another queue transaction updates an unrelated
+task, the saved delivery remains `unknown`, a second environment handle is
+refused, and the running Git process prevents a claim of absence. Releasing the
+hook confirms the accepted commit after one submission, followed by normal
+cleanup. The delivery suite passes **27 tests**. The initial hook test incorrectly
+expected the isolated environment's error kind from a legacy fixture; its
+assertion now checks the existing exclusive-handle refusal.
+
+This increment does not make the synchronous caller asynchronous: a queue watcher
+invoking delivery still waits for its adapter call. Independent observation and
+other queue transactions can proceed. A publishing role, remote PR/CI integration,
+stage delivery that keeps its parent requirement active, and early reclamation
+of unreferenced stage resources remain separate work. There is no new live model
+or Herdr acceptance evidence in these protocol/local Git tests.
+
 A version 2 requirement is finished only after the current accepted artifact has
 reached the agreed external endpoint **and** its task environment has been
 released. An independent pass, an execution exit, an ACK, a Git push, and successful

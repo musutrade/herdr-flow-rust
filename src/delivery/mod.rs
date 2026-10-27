@@ -6,7 +6,7 @@ use crate::{
     util, FlowError, Result,
 };
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 mod cleanup;
 pub mod cli;
 pub mod local;
@@ -50,6 +50,8 @@ fn field(value: &J, key: &str) -> Result<String> {
 /// preparation is safe; it never calls Executor::execute.
 /// Requires an owned active environment and validated artifact/target/approval.
 /// Acquires the queue lock internally; callers must not hold that same lock.
+/// Artifact verification and adapter preflight run outside the queue lock. The
+/// same parent and fresh cleanup references must still validate before commit.
 /// Journal and queue writes are separate: an error can leave intent persisted
 /// before the queue is frozen. Keep ownership and reconcile/retry preparation;
 /// do not infer submission from preparation. Executor preflight must be read-only.
@@ -64,30 +66,47 @@ pub fn prepare(
         env.owns_lock() && env.state == EnvironmentState::Active,
         "delivery requires owned active environment",
     )?;
-    let _lock = crate::queue::locked(queue, false)?;
-    let mut state = crate::queue::load_queue(queue)?;
-    stage_intent(env, queue, spec, &state, executor)?;
-    freeze(&mut state, env)?;
-    crate::queue::save(queue, &mut state)?;
+    stage_intent(env, queue, spec, executor)?;
     Ok(env.delivery.clone())
 }
 fn stage_intent(
     env: &mut TaskEnvironment,
     queue: &Path,
     spec: &J,
-    state: &J,
     executor: &dyn Executor,
 ) -> Result<()> {
     if !env.delivery.is_null() {
-        return ensure(
+        ensure(
             env.delivery["request"] == *spec && env.delivery["queue"] == json!(queue),
             "delivery intent already exists",
-        );
+        )?;
+        return freeze_queue(env, queue);
     }
-    let intent = new_intent(env, queue, spec, state)?;
+    let state = queue_snapshot(queue)?;
+    let intent = new_intent(env, queue, spec, &state)?;
     executor.preflight(&intent)?;
+    save_prepared(env, queue, &state, intent)
+}
+
+fn queue_snapshot(queue: &Path) -> Result<J> {
+    let _lock = crate::queue::locked(queue, false)?;
+    crate::queue::load_queue(queue)
+}
+
+fn save_prepared(env: &mut TaskEnvironment, queue: &Path, before: &J, intent: J) -> Result<()> {
+    let _lock = crate::queue::locked(queue, false)?;
+    let mut state = crate::queue::load_queue(queue)?;
+    ensure(
+        state["id"] == before["id"]
+            && state["tasks"][&env.task_id] == before["tasks"][&env.task_id],
+        "requirement changed during delivery preflight",
+    )?;
+    cleanup::validate_sources(env, queue, &state)?;
+    validate_freeze(&state, &intent)?;
     env.delivery = intent;
-    env.persist()
+    env.persist()?;
+    freeze(&mut state, env)?;
+    crate::queue::save(queue, &mut state)
 }
 
 fn new_intent(env: &TaskEnvironment, queue: &Path, spec: &J, state: &J) -> Result<J> {
@@ -116,6 +135,10 @@ fn validate_parent(parent: &J, spec: &J) -> Result<()> {
         lineage::is_parent(parent) && parent["control"] == "running",
         "delivery requires running requirement task",
     )?;
+    validate_terms(parent, spec)
+}
+
+fn validate_terms(parent: &J, spec: &J) -> Result<()> {
     ensure(
         parent["state_version"] == spec["state_version"],
         "requirement version changed",
@@ -169,25 +192,36 @@ fn validate_target(env: &TaskEnvironment, spec: &J) -> Result<()> {
 }
 
 fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
+    validate_freeze(state, &env.delivery)?;
     let parent = &mut state["tasks"][&env.task_id];
-    ensure(
-        parent["approved"] == env.delivery["approval"],
-        "delivery acceptance changed",
-    )?;
-    validate_approval(parent)?;
-    ensure(
-        parent["delivery"].is_null() || parent["delivery"] == env.delivery["id"],
-        "another delivery owns parent",
-    )?;
     parent["delivery"] = env.delivery["id"].clone();
     parent["control"] = json!("delivering");
     Ok(())
 }
 
+fn validate_freeze(state: &J, intent: &J) -> Result<()> {
+    let parent = &state["tasks"][field(intent, "task")?];
+    ensure(
+        state["stopped"] != true
+            && lineage::is_parent(parent)
+            && matches!(parent["control"].as_str(), Some("running" | "delivering")),
+        "delivery requirement or queue is no longer active",
+    )?;
+    ensure(
+        parent["approved"] == intent["approval"],
+        "delivery acceptance changed",
+    )?;
+    ensure(
+        parent["delivery"].is_null() || parent["delivery"] == intent["id"],
+        "another delivery owns parent",
+    )?;
+    validate_terms(parent, &intent["request"])
+}
+
 /// Save uncertainty before the one allowed submission. All retries must use
 /// reconcile, which performs only observation.
-/// Requires owned active state in phase prepared. Holds the queue lock through
-/// preflight, submission and observation; adapters must not reenter that lock.
+/// Requires owned active state in phase prepared. Revalidates and freezes the
+/// parent in a short queue transaction; adapter calls never hold the queue lock.
 /// Persisting unknown precedes submission. Errors, including persistence errors,
 /// do not prove absence of an external effect; restore/reconcile the same intent
 /// rather than invoke execute again. Successful return can still report an
@@ -195,12 +229,8 @@ fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
 pub fn execute(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     validate_execution(env)?;
-    let queue = field(&env.delivery, "queue")?;
-    let _lock = crate::queue::locked(Path::new(&queue), false)?;
-    freeze_queue(env, Path::new(&queue))?;
     executor.preflight(&env.delivery)?;
-    env.delivery["phase"] = json!("unknown");
-    env.persist()?;
+    reserve_execution(env)?;
     if let Err(error) = executor.execute(&env.delivery) {
         env.delivery["execution_error"] = json!(error.to_string());
         env.persist()?;
@@ -222,9 +252,20 @@ fn validate_execution(env: &TaskEnvironment) -> Result<()> {
     crate::progress::artifact::LocalArtifacts.verify(&env.delivery["artifact"])
 }
 fn freeze_queue(env: &TaskEnvironment, queue: &Path) -> Result<()> {
+    let _lock = crate::queue::locked(queue, false)?;
     let mut state = crate::queue::load_queue(queue)?;
     freeze(&mut state, env)?;
     crate::queue::save(queue, &mut state)
+}
+
+fn reserve_execution(env: &mut TaskEnvironment) -> Result<()> {
+    let queue = PathBuf::from(field(&env.delivery, "queue")?);
+    let _lock = crate::queue::locked(&queue, false)?;
+    let mut state = crate::queue::load_queue(&queue)?;
+    freeze(&mut state, env)?;
+    env.delivery["phase"] = json!("unknown");
+    env.persist()?;
+    crate::queue::save(&queue, &mut state)
 }
 
 fn ensure_owned(env: &TaskEnvironment) -> Result<()> {
