@@ -446,8 +446,11 @@ fn restart_from_spawn_checkpoint(coordinator: &Path) -> u64 {
     incident["phase"] = json!("repairing");
     incident["repair"]["phase"] = json!("started");
     util::atomic_write_json(&root.join("incident.json"), &incident).unwrap();
-    drop(lock);
     restart_observer(&root);
+    // The restarted observer must not reconcile until its registration helper
+    // has released the environment handle. While this incident lock is held it
+    // can publish heartbeats but cannot mistake fixture setup for a repair fault.
+    drop(lock);
     watcher
 }
 
@@ -481,6 +484,29 @@ fn restart_observer(root: &Path) {
         ready: None,
     }
     .reap();
+    // Force an observer tick while this registration handle still owns the
+    // environment. The caller's incident lock must defer reconciliation.
+    observer_heartbeats_while_repair_is_locked(root);
+}
+
+fn observer_heartbeats_while_repair_is_locked(root: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut previous = None;
+    loop {
+        let health = herdr_flow::watch_service::health(root);
+        if health["healthy"] == true {
+            let current = health["heartbeat_at"].as_f64().unwrap();
+            if previous.is_some_and(|before| current > before) {
+                break;
+            }
+            previous = Some(current);
+        }
+        assert!(Instant::now() < deadline, "{health}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let incident = util::read_state_json(root, "incident.json").unwrap();
+    assert_eq!(incident["phase"], "repairing", "{incident}");
+    assert_eq!(incident["repair"]["phase"], "started", "{incident}");
 }
 
 fn status_reader_does_not_stop_observer(coordinator: &Path) {

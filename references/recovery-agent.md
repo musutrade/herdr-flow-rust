@@ -24,6 +24,13 @@ watcher 锁夹具先等待原故障登记，避免它自己持锁影响原故障
 导致观察器转而诊断未启动的队列 watcher，该次测试失败保留，不计为通过。
 这些是协议与进程测试；真实模型 / Herdr 证据仍以下方 #151 的范围为准。
 
+本轮 `334677e` 首次完整覆盖率回归另在中断接续夹具失败：重启 observer 的 helper
+还持有环境句柄时，新 observer 已开始核验已登记 watcher，宿主按原规则记录
+`unknown: environment busy` 并拒绝 recovered。现在夹具跨越 observer 启动、登记及
+环境句柄释放保留 incident 锁，再允许复核；额外等待两个心跳，确定新 observer 已在
+夹具持锁期间运行，但原 `repairing / started` 检查点未变。生产环境占锁拒绝语义不变。
+该次全量失败单独保留，不能用前面的 8 项定向通过替代。
+
 ## PR #151 的真实模型 / Herdr 修复动作验收（2026-10-27）
 
 PR #151 的 `bf42d51` 已通过 Rust checks、CRAP gate 和依赖审计；这些 CI 结果仍是
