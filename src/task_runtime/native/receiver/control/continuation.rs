@@ -46,8 +46,12 @@ fn context(queue_root: &Path, q: &J) -> Result<Option<(PathBuf, J, Owner)>> {
 
 fn drive_bound(root: &Path, state: &J, owner: &Owner) -> Result<bool> {
     let permit = current(root, state, owner)?;
-    let _service = util::FileLock::acquire(&root.join("control-service.lock"), false)?
-        .ok_or_else(|| FlowError::new(crate::ErrorKind::StateBusy, "control service busy"))?;
+    let Some(_service) = util::FileLock::acquire(&root.join("control-service.lock"), false)? else {
+        return Ok(false);
+    };
+    if !crate::task_runtime::broker::checkpoint::available(root)? {
+        return Ok(false);
+    }
     serve_external(root, state, owner)?;
     collect_workers(root, state, owner)?;
     drop(permit);

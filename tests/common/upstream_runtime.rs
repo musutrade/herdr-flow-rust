@@ -8,11 +8,16 @@ const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
 #[test]
 fn upstream_thread_cleanup_preserves_service_config_and_other_sessions() {
     for lost_reply in [false, true] {
-        exercise(lost_reply);
+        exercise(lost_reply, 0);
     }
 }
 
-fn exercise(lost_reply: bool) {
+#[test]
+fn same_receiver_crosses_64_turns_rejects_retired_apply_and_cleans_up() {
+    exercise(false, 70);
+}
+
+fn exercise(lost_reply: bool, continuation_rounds: usize) {
     let f = Fixture::new();
     let mut env = isolated_runtime::linked(&f);
     let root = task_runtime::prepare(&env, "shared").unwrap();
@@ -42,7 +47,10 @@ fn exercise(lost_reply: bool) {
                 peer.json(&json!({"id":request["id"],"result":{
                 "thread":{"id":OWNED,"cwd":server_cwd,"modelProvider":"openai","turns":[]},
                 "model":"fixture","modelProvider":"openai"}}));
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                let mut turns = 0;
+                let mut replies = 0;
+                let mut retired_apply = J::Null;
                 while wait.try_recv().is_err() {
                     assert!(std::time::Instant::now() < deadline);
                     if !readable(&peer) {
@@ -53,18 +61,41 @@ fn exercise(lost_reply: bool) {
                     }
                     let request = peer.request();
                     if request["method"].is_null() {
+                        replies += 1;
+                        if replies == 4 || turns > 1 {
+                            let id = if turns == 1 {
+                                "fixture-turn".to_owned()
+                            } else {
+                                format!("fixture-turn-{turns}")
+                            };
+                            peer.json(&json!({"method":"turn/completed","params":{"threadId":OWNED,"turn":{"id":id,"status":"completed"}}}));
+                        }
                         tool_reply.send(request).unwrap();
                         continue;
+                    }
+                    if request["method"] == "turn/start" {
+                        turns += 1;
                     }
                     let result = match request["method"].as_str().unwrap() {
                         "thread/read" => json!({"thread":{"id":OWNED,"cwd":server_cwd,
                             "modelProvider":"openai","status":{"type":"idle"},"canAcceptDirectInput":true}}),
-                        "turn/start" => json!({"turn":{"id":"fixture-turn"}}),
+                        "turn/start" => {
+                            json!({"turn":{"id":if turns == 1 { "fixture-turn".to_owned() } else { format!("fixture-turn-{turns}") }}})
+                        }
                         method => panic!("unexpected {method}"),
                     };
                     assert_eq!(request["params"]["threadId"], OWNED);
                     peer.json(&json!({"id":request["id"],"result":result}));
                     if request["method"] == "turn/start" {
+                        if turns > 1 {
+                            peer.json(&json!({"id":1000+turns,"method":"item/tool/call","params":{
+                                "threadId":OWNED,"turnId":format!("fixture-turn-{turns}"),"callId":format!("call-{turns}"),
+                                "tool":"herdr_queue","arguments":{"action":"inspect","delivery":"","spec":""}}}));
+                            if turns == continuation_rounds + 1 {
+                                peer.json(&retired_apply);
+                            }
+                            continue;
+                        }
                         for (id, thread) in [(100, OWNED), (101, FOREIGN)] {
                             peer.json(&json!({"id":id,"method":"item/tool/call","params":{
                                 "threadId":thread,"turnId":"fixture-turn","callId":format!("call-{id}"),
@@ -83,8 +114,12 @@ fn exercise(lost_reply: bool) {
                                 json!({"action":"apply","delivery":"","spec":spec.to_string()}),
                             ),
                         ] {
-                            peer.json(&json!({"id":id,"method":"item/tool/call","params":{"threadId":OWNED,"turnId":"fixture-turn",
-                                "callId":format!("call-{id}"),"tool":"herdr_queue","arguments":args}}));
+                            let tool = json!({"id":id,"method":"item/tool/call","params":{"threadId":OWNED,"turnId":"fixture-turn",
+                                "callId":format!("call-{id}"),"tool":"herdr_queue","arguments":args}});
+                            if id == 103 {
+                                retired_apply = tool.clone();
+                            }
+                            peer.json(&tool);
                         }
                     }
                 }
@@ -219,6 +254,74 @@ fn exercise(lost_reply: bool) {
         util::read_state_json(&root, "control-tools.json").unwrap(),
         completed
     );
+    let identity = f.state()["tasks"]["task"]["environment"].clone();
+    let applied_version = f.state()["tasks"]["dev"]["state_version"].clone();
+    if continuation_rounds > 0 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let service = loop {
+            if let Some(lock) =
+                util::FileLock::acquire(&root.join("control-service.lock"), false).unwrap()
+            {
+                break lock;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let _lock = queue::locked(&f.queue, false).unwrap();
+        // A checkpoint holding the service lock is ordinary backpressure:
+        // the queue tick must survive and try the pending requests next time.
+        queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
+        drop(service);
+    }
+    for round in 0..continuation_rounds {
+        adapter
+            .prompt("Inspect the same task once, then stop.")
+            .unwrap();
+        let count = if round + 1 == continuation_rounds {
+            2
+        } else {
+            1
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut replies = Vec::new();
+        while replies.len() < count {
+            {
+                let _lock = queue::locked(&f.queue, false).unwrap();
+                queue::tick(&f.queue, &herdr_flow::herdr::receiver_factory, None).unwrap();
+            }
+            replies.extend(received.try_iter());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "continuation {round}: {replies:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for reply in replies {
+            if reply["id"] == 103 {
+                assert_eq!(
+                    reply["result"]["success"], false,
+                    "retired apply replayed: {reply}"
+                );
+                assert!(reply["result"]["contentItems"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("previous turn"));
+            } else {
+                assert_eq!(reply["result"]["success"], true, "{reply}");
+            }
+        }
+        assert_eq!(f.state()["tasks"]["task"]["environment"], identity);
+        assert_eq!(f.state()["tasks"]["dev"]["state_version"], applied_version);
+    }
+    if continuation_rounds > 0 {
+        let checkpoint = util::read_state_json(&root, "record-checkpoint.json").unwrap();
+        assert!(
+            checkpoint["generation"].as_u64().unwrap() >= 64,
+            "{checkpoint}"
+        );
+        let control = util::read_state_json(&root, "control-tools.json").unwrap();
+        assert!(control.as_object().unwrap().len() < 10, "{control}");
+    }
     assert!(adapter.call(&["notify".into()]).is_err());
     let mut wrong = active;
     wrong["session"] = json!(FOREIGN);

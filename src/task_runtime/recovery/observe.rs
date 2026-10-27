@@ -46,8 +46,10 @@ fn watchers(context: &J) -> Result<Option<J>> {
     for root in [guard, crate::queue::artifacts(&owner.queue_root)?] {
         // An explicitly stopped/missing watcher is an observation failure,
         // not evidence that its operation failed or that it is safe to resend.
-        let health = crate::watch_service::health(&root);
+        let mut health = crate::watch_service::health(&root);
         if health["healthy"] != true {
+            health["record_capacity"] =
+                read(&coordinator, "record-capacity.json")?.unwrap_or(J::Null);
             let identity = read(&root, "watch.json")?.unwrap_or(J::Null);
             return Ok(Some(fault(
                 &root,
@@ -76,7 +78,8 @@ fn runtime_fault(root: &Path, runtime: &J, q: &J) -> Result<Option<J>> {
             root,
             "broker_unavailable",
             &identity,
-            json!({"reason":"The recorded transport process is no longer observed. The upstream task may still be running.","turn":turn}),
+            json!({"reason":"The recorded transport process is no longer observed. The upstream task may still be running.","turn":turn,
+                "broker_status":read(root, "broker-status.json")?,"record_capacity":read(root, "record-capacity.json")?}),
         )));
     }
     if !turn["observation_error"].is_null() {
@@ -189,6 +192,47 @@ pub(super) fn fault(root: &Path, kind: &str, identity: &J, evidence: J) -> J {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn watcher_capacity_is_evidence_only_when_the_observed_watcher_is_unhealthy() {
+        let dir = crate::util::fs::test_tempdir();
+        let coordinator = dir.path().join("coordinator");
+        let guard = coordinator.join("guard");
+        let queue_root = dir.path().join("queue");
+        util::ensure_private_dir(&guard, true).unwrap();
+        let q = crate::queue::init(&queue_root, None, 30).unwrap();
+        let owner = Owner {
+            queue_root: queue_root.clone(),
+            queue_id: q["id"].as_str().unwrap().to_owned(),
+            task_id: "task".into(),
+            epoch: 1,
+            instance_id: "i".into(),
+        };
+        save(&coordinator, "receiver.json", &json!({"guard_dir":guard})).unwrap();
+        let capacity = json!({"phase":"blocked","journal":"control-tools.json","entries":65,"replay_allowed":false});
+        save(&coordinator, "record-capacity.json", &capacity).unwrap();
+        let context = json!({"coordinator":coordinator,"owner":owner});
+        let mut locks = Vec::new();
+        let artifacts = crate::queue::artifacts(&queue_root).unwrap();
+        for root in [&guard, &artifacts] {
+            locks.push(
+                util::FileLock::acquire(&root.join("watch.lock"), false)
+                    .unwrap()
+                    .unwrap(),
+            );
+            save(root, "watch.json", &json!({"status":"running","pid":std::process::id(),
+                "start_ticks":util::process_start_ticks(std::process::id()),"heartbeat_at":util::now(),"max_age":60})).unwrap();
+        }
+        assert!(watchers(&context).unwrap().is_none());
+        drop(locks.pop());
+        let observed = watchers(&context).unwrap().unwrap();
+        assert_eq!(observed["source"], json!(artifacts));
+        assert_eq!(observed["evidence"]["record_capacity"], capacity);
+        assert_eq!(observed["business_outcome"], "unchanged");
+        assert_eq!(observed["operation_replay_allowed"], false);
+        drop(locks.pop());
+        assert_eq!(watchers(&context).unwrap().unwrap()["source"], json!(guard));
+    }
+
     #[test]
     fn long_running_turns_are_healthy_and_unrecognized_or_stopped_turns_need_observation() {
         for state in ["inProgress", "completed"] {

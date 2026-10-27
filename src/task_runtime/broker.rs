@@ -2,6 +2,8 @@
 //! a first turn discards an unpersisted fresh thread in Codex 0.163.
 use super::*;
 use crate::codex::rpc::Client;
+pub(in crate::task_runtime) mod capacity;
+pub(in crate::task_runtime) mod checkpoint;
 mod owner;
 mod tools;
 mod transport;
@@ -31,7 +33,7 @@ fn record_failure(root: &Path, error: &FlowError) -> Result<()> {
     let _permit = crate::lifecycle::runtime_permit(root)?;
     util::atomic_write_json(
         &root.join("broker-status.json"),
-        &json!({"phase":"failed", "error_kind":error.kind.type_name()}),
+        &json!({"phase":"failed", "error_kind":error.kind.type_name(), "message":error.to_string()}),
     )
 }
 fn serve_owned(root: &Path, owner: &owner::Owner) -> Result<()> {
@@ -39,6 +41,10 @@ fn serve_owned(root: &Path, owner: &owner::Owner) -> Result<()> {
     let mut connection = None;
     loop {
         owner.verify()?;
+        if !checkpoint::resume(root)? {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
         accept_one(root, owner, &mut connection)?;
         if let Some(client) = connection.as_mut() {
             observe(root, client)?;
@@ -145,6 +151,7 @@ fn execute(
     connection: &mut Option<super::native::DirectClient>,
     request: &J,
 ) -> Result<J> {
+    checkpoint::ready(root)?;
     let method = request_method(request)?;
     validate_stored_journal(root)?;
     if method == "tool/respond" {
@@ -166,12 +173,16 @@ fn execute_native(
     let result = client.call(method, &request["params"]);
     if let Ok(value) = &result {
         super::upstream::after(root, method, value)?;
+        if method == "turn/start" {
+            checkpoint::advance(root, &request["params"]["threadId"], &value["turn"]["id"])?;
+        }
     }
     observe(root, client)?;
     result
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
     let _permit = crate::lifecycle::runtime_permit(root)?;
+    checkpoint::compact(root)?;
     // EOF may arrive after valid frames in the same drain. Persist those
     // frames before reporting the disconnected transport to the supervisor.
     let transport = client.drain(0.001).map(|_| ());
@@ -186,12 +197,25 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
 fn save_events(root: &Path, journal: &mut J, events: Vec<J>) -> Result<()> {
     // Events buffered while awaiting a response must also survive a restart.
     for event in events {
+        checkpoint_at_capacity(root, journal)?;
         super::tui::observe_turn(root, &event)?;
+        checkpoint::native_turn(root, &event)?;
         tools::record(root, &event)?;
         record(journal, &event)?;
+        capacity::events(root, journal)?;
         validate_journal(journal)?;
     }
-    util::atomic_write_json(&root.join("broker-events.json"), journal)
+    util::atomic_write_json(&root.join("broker-events.json"), journal)?;
+    checkpoint::compact(root)
+}
+
+fn checkpoint_at_capacity(root: &Path, journal: &mut J) -> Result<()> {
+    if journal["turns"].as_object().is_some_and(|m| m.len() >= 64) {
+        util::atomic_write_json(&root.join("broker-events.json"), journal)?;
+        checkpoint::compact(root)?;
+        *journal = observation_journal(root)?;
+    }
+    Ok(())
 }
 fn observation_journal(root: &Path) -> Result<J> {
     let journal = if root.join("broker-events.json").exists() {
@@ -226,6 +250,7 @@ fn record(journal: &mut J, event: &J) -> Result<()> {
         Some("turn/started" | "turn/completed") => {
             if let Some(id) = params["turn"]["id"].as_str() {
                 journal["turns"][id] = json!({"thread":params["threadId"],"turn":params["turn"]});
+                journal["latest"] = json!(id);
             }
         }
         Some(
@@ -235,9 +260,19 @@ fn record(journal: &mut J, event: &J) -> Result<()> {
         ) if !event["id"].is_null() => {
             journal["pending"][event["id"].to_string()] = event.clone();
         }
+        Some("serverRequest/resolved") => resolve_pending(journal, params),
         _ => {}
     }
     Ok(())
+}
+
+fn resolve_pending(journal: &mut J, params: &J) {
+    let key = params["requestId"].to_string();
+    if journal["pending"][&key]["params"]["threadId"] == params["threadId"]
+        && params["threadId"].is_string()
+    {
+        journal["pending"].as_object_mut().unwrap().remove(&key);
+    }
 }
 
 pub(super) fn call(root: &Path, method: &str, params: &J) -> Result<J> {

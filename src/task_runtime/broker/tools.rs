@@ -14,19 +14,12 @@ pub(super) fn record(root: &Path, event: &J) -> Result<()> {
     if let Some(old) = journal.get(&key) {
         return ensure(old["request"] == *event, "tool request id reused");
     }
-    ensure(
-        journal.as_object().unwrap().len() < 64,
-        "tool request limit reached",
-    )?;
     journal[&key] = json!({"request":event,"phase":"pending"});
     save(root, &journal)
 }
 
 fn save(root: &Path, journal: &J) -> Result<()> {
-    ensure(
-        serde_json::to_vec(journal)?.len() <= 1024 * 1024,
-        "tool journal exceeds byte bound",
-    )?;
+    super::capacity::tools(root, "broker-tools.json", journal)?;
     util::atomic_write_json(&root.join("broker-tools.json"), journal)
 }
 
