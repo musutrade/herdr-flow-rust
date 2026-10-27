@@ -49,6 +49,7 @@ pub(super) fn attach(
     record["upstream_socket"] = socket;
     record["service_owner"] = json!("upstream");
     record["configuration"] = json!("upstream");
+    super::tui::configure(&mut record)?;
     util::atomic_write_json(&root.join("runtime.json"), &record)?;
     let child = broker_child(env, root, &record, permit)?;
     finish_attachment(root, record, child)
@@ -98,6 +99,7 @@ fn validate_spec(spec: &J) -> Result<()> {
                 "driver_binary",
                 "approval_policy",
                 "review_snapshot",
+                "native_tui",
             ]
             .contains(&key.as_str())
         }),

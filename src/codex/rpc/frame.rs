@@ -27,8 +27,18 @@ pub fn apply_mask(payload: &[u8], mask: &[u8], max_message: usize) -> Result<Vec
 
 /// Encode one RFC 6455 frame. Client frames must be masked.
 pub fn encode_frame(payload: &[u8], opcode: u8, masked: bool, final_: bool) -> Result<Vec<u8>> {
+    encode_frame_with_limit(payload, opcode, masked, final_, MAX_MESSAGE)
+}
+
+pub fn encode_frame_with_limit(
+    payload: &[u8],
+    opcode: u8,
+    masked: bool,
+    final_: bool,
+    limit: usize,
+) -> Result<Vec<u8>> {
     let length = payload.len();
-    if length > MAX_MESSAGE {
+    if length > limit {
         return Err(protocol_error("payload exceeds maximum size"));
     }
     let mut frame = Vec::with_capacity(length + 14);
@@ -49,7 +59,7 @@ pub fn encode_frame(payload: &[u8], opcode: u8, masked: bool, final_: bool) -> R
     }
     let mask = random_bytes(4)?;
     frame.extend_from_slice(&mask);
-    frame.extend_from_slice(&apply_mask(payload, &mask, MAX_MESSAGE)?);
+    frame.extend_from_slice(&apply_mask(payload, &mask, limit)?);
     Ok(frame)
 }
 
@@ -388,7 +398,7 @@ fn validate_frame_size(
     max_message: usize,
 ) -> Result<()> {
     if exceeds_max_frame(opcode, length, fragments, max_message) {
-        return Err(protocol_error("WebSocket message exceeds limit"));
+        return Err(protocol_error(format!("WebSocket message exceeds limit: frame={length}, fragments={fragments}, maximum={max_message}, opcode={opcode}")));
     }
     Ok(())
 }

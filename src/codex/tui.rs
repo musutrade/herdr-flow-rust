@@ -32,6 +32,23 @@ use crate::util::{self, process_start_ticks};
 
 mod wire;
 
+/// Optional task attachment policy. The ordinary `tui` bridge stays transparent.
+pub trait BridgePolicy {
+    fn forward(&mut self, client: bool, data: &[u8]) -> Result<Vec<u8>>;
+    fn observe(&mut self, marker: &J) -> Result<()>;
+    fn arguments(&self) -> Vec<String>;
+    fn message_limit(&self) -> usize {
+        MAX_MESSAGE
+    }
+    fn take_responses(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    fn connected(&mut self) {}
+    fn explicit_cwd(&self) -> bool {
+        true
+    }
+}
+
 pub use wire::WireObserver;
 
 pub const REVIEW_LIMIT: usize = 100;
@@ -2025,6 +2042,7 @@ fn require_connected(socket_error: libc::c_int) -> Result<()> {
 
 /// Transparent, observed byte proxy between the native TUI and app-server.
 pub struct ProxyBridge {
+    policy: Option<Box<dyn BridgePolicy>>,
     root: PathBuf,
     server_socket: PathBuf,
     binary: String,
@@ -2056,6 +2074,7 @@ impl ProxyBridge {
         let root = absolute_lexical(root.as_ref());
         let proxy_path = root.join("tui.sock");
         Self {
+            policy: None,
             root,
             server_socket: server_socket.as_ref().to_path_buf(),
             binary: binary.to_string(),
@@ -2078,6 +2097,11 @@ impl ProxyBridge {
 
     pub fn proxy_socket(&self) -> &Path {
         &self.proxy_path
+    }
+
+    pub fn with_policy(mut self, policy: Box<dyn BridgePolicy>) -> Self {
+        self.policy = Some(policy);
+        self
     }
 
     pub fn proxy_endpoint(&self) -> Option<&str> {
@@ -2259,8 +2283,17 @@ impl ProxyBridge {
         }
         argv.push("--remote".to_string());
         argv.push(endpoint);
-        argv.push("--cd".to_string());
-        argv.push(self.cwd.clone());
+        if self
+            .policy
+            .as_ref()
+            .is_none_or(|policy| policy.explicit_cwd())
+        {
+            argv.push("--cd".to_string());
+            argv.push(self.cwd.clone());
+        }
+        if let Some(policy) = &self.policy {
+            argv.extend(policy.arguments());
+        }
         // Native terminal I/O and controlling PTY are inherited unchanged.
         let child = Command::new(&argv[0])
             .args(&argv[1..])
@@ -2338,6 +2371,9 @@ impl ProxyBridge {
     }
 
     fn attach_endpoints(&mut self, downstream: UnixStream, upstream: UnixStream) -> Result<()> {
+        if let Some(policy) = &mut self.policy {
+            policy.connected();
+        }
         let observer = self.build_wire_observer()?;
         self.store_endpoints(downstream, upstream, observer);
         Ok(())
@@ -2357,16 +2393,20 @@ impl ProxyBridge {
         upstream: UnixStream,
         observer: Rc<RefCell<SessionObserver>>,
     ) {
+        let limit = self
+            .policy
+            .as_ref()
+            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
         self.endpoints[0] = Some(Endpoint {
             socket: downstream,
             buffer: Vec::new(),
-            wire: Some(WireObserver::new(true, observer.clone())),
+            wire: Some(WireObserver::with_limit(true, observer.clone(), limit)),
             eof: false,
         });
         self.endpoints[1] = Some(Endpoint {
             socket: upstream,
             buffer: Vec::new(),
-            wire: Some(WireObserver::new(false, observer)),
+            wire: Some(WireObserver::with_limit(false, observer, limit)),
             eof: false,
         });
     }
@@ -2440,16 +2480,37 @@ impl ProxyBridge {
     }
 
     fn read_data(&mut self, index: usize, data: &[u8]) -> Result<()> {
+        let limit = self
+            .policy
+            .as_ref()
+            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
+        let filtered;
+        let mut responses = Vec::new();
+        let data = if let Some(policy) = &mut self.policy {
+            filtered = policy.forward(index == 0, data)?;
+            responses = policy.take_responses();
+            filtered.as_slice()
+        } else {
+            data
+        };
+        if let Some(endpoint) = self.endpoints[0].as_mut() {
+            endpoint.buffer.extend(responses);
+            check_forward_buffer(&endpoint.buffer, limit)?;
+        }
         self.buffer_incoming(index, data)?;
         self.feed_wire(index, data)
     }
 
     fn buffer_incoming(&mut self, index: usize, data: &[u8]) -> Result<()> {
+        let limit = self
+            .policy
+            .as_ref()
+            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
         let Some((_, peer)) = self.pair_mut(index) else {
             return Ok(());
         };
         peer.buffer.extend_from_slice(data);
-        check_forward_buffer(&peer.buffer)
+        check_forward_buffer(&peer.buffer, limit)
     }
 
     fn feed_wire(&mut self, index: usize, data: &[u8]) -> Result<()> {
@@ -2523,6 +2584,11 @@ impl ProxyBridge {
         let mut outcome = Ok(());
         while serve_continue(self, &outcome) {
             outcome = self.serve_iteration();
+            if outcome.is_ok() {
+                if let (Some(policy), Some(marker)) = (&mut self.policy, &self.marker) {
+                    outcome = policy.observe(marker.borrow().value());
+                }
+            }
         }
         outcome
     }
@@ -2619,6 +2685,9 @@ impl ProxyBridge {
 
     fn transfer_target(&mut self, target: usize, read: bool, write: bool) -> Result<()> {
         if let Err(error) = self.transfer(target, read, write) {
+            if self.policy.is_some() && error.kind == ErrorKind::Guard {
+                return Err(error);
+            }
             let message = protocol_message(&error);
             return self.disconnect(target, message.as_deref());
         }
@@ -2850,8 +2919,8 @@ fn build_observer(observation: &RpcObservation) -> Result<Rc<RefCell<SessionObse
     Ok(Rc::new(RefCell::new(observer)))
 }
 
-fn check_forward_buffer(buffer: &[u8]) -> Result<()> {
-    if buffer.len() > MAX_MESSAGE * 2 {
+fn check_forward_buffer(buffer: &[u8], limit: usize) -> Result<()> {
+    if buffer.len() > limit * 2 {
         return Err(protocol_error("proxy forwarding buffer exceeds limit"));
     }
     Ok(())

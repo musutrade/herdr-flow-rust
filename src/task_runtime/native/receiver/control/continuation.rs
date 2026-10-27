@@ -179,6 +179,9 @@ fn launch_spec(
         "cwd":env.workspace_root.join("checkout"),"model":runtime::role_models::select(&upstream, &packet["binding"]["lineage"]["role"] )?,
         "approval_policy":upstream.get("approval_policy").cloned().unwrap_or(json!("untrusted")),
         "driver_binary":upstream.get("driver_binary").cloned().unwrap_or(json!(std::env::current_exe()?))});
+    if let Some(presentation) = upstream.get("native_tui") {
+        launch["native_tui"] = presentation.clone();
+    }
     if packet["binding"]["lineage"]["role"] == "acceptance" {
         let snapshot = runtime::review::prepare(
             env,

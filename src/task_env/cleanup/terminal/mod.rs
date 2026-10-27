@@ -42,6 +42,8 @@ pub struct TerminalState {
     pub targets: Vec<ProcessRecord>,
     #[serde(default)]
     pub upstream_sessions: Vec<J>,
+    #[serde(default)]
+    pub native_tuis: Vec<J>,
 }
 
 fn require(ok: bool, message: &str) -> Result<()> {
@@ -93,6 +95,7 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
     }
     let (env, creation) = prepared_environment(owner, permit)?;
     let (environment, entry, roots) = prepare_resources(&env, owner, &associations)?;
+    let native_tuis = native_obligations(&env)?;
     let now = util::now();
     let plan = CleanupState {
         terminal: Some(TerminalState {
@@ -105,7 +108,8 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
             environment_digest: environment_digest(env.state_file())?,
             registry: entry,
             targets: vec![],
-            upstream_sessions: crate::task_runtime::upstream::obligations(&env)?,
+            upstream_sessions: native_tuis.0,
+            native_tuis: native_tuis.1,
         }),
         task_id: owner.task_id.clone(),
         instance_id: owner.instance_id.clone(),
@@ -122,6 +126,13 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
         last_error: None,
     };
     save_prepared(owner, &plan)
+}
+
+fn native_obligations(env: &crate::task_env::TaskEnvironment) -> Result<(Vec<J>, Vec<J>)> {
+    Ok((
+        crate::task_runtime::upstream::obligations(env)?,
+        crate::task_runtime::tui::obligations(env)?,
+    ))
 }
 
 pub fn association_plan(owner: &Owner, permit: &Permit) -> Result<J> {
@@ -176,6 +187,7 @@ pub fn resume_terminal(owner: &Owner, permit: &Permit) -> Result<()> {
 }
 fn resources(plan: &mut CleanupState) -> Result<()> {
     process::quiesce(plan)?;
+    reclaim_tuis(plan)?;
     reclaim_upstream(plan)?;
     storage::verify_pending_roots(plan)?;
     remove_git_registration(plan)?;
@@ -186,6 +198,15 @@ fn resources(plan: &mut CleanupState) -> Result<()> {
     storage::verify_absent(plan)?;
     plan.terminal.as_mut().unwrap().phase = Phase::ResourcesRemoved;
     storage::save(plan)
+}
+
+fn reclaim_tuis(plan: &mut CleanupState) -> Result<()> {
+    let count = terminal(plan)?.native_tuis.len();
+    for index in 0..count {
+        crate::task_runtime::tui::reclaim(&mut plan.terminal.as_mut().unwrap().native_tuis[index])?;
+        storage::save(plan)?;
+    }
+    Ok(())
 }
 
 fn reclaim_upstream(plan: &mut CleanupState) -> Result<()> {
