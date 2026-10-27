@@ -83,6 +83,35 @@ fn exited(broker: &mut Broker) -> std::process::ExitStatus {
 }
 
 #[test]
+fn long_runtime_path_preserves_broker_ownership_and_restart() {
+    use std::os::fd::AsRawFd;
+    let dir = fixture();
+    let root = dir.path().join("recovery-runtime-".repeat(10));
+    common::create_dir(&root).unwrap();
+    util::atomic_write_json(
+        &root.join("runtime.json"),
+        &json!({"instance":"broker-fixture"}),
+    )
+    .unwrap();
+    let directory = std::fs::File::open(&root).unwrap();
+    let alias = std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut first = spawn(&root);
+    ready(&root, &mut first);
+    healthy(&alias);
+    let mut duplicate = spawn(&root);
+    assert_eq!(exited(&mut duplicate).code(), Some(2));
+    healthy(&alias);
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
+    let mut recovered = spawn(&root);
+    ready(&root, &mut recovered);
+    healthy(&alias);
+    util::atomic_write_json(&root.join("runtime.json"), &json!({"instance":"other"})).unwrap();
+    assert_eq!(exited(&mut recovered).code(), Some(2));
+    assert!(!root.join("broker.sock").exists());
+}
+
+#[test]
 fn bad_connections_do_not_terminate_broker() {
     let dir = fixture();
     let root = dir.path();

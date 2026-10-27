@@ -184,6 +184,7 @@ fn execute_queue(root: &Path, state: &J, owner: &Owner, args: &J) -> Result<J> {
 fn inspect_runtime(root: &Path, q: &J, owner: &Owner) -> Result<J> {
     let mut view = inspect(q, owner)?;
     view["runtime_results"] = continuation::results(root)?;
+    view["recovery"] = crate::task_runtime::recovery::status(root)?;
     Ok(view)
 }
 

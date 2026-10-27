@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -20,8 +20,20 @@ fn run(args: &[String]) -> Result<J> {
         .map(|p| util::read_json(Path::new(p)))
         .transpose()?
         .unwrap_or(json!({}));
+    if action == "recovery-status" {
+        return recovery_status(&root, task);
+    }
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
+}
+fn recovery_status(root: &Path, task: &str) -> Result<J> {
+    let permit = crate::lifecycle::runtime_permit(root)?
+        .ok_or_else(|| FlowError::guard("recovery status requires an isolated Owner"))?;
+    ensure(
+        permit.owner().task_id == task,
+        "recovery status task changed",
+    )?;
+    recovery::status(root)
 }
 fn special(args: &[String]) -> Option<Result<J>> {
     if args
@@ -31,6 +43,9 @@ fn special(args: &[String]) -> Option<Result<J>> {
         return Some(configuration_status(args));
     }
     match args {
+        [action, option, path] if action == "recovery-watch" && option == "--state-dir" => {
+            Some(recovery::watch(Path::new(path)).map(|_| json!({"stopped":true})))
+        }
         [action, option, path] if action == "tui-serve" && option == "--state-dir" => {
             Some(tui::serve(Path::new(path)).map(|code| json!({"exit_code":code})))
         }
@@ -72,6 +87,7 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }
         "status" => status::status(env, root),
+        "recovery-start" => recovery::start(env, root),
         "tui-open" => tui::open(env, root),
         "tui-close" => tui::close(env, root),
         "tui-status" => tui::status(env, root),

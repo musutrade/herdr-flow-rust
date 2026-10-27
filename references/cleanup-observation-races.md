@@ -1,5 +1,73 @@
 # Cleanup observation races — 2026-10-26
 
+## Recovery status and initial document publication (2026-10-27, latest)
+
+The new-tab commit `b9f4880` passed local coverage, but its remote
+[CRAP workflow](https://github.com/musutrade/herdr-flow-rust/actions/runs/40482035551)
+failed in the coverage test `recovery_model_failure_stays_visible_without_recursion_or_replay`,
+before complexity scoring. `recovery::status` read incident/error documents
+without the observer's state lock. First publication reserves a protected
+directory before writing its marker and payload, so the reader could encounter
+`unprotected document in isolated namespace` during a valid write.
+
+A deterministic regression pauses publication in that interval and reproduced
+the same error before the fix. Status now uses the observer's nonblocking state
+lock and reports `phase: updating` during contention, with an instruction to
+read status again without resending any operation. A reader holding the lock
+also makes the observer defer that cycle, rather than exit. Neither path waits
+for the environment lock or grants a model/operation retry. Without an active
+writer, incomplete or corrupt documents still fail closed and remain unchanged.
+The protocol regression holds a reader lock across two heartbeat updates, then
+checks the original diagnosis/failure, exact dispatch counts and terminal cleanup.
+
+Both protocol scenarios passed in 28.32 seconds, and the complete all-targets
+coverage regression passed. The first CRAP check counted the new test helper
+with no coverage data and rejected its conditional assertions; the final test
+uses direct assertions for both recorded results, retaining every check.
+The final ten recovery unit checks passed with coverage, and absolute CRAP 10
+passed for 6151 functions without a baseline or relaxed missing-coverage rules.
+
+This fixes the reproduced status/publication race. The separate local
+`intent:allocation-workspace` 15-second checkpoint timeout and historical Git
+10-second timeout remain unconfirmed; neither is relabeled as fixed.
+
+## Real Recovery Agent findings (2026-10-27, latest)
+
+The real Herdr run exposed a broker socket path exceeding `sockaddr_un` after
+the recovery runtime suffix was added. Bind/connect now use a held directory-fd
+alias for long paths; the socket remains task-owned at its original location.
+Regression checks cover communication, exclusive ownership, stale-owner restart,
+and preservation of existing files. This is unrelated to the historical Git
+10-second timeout below; that root cause remains unconfirmed.
+
+Shared-storage inspection also found three exact acceptance repository trust
+entries written by upstream `thread/start`, and two task panes in a real Herdr
+recovery snapshot. Request-local project configuration now prevents new trust
+writes. The three entries were removed without changing any preexisting config
+bytes. Herdr v3 snapshot reclamation now uses explicit store identity and saved
+pane bindings, preserves unrelated user data, and retains cleanup obligations
+until the server has persisted the close. A stopped Agent's shell record remains
+task-owned through the saved mapping. A cleanup retry resumes the existing
+terminal decision; it does not submit another finalization or model operation.
+
+The initial 104.98-second diagnostic test pass did not establish complete
+shared-storage cleanup. Earlier failures and that limitation remain recorded in
+[the real recovery acceptance](recovery-agent.md); final evidence supersedes only
+the capabilities actually checked, not historical failures.
+
+## Additional closing-owner fixture race (2026-10-27)
+
+The first full recovery-feature coverage run reproduced `StateBusy` at
+`control_queue_never_grants_old_or_closing_owners_access`: the fixture unwrapped
+its first `finalize` while the live broker could still hold a shared lifecycle
+action permit. The finalizer correctly refused its exclusive transition before
+mutating task state. The test now explicitly holds a shared permit, requires
+`StateBusy` and unchanged queue state, releases it, and uses the existing bounded
+retry for that precise contention before checking that closing owners cannot
+create/recover runtimes. Production locks and timeouts are unchanged. The failed
+coverage attempt remains a failure; this does not resolve the separate historical
+Git reply-loss timeout described below.
+
 This supplements #130/#38. Full reclamation and preservation of unrelated user
 processes/assets remain simultaneous requirements. No login, configuration,
 provider, billing, proxy, installed entrypoint or existing watcher is changed.

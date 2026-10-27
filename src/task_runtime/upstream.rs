@@ -100,6 +100,7 @@ fn validate_spec(spec: &J) -> Result<()> {
                 "approval_policy",
                 "review_snapshot",
                 "native_tui",
+                "recovery_role",
             ]
             .contains(&key.as_str())
         }),

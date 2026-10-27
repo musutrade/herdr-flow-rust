@@ -382,6 +382,10 @@ fn recover_retained_upstream_acceptance() {
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
+        let saved = queue::load_queue(&queue_root).unwrap();
+        if saved["tasks"]["task"].is_null() || saved["tasks"]["task"]["final_outcome"].is_string() {
+            break; // A recorded terminal outcome only needs cleanup, never another finalize.
+        }
         let result = finalize_registered(&queue_root);
         match result {
             Ok(_) => break,
@@ -394,8 +398,21 @@ fn recover_retained_upstream_acceptance() {
             Err(error) => panic!("{error}"),
         }
     }
-    let report = queue::finalization::drive(&queue_root).unwrap();
-    assert_eq!(report.pending, 0, "{report:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let report = queue::finalization::drive(&queue_root).unwrap();
+        if report.pending == 0 {
+            break;
+        }
+        assert!(
+            report.errors.iter().all(
+                |e| e.contains("close is not persisted") || e.contains("lifecycle action busy")
+            ),
+            "{report:?}"
+        );
+        assert!(std::time::Instant::now() < deadline, "{report:?}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert!(!root.join("workspace").exists());
     assert!(!root.join("scratch").exists());
     assert!(!task_env::is_registered("task").unwrap());

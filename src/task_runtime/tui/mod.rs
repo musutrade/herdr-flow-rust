@@ -1,11 +1,12 @@
 //! Native Codex presentation for isolated task runtimes. The upstream service
-//! and broker keep their existing identities; only a new Herdr pane is owned.
+//! and broker keep their existing identities; each attachment owns a new tab.
 use super::*;
 use std::time::{Duration, Instant};
 #[cfg(test)]
 mod fixture;
 mod herdr;
 mod hooks;
+mod persistence;
 mod protocol;
 
 pub(super) fn configure(runtime: &mut J) -> Result<()> {
@@ -15,6 +16,7 @@ pub(super) fn configure(runtime: &mut J) -> Result<()> {
     validate_config(&runtime["native_tui"])?;
     configure_socket(runtime)?;
     configure_parent(runtime)?;
+    persistence::configure(&mut runtime["native_tui"])?;
     runtime["native_tui_hooks"] = hooks::discover(runtime)?;
     Ok(())
 }
@@ -29,16 +31,20 @@ fn validate_config(config: &J) -> Result<()> {
                     "direction",
                     "herdr_socket",
                     "parent_terminal",
+                    "session_store",
                 ]
                 .contains(&k.as_str())
             })
         }),
         "invalid native_tui configuration",
     )?;
-    ensure(
-        matches!(config["direction"].as_str(), Some("right" | "down")),
-        "native_tui direction must be right or down",
-    )?;
+    // Accept old launch specs, but all new attachments now use separate tabs.
+    if let Some(direction) = config.get("direction") {
+        ensure(
+            matches!(direction.as_str(), Some("right" | "down")),
+            "legacy native_tui direction must be right or down",
+        )?;
+    }
     let binary = PathBuf::from(required(config, "binary")?);
     ensure(
         binary.is_absolute() && binary.is_file(),
@@ -83,6 +89,12 @@ fn configure_parent(runtime: &mut J) -> Result<()> {
 pub(super) fn thread_config(root: &Path, model: &J) -> Result<J> {
     let mut config = role_models::thread_config(model);
     let runtime = util::read_state_json(root, "runtime.json")?;
+    if upstream::selected(&runtime) {
+        // Codex otherwise persists project trust when thread/start requests a
+        // writable sandbox in a fresh worktree. Keep task-local project config
+        // disabled through a request-only override, without editing user config.
+        config["projects"] = json!({required(&runtime, "cwd")?:{"trust_level":"untrusted"}});
+    }
     if runtime.get("native_tui").is_some() {
         config["hooks"] = json!({"state":runtime["native_tui_hooks"]});
         config["history"] = json!({"persistence":"none"});
@@ -124,41 +136,95 @@ fn binding(root: &Path) -> Result<Option<J>> {
 pub fn open(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let runtime = runtime(env, root)?;
-    let _lock = presentation_lock(root)?;
-    if let Some(previous) = existing_attachment(root, &runtime)? {
-        // Reconcile an existing attempt, never issue a second pane/run.
-        return await_ready(root, &runtime, previous);
+    open_bound(root, &runtime)
+}
+
+/// The recovery session was registered before primary work started. Opening
+/// its presentation must not require the environment lock held by a stuck
+/// primary operation. The same live Owner, broker and pane checks still apply.
+pub(in crate::task_runtime) fn open_recovery(root: &Path) -> Result<J> {
+    let permit = crate::lifecycle::runtime_permit(root)?
+        .ok_or_else(|| FlowError::guard("recovery presentation requires a task Owner"))?;
+    let runtime = util::read_state_json_bounded(root, "runtime.json", 1024 * 1024)?;
+    verify_recovery_runtime(root, &runtime, permit.owner())?;
+    if runtime.get("native_tui").is_none() {
+        return Ok(json!({"phase":"not_configured"}));
     }
-    let record = reserve_attachment(root, &runtime)?;
-    let record = split_pane(root, &runtime, record)?;
-    launch_frontend(&runtime, &record)?;
-    await_ready(root, &runtime, record)
+    upstream::endpoint(&runtime)?;
+    open_bound(root, &runtime)
+}
+
+fn verify_recovery_runtime(
+    root: &Path,
+    runtime: &J,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    ensure(
+        runtime["recovery_role"] == true
+            && runtime["root"] == json!(root)
+            && util::resolve_path(root) == root,
+        "recovery presentation runtime changed",
+    )?;
+    let pid = runtime["pid"].as_u64().unwrap_or(0) as i32;
+    ensure(
+        crate::task_env::process_has_marker(pid, &owner.instance_id)
+            && !runtime["start_time"].is_null()
+            && runtime["start_time"] == json!(crate::task_env::process_start_time(pid)),
+        "recovery presentation broker identity changed",
+    )
+}
+
+fn open_bound(root: &Path, runtime: &J) -> Result<J> {
+    let _lock = presentation_lock(root)?;
+    if let Some(previous) = existing_attachment(root, runtime)? {
+        // Reconcile an existing attempt, never issue a second pane/run.
+        return await_ready(root, runtime, previous);
+    }
+    let record = reserve_attachment(root, runtime)?;
+    let record = create_tab(root, runtime, record)?;
+    launch_frontend(runtime, &record)?;
+    await_ready(root, runtime, record)
 }
 
 fn existing_attachment(root: &Path, runtime: &J) -> Result<Option<J>> {
-    let previous = binding(root)?.filter(|record| record["phase"] != "closed");
-    if let Some(record) = &previous {
-        validate_binding(runtime, record)?;
+    let Some(previous) = binding(root)? else {
+        return Ok(None);
+    };
+    validate_binding(runtime, &previous)?;
+    if previous["phase"] == "closed" {
+        // Finish the old presentation's saved copies before replacing its
+        // identity. Reopening preserves the upstream session, not an old tab.
+        persistence::reclaim(&previous)?;
+        return Ok(None);
     }
-    Ok(previous)
+    Ok(Some(previous))
 }
 
 fn reserve_attachment(root: &Path, runtime: &J) -> Result<J> {
     let session = materialized_session(root, runtime)?;
     let config = &runtime["native_tui"];
-    let parent = herdr::call(config, "pane.get", json!({"pane_id":config["parent_pane"]}))?;
-    ensure(
-        parent["pane"]["terminal_id"] == config["parent_terminal"],
-        "parent terminal changed",
-    )?;
+    let parent = parent_pane(config)?;
+    let workspace = required(&parent, "workspace_id")?;
+    let parent_tab = required(&parent, "tab_id")?;
     let nonce = util::pyjson::uuid_hex();
     let directory = root.join(format!("tui-{nonce}"));
     util::ensure_private_dir(&directory, true)?;
     let record = json!({"phase":"creating","instance":runtime["instance"],"session":session,
         "nonce":nonce,"directory":directory,"herdr_socket":config["herdr_socket"],
-        "runtime":root,"pane":null,"terminal":null});
+        "runtime":root,"pane":null,"terminal":null,"cwd":runtime["cwd"],
+        "workspace":workspace,"parent_tab":parent_tab,"tab":null,"tab_number":null,
+        "session_store":config.get("session_store")});
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     Ok(record)
+}
+
+fn parent_pane(config: &J) -> Result<J> {
+    let parent = herdr::call(config, "pane.get", json!({"pane_id":config["parent_pane"]}))?;
+    ensure(
+        parent["pane"]["terminal_id"] == config["parent_terminal"],
+        "parent terminal changed",
+    )?;
+    Ok(parent["pane"].clone())
 }
 
 fn presentation_lock(root: &Path) -> Result<util::FileLock> {
@@ -177,18 +243,18 @@ fn materialized_session(root: &Path, runtime: &J) -> Result<String> {
     Ok(session)
 }
 
-fn split_pane(root: &Path, runtime: &J, mut record: J) -> Result<J> {
-    let config = &runtime["native_tui"];
+fn create_tab(root: &Path, runtime: &J, mut record: J) -> Result<J> {
+    let label = format!(
+        "flow:{}",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    );
     let created = herdr::call(
-        config,
-        "pane.split",
-        json!({"target_pane_id":config["parent_pane"],
-        "direction":config["direction"],"cwd":runtime["cwd"],"focus":false}),
+        &record,
+        "tab.create",
+        json!({"workspace_id":record["workspace"],"cwd":runtime["cwd"],
+        "label":label,"focus":false}),
     )?;
-    record["pane"] = created["pane"]["pane_id"].clone();
-    record["terminal"] = created["pane"]["terminal_id"].clone();
-    required(&record, "pane")?;
-    required(&record, "terminal")?;
+    bind_created_tab(&mut record, &created)?;
     record["phase"] = json!("launching");
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     util::atomic_write_json(
@@ -198,9 +264,27 @@ fn split_pane(root: &Path, runtime: &J, mut record: J) -> Result<J> {
     herdr::call(
         &record,
         "pane.rename",
-        json!({"pane_id":record["pane"],"label":format!("flow:{}",root.file_name().unwrap_or_default().to_string_lossy())}),
+        json!({"pane_id":record["pane"],"label":label}),
     )?;
     Ok(record)
+}
+
+fn bind_created_tab(record: &mut J, created: &J) -> Result<()> {
+    record["pane"] = created["root_pane"]["pane_id"].clone();
+    record["terminal"] = created["root_pane"]["terminal_id"].clone();
+    record["tab"] = created["tab"]["tab_id"].clone();
+    record["tab_number"] = created["tab"]["number"].clone();
+    required(record, "pane")?;
+    required(record, "terminal")?;
+    required(record, "tab")?;
+    ensure(
+        created["root_pane"]["workspace_id"] == record["workspace"]
+            && created["tab"]["workspace_id"] == record["workspace"]
+            && created["root_pane"]["tab_id"] == record["tab"]
+            && record["tab"] != record["parent_tab"]
+            && record["tab_number"].is_u64(),
+        "Herdr did not create a separate tab in the parent workspace",
+    )
 }
 
 fn launch_frontend(runtime: &J, record: &J) -> Result<()> {
@@ -377,13 +461,40 @@ pub fn status(env: &TaskEnvironment, root: &Path) -> Result<J> {
     Ok(record)
 }
 
+pub(in crate::task_runtime) fn recovery_notice(
+    root: &Path,
+    runtime: &J,
+    message: &str,
+) -> Result<()> {
+    if runtime.get("native_tui").is_none() {
+        return Ok(());
+    }
+    let record = binding(root)?.ok_or_else(|| FlowError::guard("task pane not opened"))?;
+    validate_binding(runtime, &record)?;
+    ensure(herdr::pane(&record)?.is_some(), "task pane missing")?;
+    herdr::call(
+        &record,
+        "pane.rename",
+        json!({"pane_id":record["pane"],
+        "label":format!("flow:{} · {message}", root.file_name().unwrap_or_default().to_string_lossy())}),
+    )?;
+    Ok(())
+}
+
 pub fn close(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let runtime = runtime(env, root)?;
     let _lock = presentation_lock(root)?;
-    let mut record = binding(root)?.ok_or_else(|| FlowError::guard("native TUI was not opened"))?;
+    let record = binding(root)?.ok_or_else(|| FlowError::guard("native TUI was not opened"))?;
     validate_binding(&runtime, &record)?;
+    let mut record = capture_presentation(root, &record)?;
     herdr::close(&mut record)?;
+    util::atomic_write_json(&root.join("presentation.json"), &record)?;
+    Ok(record)
+}
+
+fn capture_presentation(root: &Path, record: &J) -> Result<J> {
+    let record = persistence::capture(record)?;
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
     Ok(record)
 }
@@ -466,7 +577,7 @@ fn entry_obligation(
     if let Some(record) = &record {
         validate_obligation(env, &root, record)?;
     }
-    Ok(record)
+    record.as_ref().map(persistence::capture).transpose()
 }
 
 fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
@@ -476,7 +587,8 @@ fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result
 }
 
 pub(crate) fn reclaim(record: &mut J) -> Result<()> {
-    herdr::close(record)
+    herdr::close(record)?;
+    persistence::reclaim(record)
 }
 
 /// A native user turn has the same queue-tool ownership checks as a broker
@@ -508,6 +620,43 @@ pub(super) fn observe_turn(root: &Path, event: &J) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn separate_tab_binding_rejects_parent_tab_or_other_workspace() {
+        let config = json!({"binary":"/bin/true","parent_pane":"parent"});
+        validate_config(&config).unwrap();
+        let mut legacy = config.clone();
+        legacy["direction"] = json!("right");
+        validate_config(&legacy).unwrap();
+        let binding = json!({"workspace":"workspace","parent_tab":"original"});
+        let created = json!({"tab":{"tab_id":"new","workspace_id":"workspace","number":42},
+            "root_pane":{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"new"}});
+        bind_created_tab(&mut binding.clone(), &created).unwrap();
+        let mut wrong = created.clone();
+        wrong["tab"]["workspace_id"] = json!("other");
+        assert!(bind_created_tab(&mut binding.clone(), &wrong).is_err());
+        wrong = created;
+        wrong["tab"]["tab_id"] = json!("original");
+        wrong["root_pane"]["tab_id"] = json!("original");
+        assert!(bind_created_tab(&mut binding.clone(), &wrong).is_err());
+    }
+
+    #[test]
+    fn upstream_project_trust_is_explicitly_scoped_to_the_thread() {
+        let root = util::fs::test_tempdir();
+        util::atomic_write_json(
+            &root.path().join("runtime.json"),
+            &json!({"configuration":"upstream","cwd":"/task/checkout"}),
+        )
+        .unwrap();
+        let config = thread_config(root.path(), &json!({"reasoning_effort":"high"})).unwrap();
+        assert_eq!(
+            config["projects"],
+            json!({"/task/checkout":{"trust_level":"untrusted"}})
+        );
+        assert_eq!(config["model_reasoning_effort"], "high");
+        util::atomic_write_json(&root.path().join("runtime.json"), &json!({})).unwrap();
+        assert!(thread_config(root.path(), &json!({})).unwrap()["projects"].is_null());
+    }
     #[test]
     fn native_turn_can_advance_control_but_foreign_turn_cannot() {
         let root = util::fs::test_tempdir();

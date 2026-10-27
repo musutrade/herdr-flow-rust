@@ -18,7 +18,7 @@ impl Owner {
         let lock = util::FileLock::acquire(&root.join("broker.lock"), false)?
             .ok_or_else(|| FlowError::guard("broker owner is still active"))?;
         recover(root, &instance)?;
-        let listener = UnixListener::bind(root.join("broker.sock"))?;
+        let listener = util::unix_socket::bind(&root.join("broker.sock"))?;
         let socket = socket_identity(&root.join("broker.sock"))?;
         let owner = Self {
             listener,
