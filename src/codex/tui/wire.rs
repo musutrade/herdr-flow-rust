@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::SessionObserver;
-use crate::codex::rpc::{decode_message, protocol_error, FrameDecoder, MAX_HEADERS, MAX_MESSAGE};
+use crate::codex::rpc::{
+    decode_message_with_limit, protocol_error, FrameDecoder, MAX_HEADERS, MAX_MESSAGE,
+};
 use crate::error::Result;
 use crate::model::J;
 
@@ -15,16 +17,22 @@ pub struct WireObserver {
     headers: Vec<u8>,
     upgraded: bool,
     decoder: FrameDecoder,
+    limit: usize,
 }
 
 impl WireObserver {
     pub fn new(client: bool, observer: Rc<RefCell<SessionObserver>>) -> Self {
+        Self::with_limit(client, observer, MAX_MESSAGE)
+    }
+
+    pub fn with_limit(client: bool, observer: Rc<RefCell<SessionObserver>>, limit: usize) -> Self {
         Self {
             client,
             observer,
             headers: Vec::new(),
             upgraded: false,
-            decoder: FrameDecoder::new(client, MAX_MESSAGE),
+            decoder: FrameDecoder::new(client, limit),
+            limit,
         }
     }
 
@@ -82,7 +90,7 @@ impl WireObserver {
     }
 
     fn handle_text_frame(&mut self, payload: &[u8]) -> Result<()> {
-        let message = decode_message(payload)?;
+        let message = decode_message_with_limit(payload, self.limit)?;
         self.observe_message(&message)
     }
 

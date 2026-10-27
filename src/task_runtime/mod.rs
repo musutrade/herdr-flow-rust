@@ -19,6 +19,7 @@ pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
 pub mod review;
 pub mod status;
+pub mod tui;
 pub(crate) mod upstream;
 
 fn ensure(ok: bool, message: &str) -> Result<()> {

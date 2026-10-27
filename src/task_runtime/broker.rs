@@ -186,6 +186,7 @@ fn observe(root: &Path, client: &mut Client) -> Result<()> {
 fn save_events(root: &Path, journal: &mut J, events: Vec<J>) -> Result<()> {
     // Events buffered while awaiting a response must also survive a restart.
     for event in events {
+        super::tui::observe_turn(root, &event)?;
         tools::record(root, &event)?;
         record(journal, &event)?;
         validate_journal(journal)?;

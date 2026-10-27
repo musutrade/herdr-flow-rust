@@ -1,0 +1,392 @@
+//! Only task attachments filter frames. Approvals and terminal I/O stay native;
+//! the broker remains the sole responder to its dynamic queue tools.
+use super::*;
+use crate::codex::rpc::{
+    decode_message_with_limit, encode_frame, encode_frame_with_limit, FrameDecoder, MAX_HEADERS,
+    MAX_MESSAGE,
+};
+
+// Matches Codex remote.rs REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE.
+// Real native catalog responses can exceed the broker's 16 MiB RPC limit.
+const NATIVE_MESSAGE_LIMIT: usize = 128 << 20;
+
+struct Direction {
+    client: bool,
+    headers: Option<Vec<u8>>,
+    frames: FrameDecoder,
+    responses: Vec<u8>,
+    selection: J,
+}
+impl Direction {
+    fn new(client: bool) -> Self {
+        Self {
+            client,
+            headers: Some(Vec::new()),
+            frames: FrameDecoder::new(client, NATIVE_MESSAGE_LIMIT),
+            responses: Vec::new(),
+            selection: J::Null,
+        }
+    }
+    fn feed(&mut self, data: &[u8], session: &J) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let remaining;
+        let data = if let Some(headers) = &mut self.headers {
+            headers.extend_from_slice(data);
+            let boundary = headers.windows(4).position(|w| w == b"\r\n\r\n");
+            ensure(
+                boundary.unwrap_or(headers.len()) <= MAX_HEADERS,
+                "native handshake exceeds bound",
+            )?;
+            let Some(boundary) = boundary else {
+                return Ok(out);
+            };
+            out.extend_from_slice(&headers[..boundary + 4]);
+            remaining = headers[boundary + 4..].to_vec();
+            self.headers = None;
+            remaining.as_slice()
+        } else {
+            data
+        };
+        out.extend(self.forward_frames(data, session)?);
+        Ok(out)
+    }
+
+    fn forward_frames(&mut self, data: &[u8], session: &J) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        for (opcode, payload) in self.frames.feed(data)? {
+            if opcode == 1
+                && !self.forward_message(
+                    &decode_message_with_limit(&payload, NATIVE_MESSAGE_LIMIT)?,
+                    session,
+                )?
+            {
+                continue;
+            }
+            out.extend(encode_frame_with_limit(
+                &payload,
+                opcode,
+                self.client,
+                true,
+                NATIVE_MESSAGE_LIMIT,
+            )?);
+        }
+        Ok(out)
+    }
+
+    fn forward_message(&mut self, message: &J, session: &J) -> Result<bool> {
+        match self.decision(message, session) {
+            Ok(forward) => Ok(forward),
+            Err(error)
+                if self.client && (message["id"].is_string() || message["id"].is_number()) =>
+            {
+                // A native auxiliary request or unsupported slash command must
+                // receive a proper RPC refusal, not tear down the task socket.
+                self.refuse(message, &error)?;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn decision(&self, message: &J, session: &J) -> Result<bool> {
+        let forward = allowed(self.client, message, session)?;
+        if self.client && !self.selection.is_null() {
+            selected_runtime(message, &self.selection)?;
+        }
+        Ok(forward)
+    }
+
+    fn refuse(&mut self, message: &J, error: &FlowError) -> Result<()> {
+        let response =
+            json!({"id":message["id"],"error":{"code":-32600,"message":error.to_string()}});
+        self.responses.extend(encode_frame(
+            &serde_json::to_vec(&response)?,
+            1,
+            false,
+            true,
+        )?);
+        ensure(
+            self.responses.len() <= MAX_MESSAGE,
+            "native refusal buffer exceeds bound",
+        )
+    }
+}
+
+fn selected_runtime(message: &J, runtime: &J) -> Result<()> {
+    let params = &message["params"];
+    for (key, expected) in [
+        ("cwd", &runtime["cwd"]),
+        ("model", &runtime["model"]["id"]),
+        ("modelProvider", &runtime["model"]["providerID"]),
+        ("effort", &runtime["model"]["reasoning_effort"]),
+    ] {
+        same_selection(&params[key], expected)?;
+    }
+    let collaboration = &params["collaborationMode"]["settings"];
+    same_selection(&collaboration["model"], &runtime["model"]["id"])?;
+    same_selection(
+        &collaboration["reasoning_effort"],
+        &runtime["model"]["reasoning_effort"],
+    )?;
+    ensure(
+        params["config"].is_null(),
+        "native task configuration is fixed by the task runtime",
+    )
+}
+
+fn same_selection(actual: &J, expected: &J) -> Result<()> {
+    ensure(
+        actual.is_null() || expected.is_null() || actual == expected,
+        "native input cannot change the task cwd, model, provider or configured effort",
+    )
+}
+
+fn allowed(client: bool, message: &J, session: &J) -> Result<bool> {
+    let method = message["method"].as_str().unwrap_or_default();
+    if !client {
+        return Ok(method != "item/tool/call");
+    }
+    if let Some(thread) = message["params"].get("threadId") {
+        ensure(
+            thread.is_null() || thread == session,
+            &format!("native TUI rejected {method}: foreign thread {}", thread),
+        )?;
+    }
+    ensure(
+        !matches!(
+            method,
+            "thread/start"
+                | "thread/fork"
+                | "thread/delete"
+                | "thread/archive"
+                | "thread/unarchive"
+                | "thread/settings/update"
+        ) && !method.starts_with("account/login")
+            && !method.starts_with("account/logout")
+            && !method.starts_with("config/value/write")
+            && !method.starts_with("config/batchWrite"),
+        &format!("task TUI rejected {method}: cannot create/switch sessions or change account/global/model configuration"),
+    )?;
+    Ok(true)
+}
+
+pub(super) struct Policy {
+    binding: J,
+    runtime: J,
+    client: Direction,
+    server: Direction,
+    reported: bool,
+}
+impl Policy {
+    pub fn new(binding: J, runtime: J) -> Self {
+        let mut client = Direction::new(true);
+        client.selection = runtime.clone();
+        Self {
+            binding,
+            runtime,
+            client,
+            server: Direction::new(false),
+            reported: false,
+        }
+    }
+}
+impl crate::codex::tui::BridgePolicy for Policy {
+    fn message_limit(&self) -> usize {
+        NATIVE_MESSAGE_LIMIT
+    }
+    fn take_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.client.responses)
+    }
+    fn connected(&mut self) {
+        self.client = Direction::new(true);
+        self.client.selection = self.runtime.clone();
+        self.server = Direction::new(false);
+    }
+    fn explicit_cwd(&self) -> bool {
+        // `resume` restores the existing thread cwd. Supplying --cd asks the
+        // native remote frontend to onboard a new directory (and persist trust).
+        // Never fabricate a trust decision or write the user's project config.
+        false
+    }
+    fn forward(&mut self, client: bool, data: &[u8]) -> Result<Vec<u8>> {
+        if client && self.client.headers.is_some() {
+            upstream::endpoint(&self.runtime)?;
+        }
+        let result = if client {
+            self.client.feed(data, &self.binding["session"])
+        } else {
+            self.server.feed(data, &self.binding["session"])
+        };
+        if let Err(error) = &result {
+            let path = Path::new(self.binding["directory"].as_str().unwrap_or_default())
+                .join("transport-error.json");
+            if !path.exists() {
+                let _ = util::atomic_write_json(
+                    &path,
+                    &json!({"error":error.to_string(),"client":client}),
+                );
+            }
+        }
+        result
+    }
+    fn observe(&mut self, marker: &J) -> Result<()> {
+        if marker["status"] != "ready" {
+            return Ok(());
+        }
+        verify_marker(&self.binding, &self.runtime, marker)?;
+        if !self.reported {
+            herdr::report(&self.binding)?;
+            self.reported = true;
+        }
+        Ok(())
+    }
+    fn arguments(&self) -> Vec<String> {
+        let mut args = vec!["-c".into(), "history.persistence=\"none\"".into()];
+        if let Some(hooks) = self.runtime["native_tui_hooks"].as_object() {
+            for key in hooks.keys() {
+                args.extend([
+                    "-c".into(),
+                    format!("hooks.state.{}.enabled=false", json!(key)),
+                ]);
+            }
+        }
+        args
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::rpc::decode_message;
+    use crate::codex::tui::BridgePolicy;
+    #[test]
+    fn policy_filters_server_tools_and_preserves_first_transport_error() {
+        let directory = util::fs::test_tempdir();
+        let mut policy = Policy::new(
+            json!({"session":"owned","directory":directory.path()}),
+            json!({"native_tui_hooks":{"reporter":{}}}),
+        );
+        assert!(policy
+            .arguments()
+            .iter()
+            .any(|arg| arg.contains("reporter")));
+        policy.forward(false, b"HTTP/1.1 101 OK\r\n\r\n").unwrap();
+        let tool = json!({"id":1,"method":"item/tool/call","params":{"threadId":"owned"}});
+        let frame = encode_frame(&serde_json::to_vec(&tool).unwrap(), 1, false, true).unwrap();
+        assert!(policy.forward(false, &frame).unwrap().is_empty());
+        assert!(policy.forward(false, &[0x83, 0]).is_err());
+        let error = util::read_json(&directory.path().join("transport-error.json")).unwrap();
+        assert_eq!(error["client"], false);
+        assert!(policy.forward(false, &[0x83, 0]).is_err());
+        assert_eq!(
+            util::read_json(&directory.path().join("transport-error.json")).unwrap(),
+            error
+        );
+    }
+    #[test]
+    fn native_input_preserves_the_role_selection_before_forwarding() {
+        let runtime = json!({"cwd":"/task","model":{"id":"chosen","providerID":"upstream","reasoning_effort":"high"}});
+        let valid = json!({"params":{"threadId":"owned","cwd":"/task","model":"chosen","effort":"high","collaborationMode":{"settings":{"model":"chosen","reasoning_effort":"high"}}}});
+        selected_runtime(&valid, &runtime).unwrap();
+        for key in ["cwd", "model", "modelProvider", "effort"] {
+            let mut request = valid.clone();
+            request["params"][key] = json!("different");
+            assert!(selected_runtime(&request, &runtime).is_err());
+        }
+        let mut request = valid;
+        request["params"]["collaborationMode"]["settings"]["model"] = json!("other");
+        assert!(selected_runtime(&request, &runtime).is_err());
+    }
+    #[test]
+    fn refusal_keeps_connection_usable_for_owned_turn() {
+        let mut direction = Direction::new(true);
+        direction.headers = None;
+        let denied = json!({"id":4,"method":"thread/start","params":{}});
+        let allowed = json!({"id":5,"method":"turn/start","params":{"threadId":"owned"}});
+        let mut input = encode_frame(&serde_json::to_vec(&denied).unwrap(), 1, true, true).unwrap();
+        input.extend(encode_frame(&serde_json::to_vec(&allowed).unwrap(), 1, true, true).unwrap());
+        let forwarded = direction.feed(&input, &json!("owned")).unwrap();
+        let frames = FrameDecoder::new(true, MAX_MESSAGE)
+            .feed(&forwarded)
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(decode_message(&frames[0].1).unwrap(), allowed);
+        let replies = FrameDecoder::new(false, MAX_MESSAGE)
+            .feed(&direction.responses)
+            .unwrap();
+        let reply = decode_message(&replies[0].1).unwrap();
+        assert_eq!(reply["id"], 4);
+        assert_eq!(reply["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn native_catalog_can_exceed_broker_limit_but_remains_bounded() {
+        let payload =
+            serde_json::to_vec(&json!({"id":7,"result":"x".repeat(MAX_MESSAGE)})).unwrap();
+        assert!(decode_message(&payload).is_err());
+        assert!(encode_frame(&payload, 1, false, true).is_err());
+        let frame =
+            encode_frame_with_limit(&payload, 1, false, true, NATIVE_MESSAGE_LIMIT).unwrap();
+        let mut direction = Direction::new(false);
+        direction.headers = None;
+        let forwarded = direction.feed(&frame, &json!("owned")).unwrap();
+        assert_eq!(forwarded, frame);
+        let mut over_limit = vec![0x81, 127];
+        over_limit.extend_from_slice(&((NATIVE_MESSAGE_LIMIT + 1) as u64).to_be_bytes());
+        assert!(direction.feed(&over_limit, &json!("owned")).is_err());
+    }
+
+    #[test]
+    fn split_frames_preserve_approvals_and_responses_without_racing_tools() {
+        let session = json!("owned");
+        for client in [false, true] {
+            let mut direction = Direction::new(client);
+            let header = if client {
+                b"GET / HTTP/1.1\r\n\r\n".as_slice()
+            } else {
+                b"HTTP/1.1 101 OK\r\n\r\n".as_slice()
+            };
+            assert_eq!(direction.feed(header, &session).unwrap(), header);
+            let approval = json!({"id":42,"method":"item/tool/requestUserInput","params":{"threadId":"owned","questions":[]}});
+            let response = json!({"id":42,"result":{"answers":{}}});
+            let message = if client { response } else { approval };
+            let bytes =
+                encode_frame(&serde_json::to_vec(&message).unwrap(), 1, client, true).unwrap();
+            let mut output = Vec::new();
+            for byte in bytes {
+                output.extend(direction.feed(&[byte], &session).unwrap());
+            }
+            let frames = FrameDecoder::new(client, MAX_MESSAGE)
+                .feed(&output)
+                .unwrap();
+            assert_eq!(decode_message(&frames[0].1).unwrap(), message);
+        }
+        assert!(!allowed(false, &json!({"id":3,"method":"item/tool/call"}), &session).unwrap());
+        for method in [
+            "thread/start",
+            "thread/fork",
+            "account/login/start",
+            "config/batchWrite",
+        ] {
+            assert!(allowed(true, &json!({"method":method}), &session).is_err());
+        }
+        assert!(allowed(
+            true,
+            &json!({"method":"turn/start","params":{"threadId":"foreign"}}),
+            &session
+        )
+        .is_err());
+        assert!(allowed(
+            true,
+            &json!({"method":"app/list","params":{"threadId":null}}),
+            &session
+        )
+        .unwrap());
+        assert!(allowed(
+            true,
+            &json!({"method":"thread/read","params":{"threadId":"catalog-preview"}}),
+            &session
+        )
+        .is_err());
+    }
+}

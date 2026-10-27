@@ -21,7 +21,7 @@ use crate::util::pyjson::{random_bytes, to_hex};
 
 mod frame;
 
-pub use frame::{apply_mask, encode_frame, validate_close, FrameDecoder};
+pub use frame::{apply_mask, encode_frame, encode_frame_with_limit, validate_close, FrameDecoder};
 
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 pub const MAX_HEADERS: usize = 16 * 1024;
@@ -41,7 +41,11 @@ fn timeout_error(message: impl Into<String>) -> FlowError {
 }
 
 pub fn decode_message(payload: &[u8]) -> Result<Value> {
-    if payload.len() > MAX_MESSAGE {
+    decode_message_with_limit(payload, MAX_MESSAGE)
+}
+
+pub fn decode_message_with_limit(payload: &[u8], limit: usize) -> Result<Value> {
+    if payload.len() > limit {
         return Err(protocol_error("message exceeds size limit"));
     }
     let text = std::str::from_utf8(payload)

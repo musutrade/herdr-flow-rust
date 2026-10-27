@@ -255,7 +255,7 @@ fn create_codex(root: &Path, state: &mut J) -> Result<()> {
     let observed = client(root)?.call_observed("thread/start", &json!({"cwd":state["cwd"],"model":model,
         "modelProvider":provider,"ephemeral":false,"approvalPolicy":policy,"sandbox":"workspace-write",
         "baseInstructions":instructions,
-        "developerInstructions":"","config":super::role_models::thread_config(&state["model"]),
+        "developerInstructions":"","config":super::tui::thread_config(root, &state["model"])?,
         "dynamicTools":receiver::control::definitions(state),"selectedCapabilityRoots":[],"runtimeWorkspaceRoots":[]}))?;
     let result = observed.result;
     state["session"] = result["thread"]["id"].clone();
@@ -539,7 +539,9 @@ pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
     super::verify(env, root)?;
     let (journal, state) = dispatch_state(root)?;
     super::verify_owner_record(env, &journal)?;
-    dispatch_record(root, &journal, &state)
+    let mut result = dispatch_record(root, &journal, &state)?;
+    result["presentation"] = super::tui::after_submission(env, root);
+    Ok(result)
 }
 
 fn dispatch_record(root: &Path, journal: &J, state: &J) -> Result<J> {

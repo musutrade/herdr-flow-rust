@@ -12,9 +12,13 @@ pub fn start(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let runtime = started_runtime(env, root)?;
     let owner = crate::task_env::isolation::owner(env)
         .ok_or_else(|| FlowError::guard("coordinator start requires isolated owner"))?;
-    let _queue_lock = queue::locked(&owner.queue_root, false)?;
-    let state = start_state(env, root, &runtime, &owner)?;
-    start_reserved(root, &state, spec)
+    let mut result = {
+        let _queue_lock = queue::locked(&owner.queue_root, false)?;
+        let state = start_state(env, root, &runtime, &owner)?;
+        start_reserved(root, &state, spec)?
+    };
+    result["presentation"] = super::super::tui::after_submission(env, root);
+    Ok(result)
 }
 
 fn start_state(

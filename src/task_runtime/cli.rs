@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -31,6 +31,9 @@ fn special(args: &[String]) -> Option<Result<J>> {
         return Some(configuration_status(args));
     }
     match args {
+        [action, option, path] if action == "tui-serve" && option == "--state-dir" => {
+            Some(tui::serve(Path::new(path)).map(|code| json!({"exit_code":code})))
+        }
         [action, option, path] if action == "receiver-watch" && option == "--state-dir" => {
             Some(native::receiver::active::watch(Path::new(path)).map(|_| json!({"stopped":true})))
         }
@@ -69,6 +72,9 @@ fn action_run(action: &str, env: &mut TaskEnvironment, root: &Path, spec: &J) ->
             launch(env, root, spec).map(|child| json!({"pid":child.id(),"phase":"started"}))
         }
         "status" => status::status(env, root),
+        "tui-open" => tui::open(env, root),
+        "tui-close" => tui::close(env, root),
+        "tui-status" => tui::status(env, root),
         _ => native_action(action, env, root, spec),
     }
 }

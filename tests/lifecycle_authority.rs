@@ -2,6 +2,8 @@
 pub mod common;
 #[path = "common/coordinator_continuation.rs"]
 mod coordinator_continuation;
+#[path = "common/native_tui_live.rs"]
+mod native_tui_live;
 #[path = "common/rpc_server.rs"]
 pub mod rpc_server;
 #[path = "common/upstream_live_campaign.rs"]
