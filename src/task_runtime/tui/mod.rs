@@ -7,6 +7,9 @@ mod drain;
 mod fixture;
 mod herdr;
 mod hooks;
+#[cfg(test)]
+#[path = "../../../tests/common/native_tui_method_fixtures.rs"]
+pub(crate) mod method_fixtures;
 mod persistence;
 mod protocol;
 

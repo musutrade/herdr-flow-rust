@@ -277,3 +277,6 @@ fn native_handshake_owned_resume_and_read_can_settle_without_new_work() {
     );
     f.empty();
 }
+
+#[path = "native_tui_method_completion.rs"]
+mod method_completion;

@@ -393,3 +393,6 @@ fn async_acknowledgement_keeps_queued_native_work_and_original_pane() {
         assert_eq!(fixture.plan().entries[0].phase, "retiring");
     }
 }
+
+#[path = "stage_retirement_native_methods.rs"]
+mod method_completion;

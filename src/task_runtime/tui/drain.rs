@@ -234,7 +234,7 @@ impl Drain {
         let turn = match pending.method.as_str() {
             "turn/start" => turn_id(&result["turn"]["id"]),
             "turn/steer" => turn_id(&result["turnId"]),
-            method if response_completes(method) => {
+            method if response_completes(method, result) => {
                 ledger.pending.remove(index);
                 return;
             }
@@ -278,7 +278,10 @@ impl Drain {
     }
 }
 
-fn response_completes(method: &str) -> bool {
+fn response_completes(method: &str, result: &J) -> bool {
+    if method == "command/exec" {
+        return command_finished(result);
+    }
     // Exact protocol methods only. Unknown reads also retain evidence until
     // their semantics are supported; a suffix/prefix cannot prove no work.
     const METHODS: &[&str] = &[
@@ -288,20 +291,37 @@ fn response_completes(method: &str) -> bool {
         "thread/list",
         "thread/loaded/list",
         "thread/turns/list",
+        "thread/items/list",
+        "thread/goal/get",
         "model/list",
+        "collaborationMode/list",
+        "hooks/list",
         "skills/list",
         "mcpServerStatus/list",
         "app/list",
+        "app/installed",
+        "app/read",
         "plugin/list",
         "config/read",
         "configRequirements/read",
         "account/read",
         "account/rateLimits/read",
+        "account/bedrock/checkGovCloudRequirements",
         "experimentalFeature/list",
         "externalAgentConfig/detect",
         "turn/interrupt",
     ];
     METHODS.contains(&method)
+}
+
+fn command_finished(result: &J) -> bool {
+    // Codex 0.165.0 CommandExecParams/Response: this reply is deferred until
+    // process exit and all outputDelta events, unlike an asynchronous ACK.
+    result["exitCode"]
+        .as_i64()
+        .is_some_and(|code| i32::try_from(code).is_ok())
+        && result["stdout"].is_string()
+        && result["stderr"].is_string()
 }
 
 fn valid_id(id: &J) -> bool {
