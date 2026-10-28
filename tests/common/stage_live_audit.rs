@@ -1,5 +1,7 @@
 //! Bounded, read-only evidence of actual stage publication and visible roles.
 use super::*;
+#[path = "stage_live_reclamation.rs"]
+mod reclamation;
 
 pub(super) struct StageAudit {
     root: PathBuf,
@@ -14,13 +16,16 @@ pub(super) struct StageAudit {
     processes: BTreeMap<String, J>,
     stage: J,
     terminal: J,
+    early: J,
+    socket: String,
+    store: PathBuf,
 }
 
 fn read(root: &Path, name: &str) -> Option<J> {
     if !root.exists() {
         return None;
     }
-    match util::read_state_json_bounded_if_exists(root, name, 2 * 1024 * 1024) {
+    match util::read_state_json_bounded_if_exists(root, name, 8 * 1024 * 1024) {
         Ok(value) => value,
         Err(_) if !root.exists() => None,
         Err(e) => panic!("audit read {name}: {e}"),
@@ -35,6 +40,7 @@ impl StageAudit {
         model: &J,
         roles: &J,
         parent: &J,
+        upstream: (&str, &Path),
     ) -> Self {
         let q = f.state();
         Self {
@@ -51,6 +57,9 @@ impl StageAudit {
             processes: BTreeMap::new(),
             stage: J::Null,
             terminal: J::Null,
+            early: J::Null,
+            socket: upstream.0.into(),
+            store: upstream.1.into(),
         }
     }
 
@@ -86,6 +95,16 @@ impl StageAudit {
             self.env_file.parent().unwrap(),
             self.env_file.file_name().unwrap().to_str().unwrap(),
         ) {
+            if parent["final_outcome"].is_null() && self.views.contains_key("final-dev-a1") {
+                if self.early.is_null() {
+                    self.early = reclamation::observe(self, f, q, &env, &self.socket, &self.store);
+                } else if self.views.contains_key("final-review-a1")
+                    && self.early["retained_through_final_review"] != true
+                {
+                    reclamation::retained_review(self, &env);
+                    self.early["retained_through_final_review"] = json!(true);
+                }
+            }
             for process in env["child_processes"].as_array().unwrap() {
                 self.processes.insert(
                     format!("{}:{}", process["pid"], process["start_time"]),
@@ -184,10 +203,15 @@ impl StageAudit {
     pub(super) fn summary(&self) -> J {
         json!({"scope":"one real answer stage then new development and independent full acceptance; local Git only",
             "owner":self.owner,"views":self.views,"verdicts":self.verdicts,"processes":self.processes,
-            "stage":self.stage,"terminal":self.terminal,"harness_business_mutations_after_start":false})
+            "stage":self.stage,"early_reclamation":self.early,"terminal":self.terminal,"harness_business_mutations_after_start":false})
     }
 
     pub(super) fn verify(&self, f: &Fixture, target: &Path, store: &Path) {
+        assert_eq!(
+            self.early["plan"]["phase"], "complete",
+            "early reclamation evidence missing"
+        );
+        assert_eq!(self.early["retained_through_final_review"], true);
         assert_eq!(self.stage["phase"], "complete");
         assert_eq!(self.terminal["final_outcome"], "success");
         assert!(self.terminal["stage"].is_null());
