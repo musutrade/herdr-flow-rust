@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 #[path = "stage_live_audit.rs"]
 mod audit;
+#[path = "stage_live_resume.rs"]
+mod resume;
 
 const GOAL: &str = "Create tracked answer.txt containing exactly 42 followed by one newline, and tracked explanation.txt containing exactly 6 * 7 = 42 followed by one newline.";
 
@@ -115,7 +117,11 @@ fn upstream_empty(socket: &str, cwds: &[PathBuf]) {
 #[test]
 #[ignore = "explicit existing model service and Herdr; real stage delivery, fresh overall acceptance and cleanup"]
 fn real_stage_delivery_continues_same_parent_and_reclaims_visible_roles() {
-    let socket = std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing service required");
+    // Resolve and validate before allocating any task-owned state.
+    let endpoint = resume::socket(Path::new(
+        &std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing service required"),
+    ));
+    let socket = endpoint["path"].as_str().unwrap().to_owned();
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let roles: J =
         serde_json::from_str(&std::env::var("HERDR_UPSTREAM_ROLE_MODELS").unwrap()).unwrap();
@@ -125,12 +131,27 @@ fn real_stage_delivery_continues_same_parent_and_reclaims_visible_roles() {
     let config_before = fs::read(&config).unwrap();
     let parent = std::env::var("HERDR_PANE_ID").unwrap();
     let parent_before = herdr(&["agent", "get", &parent]);
-    let mut f = Fixture::new();
+    let resume_spec: Option<J> = std::env::var_os("HERDR_STAGE_RESUME").map(|value| {
+        serde_json::from_str(value.to_str().expect("resume contract must be UTF-8")).unwrap()
+    });
+    let mut f = match &resume_spec {
+        Some(spec) => resume::attach(Path::new(spec["root"].as_str().unwrap())),
+        None => Fixture::new(),
+    };
     f.temp.disable_cleanup(true); // Failed/unknown tasks retain their original state.
     eprintln!("stage live root: {}", f.temp.path().display());
     let started_at = Instant::now();
     let target = f.temp.path().join("output.git");
-    let mut env = setup(&f, &target);
+    let current = json!({"model":model,"role_models":roles,"parent":parent_before,"binary":binary,
+        "socket_identity":endpoint,"config_sha256":util::pyjson::sha256_hex(&config_before)});
+    let resumed = resume_spec
+        .as_ref()
+        .map(|spec| resume::validate(&f, spec, &current));
+    let mut env = if resumed.is_some() {
+        task_env::restore_environment("task").unwrap()
+    } else {
+        setup(&f, &target)
+    };
     let workspace = env.workspace_root.clone();
     let scratch = env.temp_root.clone();
     let coord = task_runtime::prepare(&env, "coordinator").unwrap();
@@ -143,11 +164,15 @@ fn real_stage_delivery_continues_same_parent_and_reclaims_visible_roles() {
         &parent_before,
         (&socket, &store),
     );
-    util::atomic_write_json(&f.temp.path().join("stage-baseline.json"), &json!({
+    if let Some(receipt) = resumed {
+        util::atomic_write_json(&f.temp.path().join("stage-resume.json"), &receipt).unwrap();
+    } else {
+        util::atomic_write_json(&f.temp.path().join("stage-baseline.json"), &json!({
         "owner":lifecycle::task_owner(&f.state(),"task").unwrap(),"agreement":f.state()["tasks"]["task"]["requirements"],
         "model":model,"role_models":roles,"parent":parent_before,
         "config_sha256":util::pyjson::sha256_hex(&config_before),"binary":binary,"socket":socket
     })).unwrap();
+    }
     let mut broker = task_runtime::launch(&mut env, &coord, &json!({"adapter":"codex","configuration":"upstream",
         "socket":socket,"cwd":workspace.join("checkout"),"model":model,"role_models":roles,"approval_policy":"on-request",
         "driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),"native_tui":{"binary":binary,"parent_pane":parent,"session_store":store}})).unwrap();
