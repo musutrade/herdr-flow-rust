@@ -9,15 +9,20 @@ const WORKER: &str = "33333333-3333-3333-3333-333333333333";
 
 #[test]
 fn coordinator_dispatches_collects_and_finalizes_without_driver_task_mutations() {
-    exercise(false);
+    exercise(false, false);
 }
 
 #[test]
 fn coordinator_develops_reviews_and_delivers_to_predeclared_local_target() {
-    exercise(true);
+    exercise(true, false);
 }
 
-fn exercise(success: bool) {
+#[test]
+fn coordinator_completes_stage_then_reaccepts_the_same_parent_before_finalizing() {
+    exercise(true, true);
+}
+
+fn exercise(success: bool, staged: bool) {
     let f = Fixture::new();
     let target = f.temp.path().join("output.git");
     if success {
@@ -49,9 +54,18 @@ fn exercise(success: bool) {
             "id":GUARDIAN,"parent_thread_id":WORKER,"cwd":cwd,"source":{"subagent":{"other":"guardian"}}}}))).unwrap();
     }
     let shared_guardian = guardian.clone();
-    let server = parallel(if success { 11 } else { 6 }, move |peer| {
-        peer_loop(peer, &server_cwd, &commands, &replies, &shared_guardian);
-    });
+    let server = parallel(
+        if staged {
+            15
+        } else if success {
+            11
+        } else {
+            6
+        },
+        move |peer| {
+            peer_loop(peer, &server_cwd, &commands, &replies, &shared_guardian);
+        },
+    );
     let mut broker = task_runtime::launch(
         &mut env,
         &coord,
@@ -228,6 +242,7 @@ fn exercise(success: bool) {
             &receive,
             &view["runtime_results"]["2"]["output"],
             &target,
+            staged,
         );
     }
     let result = tool(
@@ -363,6 +378,8 @@ fn peer_loop(
         let review = cwd.to_string_lossy().contains("/reviews/");
         let id = if coordinator {
             COORD
+        } else if review && cwd.to_string_lossy().contains("overall-review") {
+            "66666666-6666-6666-6666-666666666666"
         } else if review {
             "44444444-4444-4444-4444-444444444444"
         } else {
@@ -465,6 +482,7 @@ fn complete_review_delivery(
     receive: &mpsc::Receiver<J>,
     output: &J,
     target: &Path,
+    staged: bool,
 ) {
     await_condition(|| !f.state()["active"].is_null());
     checked(
@@ -491,11 +509,86 @@ fn complete_review_delivery(
         "output":output,"acceptance":{"goal":"synthetic development completed"},"release_evidence":"bound native turn completed",
         "next_action":{"kind":"complete"}}),
     );
+    if staged {
+        checked(
+            send,
+            receive,
+            18,
+            "lineage",
+            json!({"task":"task",
+            "state_version":f.state()["tasks"]["task"]["state_version"],
+            "kind":"stage","id":"draft","scope":"deliver the developed file","criteria":["goal"]}),
+        );
+    }
+    review_delivery(f, send, receive, output, target, ("review", 12, &f.commit));
+    if staged {
+        let before = f.state();
+        let denied = tool(
+            send,
+            receive,
+            19,
+            "finalize",
+            json!({"task":"task",
+            "state_version":before["tasks"]["task"]["state_version"],"outcome":"success","reason":"stage is not final"}),
+        );
+        assert_eq!(denied["success"], false);
+        assert!(f.state()["tasks"]["task"]["final_outcome"].is_null());
+        let id = before["tasks"]["task"]["delivery"].clone();
+        checked(send, receive, 20, "stage-complete", json!({"delivery":id}));
+        let after = f.state();
+        assert_eq!(after["tasks"]["task"]["control"], "running");
+        assert!(after["tasks"]["task"]["approved"].is_null());
+        assert_eq!(
+            after["tasks"]["task"]["stage_delivery"]["phase"],
+            "complete"
+        );
+        assert_eq!(before["lifecycle"], after["lifecycle"]);
+        assert!(!progress::lineage::current(
+            &after,
+            &after["tasks"]["review"]
+        ));
+        let denied = tool(
+            send,
+            receive,
+            21,
+            "deliver",
+            json!({"adapter":"git","target":target,
+            "ref":"refs/heads/accepted","expected":output["id"],"authorization":"deliver-local",
+            "state_version":after["tasks"]["task"]["state_version"]}),
+        );
+        assert_eq!(denied["success"], false);
+        review_delivery(
+            f,
+            send,
+            receive,
+            output,
+            target,
+            ("overall-review", 30, output["id"].as_str().unwrap()),
+        );
+        let final_state = f.state();
+        assert!(final_state["tasks"]["task"]["stage"].is_null());
+        assert_eq!(final_state["tasks"]["task"]["approved"]["scope_epoch"], 2);
+        assert_ne!(
+            final_state["tasks"]["review"]["verdict"]["envelope"]["reviewer"],
+            final_state["tasks"]["overall-review"]["verdict"]["envelope"]["reviewer"]
+        );
+    }
+}
+
+fn review_delivery(
+    f: &Fixture,
+    send: &mpsc::Sender<J>,
+    receive: &mpsc::Receiver<J>,
+    output: &J,
+    target: &Path,
+    review: (&str, u64, &str),
+) {
+    let (name, id, expected) = review;
     let q = f.state();
     checked(
         send,
         receive,
-        12,
+        id,
         "lineage",
         json!({"task":"task","state_version":q["tasks"]["task"]["state_version"],
         "kind":"candidate","candidate":output["id"],"reason":"developed candidate"}),
@@ -504,31 +597,31 @@ fn complete_review_delivery(
     checked(
         send,
         receive,
-        13,
+        id + 1,
         "lineage",
         json!({"task":"task","state_version":q["tasks"]["task"]["state_version"],
-        "kind":"activity","activity":"review","role":"acceptance","input":output["id"],"session_epoch":1,
-        "result_wait":{"id":"review","kind":"signal","task":"review","epoch":1,"assignment":"review-a1", "owner":"reviewer","reason":"independent review","condition":"report","timeout_seconds":600}}),
+        "kind":"activity","activity":name,"role":"acceptance","input":output["id"],"session_epoch":1,
+        "result_wait":{"id":name,"kind":"signal","task":name,"epoch":1,"assignment":format!("{name}-a1"), "owner":"reviewer","reason":"independent review","condition":"report","timeout_seconds":600}}),
     );
     checked(
         send,
         receive,
-        14,
+        id + 2,
         "run",
-        json!({"wait":"review","instruction":"synthetic independent review"}),
+        json!({"wait":name,"instruction":"synthetic independent review"}),
     );
     await_condition(|| {
         f.state()["events"]
             .as_object()
             .unwrap()
             .values()
-            .any(|e| e["task"] == "review")
+            .any(|e| e["task"] == name)
     });
     await_condition(|| !f.state()["active"].is_null());
     checked(
         send,
         receive,
-        15,
+        id + 3,
         "ack",
         json!({"delivery":f.state()["active"]}),
     );
@@ -537,24 +630,24 @@ fn complete_review_delivery(
         .as_object()
         .unwrap()
         .iter()
-        .find(|(_, e)| e["task"] == "review")
+        .find(|(_, e)| e["task"] == name)
         .unwrap()
         .0;
     checked(
         send,
         receive,
-        16,
+        id + 4,
         "apply",
-        json!({"task":"review","state_version":q["tasks"]["review"]["state_version"],"event":event,
-        "verdict":q["tasks"]["review"]["verdict"]["id"],"next_action":{"kind":"delivery","owner":"coordinator","reason":"passed","condition":"predeclared local delivery"}}),
+        json!({"task":name,"state_version":q["tasks"][name]["state_version"],"event":event,
+        "verdict":q["tasks"][name]["verdict"]["id"],"next_action":{"kind":"delivery","owner":"coordinator","reason":"passed","condition":"predeclared local delivery"}}),
     );
     let q = f.state();
     checked(
         send,
         receive,
-        17,
+        id + 5,
         "deliver",
-        json!({"adapter":"git","target":target,"ref":"refs/heads/accepted","expected":f.commit,
+        json!({"adapter":"git","target":target,"ref":"refs/heads/accepted","expected":expected,
         "authorization":"deliver-local","state_version":q["tasks"]["task"]["state_version"]}),
     );
 }

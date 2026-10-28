@@ -25,6 +25,9 @@ continues in #37.
   even the same artifact again starts another round and clears prior approval.
 - `state_version`: optimistic concurrency for each individual parent/activity
   mutation. ACK and parent changes do not stand in for this version.
+- `scope_epoch`: the current stage generation, also bound into linked activities
+  and their approvals. Missing means zero for pre-stage records. Entering or
+  completing a stage advances it; leaving a stage never restores epoch zero.
 
 Development and acceptance are separate managed child tasks, each with its own
 wait, writer, pending results, operations, deadlines and state version. Their
@@ -112,6 +115,33 @@ Select a candidate explicitly with `kind: "candidate"`, parent `task`, current
 `state_version`, `candidate` artifact ID and `reason`. Selection revalidates the
 actual object, fixes `candidate` and `delivery_target` and starts a new acceptance
 round. A development output does **not** call this operation implicitly.
+
+## Stage selection and fresh acceptance
+
+After all existing linked executions have finished (complete or known failed) and been applied, their writers
+released and pending/uncertain operations reconciled, select a stage explicitly:
+
+```json
+{
+  "kind": "stage", "task": "document", "state_version": 3,
+  "id": "draft", "scope": "Deliver the independently reviewed draft",
+  "criteria": ["draft-content"]
+}
+```
+
+Every selected ID must already exist in the agreed requirement revision. Selection
+retains its full criterion, required flag, original basis and authority. It clears
+the current candidate/approval and advances the scope epoch and acceptance round.
+Another active stage or delivery cannot be overwritten. Register new development
+or acceptance activities normally; they inherit this scope. Native packets carry
+both the scoped `requirement` and complete `overall_requirement`.
+
+Finish a confirmed delivery with [stage-complete](delivery.md#stage-delivery-within-the-same-requirement-2026-10-27),
+which reopens the same parent for another stage or full-scope acceptance. Stage
+success cannot finalize the parent. Old bindings remain stale after completion,
+including old development results. A confirmed requirement revision explicitly
+supersedes an active stage and advances the scope epoch; it does not release an
+outstanding writer or grant a replacement execution.
 
 ## Register independent activities
 

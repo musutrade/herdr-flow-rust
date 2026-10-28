@@ -39,7 +39,7 @@ fn obligations_consumed(root: &Path, entry: &J) -> Result<bool> {
         Some("finalize") => Ok(false), // commit_terminal still consumes this pair.
         Some("run") if entry["result"]["success"] == true => worker_applied(root, entry),
         Some("run") => Ok(false), // A failed reply may follow a partial dispatch.
-        Some("deliver") => Ok(entry["result"]["success"] == true),
+        Some("deliver" | "stage-complete") => Ok(entry["result"]["success"] == true),
         _ => Ok(true),
     }
 }

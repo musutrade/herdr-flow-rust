@@ -54,12 +54,16 @@ fn validate_new(t: &J, spec: &J, env: &TaskEnvironment, outcome: &str) -> Result
         "cleanup obligation exists without terminal outcome",
     )?;
     if outcome == "success" {
-        return confirmed_delivery(env);
+        return confirmed_delivery(t, env);
     }
     Ok(())
 }
 
-fn confirmed_delivery(env: &TaskEnvironment) -> Result<()> {
+fn confirmed_delivery(parent: &J, env: &TaskEnvironment) -> Result<()> {
+    ensure(
+        parent["stage"].is_null() && env.delivery["stage"].is_null(),
+        "stage delivery does not satisfy final requirement acceptance",
+    )?;
     ensure(
         env.delivery["phase"] == "confirmed"
             && env.delivery["instance"] == env.instance_id

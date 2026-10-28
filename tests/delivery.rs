@@ -16,6 +16,8 @@ use std::{
 static LOCK: Mutex<()> = Mutex::new(());
 #[path = "common/delivery_contention.rs"]
 mod contention;
+#[path = "common/delivery_stage.rs"]
+mod stage;
 struct Fixture {
     _lock: MutexGuard<'static, ()>,
     dir: tempfile::TempDir,

@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow delivery <prepare|execute|reconcile|retry|finish> --task TASK [--queue DIR --spec FILE]";
+const USAGE: &str = "Usage: herdr-flow delivery <prepare|execute|reconcile|retry|stage-complete|finish> --task TASK [--queue DIR --spec FILE]";
 
 fn run(args: &[String]) -> Result<J> {
     let action = args.first().ok_or_else(|| FlowError::usage(USAGE))?;
@@ -25,12 +25,26 @@ fn route(
         "execute" => execute(env, &local::Local),
         "reconcile" => reconcile(env, &local::Local),
         "retry" => retry(env, &local::Local),
+        "stage-complete" => complete_stage_cli(env, options),
         "finish" => {
             finish(env)?;
             Ok(json!({"finished":true}))
         }
         _ => Err(FlowError::usage(USAGE)),
     }
+}
+fn complete_stage_cli(
+    env: &mut TaskEnvironment,
+    options: &std::collections::BTreeMap<&str, &str>,
+) -> Result<J> {
+    let queue = options
+        .get("--queue")
+        .ok_or_else(|| FlowError::usage(USAGE))?;
+    let path = options
+        .get("--spec")
+        .ok_or_else(|| FlowError::usage(USAGE))?;
+    let spec = util::read_json(Path::new(path))?;
+    complete_stage(env, Path::new(queue), &field(&spec, "delivery")?)
 }
 fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<&str, &str>> {
     let mut options = std::collections::BTreeMap::new();

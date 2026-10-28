@@ -6,6 +6,7 @@ use super::{
     artifact::{ArtifactAdapter, LocalArtifacts},
     *,
 };
+pub(crate) mod stage;
 
 pub fn action(s: &mut J, spec: &J, now: f64) -> Result<J> {
     action_with_adapter(s, spec, now, &LocalArtifacts)
@@ -26,14 +27,21 @@ pub fn action_with_adapter(
 
 fn route(s: &mut J, spec: &J, now: f64, adapter: &dyn ArtifactAdapter) -> Result<J> {
     match model::string(spec, "kind").as_deref() {
-        Some("plan") => plan(s, spec, now),
-        Some("migrate") => migrate(s, spec, now),
-        Some("revise") => revise(s, spec, now),
         Some("artifact") => artifact(s, spec, now, adapter),
         Some("candidate") => candidate(s, spec, now, adapter),
         Some("activity") => activity(s, spec, now, adapter),
         Some("checks") => checks(s, spec, now),
         Some("continue") => acceptance::resume(s, spec, now, adapter),
+        _ => requirement_action(s, spec, now),
+    }
+}
+
+fn requirement_action(s: &mut J, spec: &J, now: f64) -> Result<J> {
+    match spec["kind"].as_str() {
+        Some("plan") => plan(s, spec, now),
+        Some("migrate") => migrate(s, spec, now),
+        Some("revise") => revise(s, spec, now),
+        Some("stage") => stage::begin(s, spec, now),
         _ => Err(progress_error("unknown lineage action")),
     }
 }
@@ -177,6 +185,7 @@ fn revise(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let next = requirement(&inherited, revision)?;
     t["requirements"][revision.to_string()] = next;
     t["requirement_revision"] = json!(revision);
+    stage::supersede(&mut t)?;
     replace_candidate(&mut t, Value::Null);
     Ok(save_parent(s, t, now, "requirements_revised"))
 }
@@ -295,18 +304,19 @@ fn activity_link(t: &J, spec: &J, role: &str, input: &J) -> Result<J> {
     } else {
         json!(0)
     };
-    Ok(
-        json!({"requirement":t["task"], "revision":t["requirement_revision"],
-        "role":role, "input":input, "round":round, "session_epoch":epoch}),
-    )
+    let mut link = json!({"requirement":t["task"], "revision":t["requirement_revision"],
+        "role":role, "input":input, "round":round, "session_epoch":epoch});
+    stage::copy_scope(t, &mut link)?;
+    Ok(link)
 }
 
 fn activity_spec(spec: &J, t: &J, name: &str) -> Result<J> {
     object(spec, "activity specification")?;
     let mut child = spec.clone();
     child["task"] = json!(name);
-    child["goal"] = req(t)["goal"].clone();
-    child["acceptance"] = req(t)["criteria"].clone();
+    let scoped = stage::requirement(t)?;
+    child["goal"] = scoped["goal"].clone();
+    child["acceptance"] = scoped["criteria"].clone();
     child["authorization"] = json!(inherited_permissions(t)?);
     Ok(child)
 }
@@ -346,7 +356,9 @@ pub fn current(s: &J, t: &J) -> bool {
 }
 
 fn parent_revision_current(parent: &J, link: &J) -> bool {
-    is_parent(parent) && parent["requirement_revision"] == link["revision"]
+    is_parent(parent)
+        && parent["requirement_revision"] == link["revision"]
+        && stage::current(parent, link)
 }
 
 fn candidate_current(parent: &J, t: &J, link: &J) -> bool {

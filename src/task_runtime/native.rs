@@ -22,14 +22,11 @@ pub fn packet(queue: &J, wait: &J, instruction: &str, evidence: &[String]) -> Re
     let parent = &queue["tasks"][binding["lineage"]["requirement"]
         .as_str()
         .unwrap_or_default()];
-    let revision = binding["lineage"]["revision"].to_string();
-    let req = &parent["requirements"][revision];
-    ensure(
-        req.is_object(),
-        "fresh sessions require linked requirements",
-    )?;
+    let req = progress::lineage::stage::requirement(parent)?;
     Ok(
-        json!({"binding":binding,"requirement":req,"instruction":instruction,"evidence":evidence,"acceptance_origin":task["acceptance_origin"],"open_gaps":parent["open_gaps"],"acceptance_protocol":acceptance_protocol(req)}),
+        json!({"binding":binding,"requirement":req,"instruction":instruction,"evidence":evidence,
+        "overall_requirement":parent["requirements"][parent["requirement_revision"].to_string()],
+        "acceptance_origin":task["acceptance_origin"],"open_gaps":parent["open_gaps"],"acceptance_protocol":acceptance_protocol(&req)}),
     )
 }
 

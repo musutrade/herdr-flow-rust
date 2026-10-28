@@ -1,5 +1,55 @@
 # Correct delivery and disposable completion
 
+## Stage delivery within the same requirement (2026-10-27)
+
+An explicit `task-lineage` action with `kind: "stage"` selects existing requirement
+criterion IDs and records an ID, scope description and monotonically increasing
+scope epoch. It cannot add authorization or change the selected criteria. See
+[stage selection](task-lineage.md#stage-selection-and-fresh-acceptance). Development
+and independent acceptance inherit the selected criteria. Native input also
+includes the complete original requirement as `overall_requirement`.
+
+Preparation pins that stage alongside its actual artifact, independent approval
+and existing authorization. Execution and observation use the existing delivery
+protocol below; an ACK or a successful push exit alone still cannot confirm it.
+Once the adapter has observed a nonempty receipt, continue with:
+
+```text
+herdr-flow delivery stage-complete --task TASK --queue /absolute/queue --spec /owned/stage-complete.json
+```
+
+The spec is `{"delivery":"EXACT_CONFIRMED_INTENT_ID"}`. The isolated coordinator
+can use `herdr_queue` action `stage-complete` with the same spec. It holds the
+original lifecycle permit and environment ownership, verifies the frozen parent
+and exact stage approval, and requires linked activities to have applied terminal
+executions (`complete` or known `failed`), released writers, no pending results and
+no uncertain operations. A settled failed execution does not pin future stages;
+its failure is not acceptance evidence. Unknown decision events remain blocked.
+
+A queue checkpoint containing the full confirmed intent is saved before clearing
+the environment journal. Only then is the parent reopened, its scope epoch and
+acceptance round advanced, and its stage, candidate, approval and continuation
+cleared. After interruption, the same delivery ID resumes only these state writes;
+it never invokes an executor. Repeating the last completed ID returns its receipt
+without changing a newer stage. Only the latest stage delivery checkpoint is kept.
+
+The task, instance, workspace and authority remain the same. A new stage, or the
+full requirement after leaving a stage, must select a candidate and obtain fresh
+independent acceptance. Earlier stage results cannot regain currency when the
+stage field becomes empty. Explicit evidence reuse retains the existing review
+rules; it is not automatic approval. `finish` and terminal success reject stage
+delivery. Final success requires full-scope acceptance and confirmed non-stage
+delivery, followed by the existing terminal cleanup of all linked resources.
+
+Regression coverage includes two actual local Git stage deliveries, both persisted
+prefixes of the stage-completion checkpoint, stale/unknown/mismatched rejection,
+CLI recovery and an isolated coordinator/broker/watcher workflow through fresh
+independent review, final delivery and cleanup. These use synthetic native model
+protocols; they add no live-model/Herdr acceptance claim. Early per-stage resource
+reclamation, remote PR/CI integration, a publishing role and asynchronous adapter
+execution remain follow-up work. Existing activity/artifact/history capacities
+still apply; this increment does not promise unbounded stages.
+
 ## Queue availability during external delivery (2026-10-27)
 
 The #130 / #112 continuation first removes external work from the shared queue
@@ -30,8 +80,8 @@ assertion now checks the existing exclusive-handle refusal.
 This increment does not make the synchronous caller asynchronous: a queue watcher
 invoking delivery still waits for its adapter call. Independent observation and
 other queue transactions can proceed. A publishing role, remote PR/CI integration,
-stage delivery that keeps its parent requirement active, and early reclamation
-of unreferenced stage resources remain separate work. There is no new live model
+and early reclamation of unreferenced stage resources remain separate work.
+Stage delivery is described above. There is no new live model
 or Herdr acceptance evidence in these protocol/local Git tests.
 
 A version 2 requirement is finished only after the current accepted artifact has
