@@ -5,6 +5,7 @@ use crate::codex::rpc::{
     decode_message_with_limit, encode_frame, encode_frame_with_limit, FrameDecoder, MAX_HEADERS,
     MAX_MESSAGE,
 };
+use std::{cell::RefCell, rc::Rc};
 
 // Matches Codex remote.rs REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE.
 // Real native catalog responses can exceed the broker's 16 MiB RPC limit.
@@ -16,6 +17,7 @@ struct Direction {
     frames: FrameDecoder,
     responses: Vec<u8>,
     selection: J,
+    drain: Option<Rc<RefCell<drain::Drain>>>,
 }
 impl Direction {
     fn new(client: bool) -> Self {
@@ -25,6 +27,7 @@ impl Direction {
             frames: FrameDecoder::new(client, NATIVE_MESSAGE_LIMIT),
             responses: Vec::new(),
             selection: J::Null,
+            drain: None,
         }
     }
     fn feed(&mut self, data: &[u8], session: &J) -> Result<Vec<u8>> {
@@ -76,22 +79,27 @@ impl Direction {
     fn forward_message(&mut self, message: &J, session: &J) -> Result<bool> {
         match self.decision(message, session) {
             Ok(forward) => Ok(forward),
-            Err(error)
-                if self.client && (message["id"].is_string() || message["id"].is_number()) =>
-            {
+            Err(error) if self.client && message["method"].is_string() => {
                 // A native auxiliary request or unsupported slash command must
                 // receive a proper RPC refusal, not tear down the task socket.
-                self.refuse(message, &error)?;
+                if message["id"].is_string() || message["id"].is_number() {
+                    self.refuse(message, &error)?;
+                }
                 Ok(false)
             }
             Err(error) => Err(error),
         }
     }
 
-    fn decision(&self, message: &J, session: &J) -> Result<bool> {
+    fn decision(&mut self, message: &J, session: &J) -> Result<bool> {
         let forward = allowed(self.client, message, session)?;
         if self.client && !self.selection.is_null() {
             selected_runtime(message, &self.selection)?;
+        }
+        if forward {
+            if let Some(drain) = &self.drain {
+                drain.borrow_mut().message(self.client, message)?;
+            }
         }
         Ok(forward)
     }
@@ -195,17 +203,62 @@ pub(super) struct Policy {
     client: Direction,
     server: Direction,
     reported: bool,
+    drain: Option<Rc<RefCell<drain::Drain>>>,
+    deferred: [Vec<u8>; 2],
 }
 impl Policy {
     pub fn new(binding: J, runtime: J) -> Self {
         let mut client = Direction::new(true);
         client.selection = runtime.clone();
+        // Production attachments always carry their validated runtime binding.
+        let drain = binding
+            .get("runtime")
+            .map(|_| Rc::new(RefCell::new(drain::Drain::new(binding.clone()))));
+        client.drain = drain.clone();
+        let mut server = Direction::new(false);
+        server.drain = drain.clone();
         Self {
             binding,
             runtime,
             client,
-            server: Direction::new(false),
+            server,
             reported: false,
+            drain,
+            deferred: [vec![], vec![]],
+        }
+    }
+
+    fn forward_permitted(&mut self, client: bool, data: &[u8]) -> Result<Vec<u8>> {
+        let index = usize::from(!client);
+        self.deferred[index].extend_from_slice(data);
+        ensure(
+            self.deferred[index].len() <= NATIVE_MESSAGE_LIMIT + MAX_HEADERS,
+            "native deferred input exceeds bound",
+        )?;
+        if self.deferred[index].is_empty() {
+            return Ok(vec![]);
+        }
+        let root = self.drain.as_ref().map(|d| d.borrow().root()).transpose()?;
+        let _permit = match root
+            .as_deref()
+            .map(crate::lifecycle::runtime_observer_permit)
+            .transpose()
+        {
+            Ok(permit) => permit,
+            Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(vec![]),
+            Err(error) => return Err(error),
+        };
+        if let Some(drain) = &self.drain {
+            drain.borrow_mut().initialize()?;
+        }
+        if client && self.client.headers.is_some() {
+            upstream::endpoint(&self.runtime)?;
+        }
+        let data = std::mem::take(&mut self.deferred[index]);
+        if client {
+            self.client.feed(&data, &self.binding["session"])
+        } else {
+            self.server.feed(&data, &self.binding["session"])
         }
     }
 }
@@ -220,6 +273,12 @@ impl crate::codex::tui::BridgePolicy for Policy {
         self.client = Direction::new(true);
         self.client.selection = self.runtime.clone();
         self.server = Direction::new(false);
+        self.client.drain = self.drain.clone();
+        self.server.drain = self.drain.clone();
+        self.deferred = [vec![], vec![]];
+        if let Some(drain) = &self.drain {
+            drain.borrow_mut().connected();
+        }
     }
     fn explicit_cwd(&self) -> bool {
         // `resume` restores the existing thread cwd. Supplying --cd asks the
@@ -228,14 +287,7 @@ impl crate::codex::tui::BridgePolicy for Policy {
         false
     }
     fn forward(&mut self, client: bool, data: &[u8]) -> Result<Vec<u8>> {
-        if client && self.client.headers.is_some() {
-            upstream::endpoint(&self.runtime)?;
-        }
-        let result = if client {
-            self.client.feed(data, &self.binding["session"])
-        } else {
-            self.server.feed(data, &self.binding["session"])
-        };
+        let result = self.forward_permitted(client, data);
         if let Err(error) = &result {
             let path = Path::new(self.binding["directory"].as_str().unwrap_or_default())
                 .join("transport-error.json");

@@ -2128,6 +2128,16 @@ impl ProxyBridge {
         self.endpoints.iter().all(Option::is_some)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_transfer(&mut self, index: usize, read: bool, write: bool) -> Result<()> {
+        self.transfer(index, read, write)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_iteration(&mut self) -> Result<()> {
+        self.serve_iteration()
+    }
+
     fn validate_inputs(&mut self) -> Result<()> {
         if self.nonce.is_empty() || self.nonce.chars().count() > 128 {
             return Err(FlowError::usage("nonce must contain 1 to 128 characters"));
@@ -2598,10 +2608,21 @@ impl ProxyBridge {
     }
 
     fn serve_iteration(&mut self) -> Result<()> {
+        self.flush_policy()?;
         let Some(batch) = self.poll_events()? else {
             return Ok(());
         };
         self.dispatch_poll_events(batch)
+    }
+
+    fn flush_policy(&mut self) -> Result<()> {
+        if self.policy.is_some() && self.is_connected() {
+            // A task's short-lived lifecycle permit can defer exact input.
+            // Retry it even when neither peer sends another byte.
+            self.read_data(0, &[])?;
+            self.read_data(1, &[])?;
+        }
+        Ok(())
     }
 
     fn poll_events(&mut self) -> Result<Option<PollBatch>> {

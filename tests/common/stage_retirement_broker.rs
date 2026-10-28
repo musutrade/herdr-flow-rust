@@ -295,13 +295,14 @@ fn real_broker_observes_and_drains_work_after_retirement_fence_until_frontend_ex
     assert!(fixture.broker.try_wait().unwrap().is_none());
 
     let error = drive_tick(&fixture);
-    assert!(
-        error.message.contains("frontend is still running"),
-        "{error}"
-    );
-    frontend.stop();
-    let error = drive_tick(&fixture);
     assert!(error.message.contains("current native work"), "{error}");
+    assert!(frontend.0.try_wait().unwrap().is_none());
+    assert!(herdr
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| call["method"] != "pane.close"));
     assert!(fixture.broker.try_wait().unwrap().is_none());
     assert!(fixture.clone_path().exists());
 
@@ -312,11 +313,21 @@ fn real_broker_observes_and_drains_work_after_retirement_fence_until_frontend_ex
     );
     wait_turn(&mut fixture, "native-late", "completed");
     native.active.store(false, Ordering::SeqCst);
+    assert!(drive_tick(&fixture)
+        .message
+        .contains("frontend is still running"));
+    frontend.stop();
     assert_eq!(drive_tick(&fixture).kind, crate::ErrorKind::StateBusy);
     assert_eq!(fixture.plan().entries[0].phase, "sessions");
     assert!(fixture.broker.try_wait().unwrap().is_some());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
-    assert_eq!(native.requests.lock().unwrap().len(), 5);
+    assert!(native
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request["method"] == "thread/read"
+            || (request["id"] == 91 && request["result"].is_object())));
 }
 
 fn drain_recorded_response(native: &Native, fixture: &mut Fixture) {

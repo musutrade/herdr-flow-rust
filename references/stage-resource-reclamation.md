@@ -54,11 +54,31 @@ or per-runtime lease, and an SH operation never upgrades its own permit.
 
 Before effects, the watcher rechecks the current presentation and frontend
 identities, current Recovery incident, and original runtime. It persists the
-plan and a retirement marker, captures the presentation's persistence identity,
-closes the exact pane, and observes both recorded frontend processes gone. It
-then verifies the thread identity and a quiescent upstream status (`idle` or
-`notLoaded`, with no active flags). Active or uncertain native work retains the
-resources; it is not interrupted to complete stage cleanup.
+plan and a retirement marker and captures the presentation's persistence identity.
+Before closing the exact pane it requires the native bridge's durable request
+ledger to be drained and verifies the thread identity and quiescent upstream
+status (`idle` or `notLoaded`, with no active flags). It then observes both
+recorded frontend processes gone and checks idle again before stopping the broker.
+Active or uncertain native work keeps its existing presentation, including its
+approval and input channel; it is not interrupted to complete stage cleanup.
+
+The existing task TUI bridge participates in the same lifecycle SH/EX boundary.
+It records admitted requests in the original attachment before buffering bytes
+for upstream, and rejects new operations after the retirement marker without
+closing the connection. Native approval/input responses and turn interruption
+remain available. Temporary EX contention defers bounded raw input, retried by
+the existing bridge loop even if no additional socket bytes arrive. A successful
+turn/start or turn/steer response retains the exact turn until a matching native
+completion; approval/input exchanges also retain their turn through completion.
+Request IDs are typed and scoped to their original connection and direction.
+Reconnects cannot erase or settle old unknown requests, and bounded completion
+evidence handles a terminal event arriving before its request response.
+
+Missing, changed or malformed drain evidence retains the presentation. This
+includes a TUI launched by an older binary without this capability. Unknown
+work-producing responses (including review/start without a supported turn proof)
+remain under the original parent's terminal cleanup obligation; they are not
+replayed or silently inferred complete from an idle snapshot.
 
 The broker stop uses only its exact registered PID/start identity. Each later
 tick deletes at most one recorded upstream session. Deletion and descendant
@@ -110,6 +130,13 @@ marker. Its regression covers checkpoint recovery, late native events, rejected
 new RPC and broker restart, original-connection tool response, frontend exit,
 active-work retention and the final idle-triggered broker stop. The original
 sleep-process fixtures alone do not establish these broker-loop properties.
+
+Native TUI regressions use the production task Policy and ProxyBridge with actual
+Unix/WebSocket connections. They reproduce post-marker turn admission and early
+pane closure, and cover buffered admission before retirement, approval/input
+delivery on the original socket, contention deferral, exact completion and fresh
+idle before pane closure. Separate ledger regressions cover reconnect ambiguity,
+typed IDs, crossed request/response IDs, early completion and missing evidence.
 
 The ordinary staged coordinator fixture also traverses production native
 creation, binding, dispatch, collection, ACK/application and stage completion.

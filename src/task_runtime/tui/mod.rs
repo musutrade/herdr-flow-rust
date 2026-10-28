@@ -2,12 +2,34 @@
 //! and broker keep their existing identities; each attachment owns a new tab.
 use super::*;
 use std::time::{Duration, Instant};
+mod drain;
 #[cfg(test)]
 mod fixture;
 mod herdr;
 mod hooks;
 mod persistence;
 mod protocol;
+
+pub(crate) fn require_retirement_drained(record: &J) -> Result<()> {
+    drain::require_drained(record)
+}
+
+#[cfg(test)]
+pub(crate) fn test_bridge(record: &J, runtime: &J) -> Result<crate::codex::tui::ProxyBridge> {
+    Ok(
+        task_bridge(Path::new(&required(record, "directory")?), record, runtime)?.with_policy(
+            Box::new(protocol::Policy::new(record.clone(), runtime.clone())),
+        ),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_drain_handshake(record: &J, runtime: &J) {
+    use crate::codex::tui::BridgePolicy;
+    let mut policy = protocol::Policy::new(record.clone(), runtime.clone());
+    let headers = b"HTTP/1.1 101 OK\r\n\r\n";
+    assert_eq!(policy.forward(false, headers).unwrap(), headers);
+}
 
 pub(super) fn configure(runtime: &mut J) -> Result<()> {
     if runtime.get("native_tui").is_none() {

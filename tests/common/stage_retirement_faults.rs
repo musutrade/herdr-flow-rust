@@ -10,6 +10,9 @@ use std::{
 #[path = "stage_retirement_broker.rs"]
 mod real_broker;
 
+#[path = "stage_retirement_tui.rs"]
+mod real_tui;
+
 struct Frontend(Child);
 
 impl Frontend {
@@ -142,6 +145,10 @@ fn install_presentation(
     plan.entries[0].presentation = presentation;
     plan.entries[0].frontends = frontends;
     save(&mut env, &plan).unwrap();
+    drop(env);
+    // The older pane/process fixtures install the production policy's drain
+    // capability; real_tui below exercises its actual buffered socket traffic.
+    tui::test_drain_handshake(&record, &read(&root, "runtime.json").unwrap());
     directory
 }
 
@@ -386,7 +393,7 @@ fn held_owner_shared_permit_prevents_all_effects_and_release_allows_continuation
 fn closed_owned_pane_keeps_live_frontend_and_native_resources_until_frontend_exit_and_idle_recheck()
 {
     let calls = Arc::new(Mutex::new(vec![json!({})]));
-    let service = server(5, false, calls.clone());
+    let service = server(7, false, calls.clone());
     let mut fixture = Fixture::new(&service.path);
     calls.lock().unwrap()[0]["fixture_cwd"] = json!(fixture.clone_path());
     let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
@@ -411,8 +418,8 @@ fn closed_owned_pane_keeps_live_frontend_and_native_resources_until_frontend_exi
     assert!(directory.join("tui.json").is_file());
     assert_eq!(
         calls.lock().unwrap().len(),
-        2,
-        "no native call while the closed frontend survives"
+        3,
+        "native idle was checked before closing the frontend"
     );
     let methods: Vec<_> = herdr
         .calls
@@ -429,9 +436,9 @@ fn closed_owned_pane_keeps_live_frontend_and_native_resources_until_frontend_exi
     fixture.pending_tick();
     assert_eq!(fixture.plan().entries[0].phase, "sessions");
     let native = calls.lock().unwrap();
-    assert_eq!(native.len(), 3);
-    assert_eq!(native[2]["method"], "thread/read");
-    assert_eq!(native[2]["params"]["threadId"], WORKER);
+    assert_eq!(native.len(), 5);
+    assert_eq!(native[4]["method"], "thread/read");
+    assert_eq!(native[4]["params"]["threadId"], WORKER);
     drop(native);
     fixture.pending_tick();
     drive_owner(&fixture.owner).unwrap();
@@ -456,7 +463,7 @@ fn upstream_becoming_active_during_owned_pane_close_retains_session_broker_and_c
     let active = Arc::new(AtomicBool::new(false));
     let calls = Arc::new(Mutex::new(vec![json!({})]));
     let (observed, status) = (calls.clone(), active.clone());
-    let service = rpc_server::Server::start_connections(2, move |mut peer| {
+    let service = rpc_server::Server::start_connections(3, move |mut peer| {
         peer.initialize();
         let request = peer.request();
         assert_eq!(request["method"], "thread/read");
@@ -490,7 +497,7 @@ fn upstream_becoming_active_during_owned_pane_close_retains_session_broker_and_c
     assert!(fixture.broker.try_wait().unwrap().is_none());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
     assert!(fixture.clone_path().join("evidence").is_file());
-    assert_eq!(calls.lock().unwrap().len(), 3);
+    assert_eq!(calls.lock().unwrap().len(), 4);
     assert_eq!(
         herdr
             .calls

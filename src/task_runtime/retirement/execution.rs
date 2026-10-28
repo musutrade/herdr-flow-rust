@@ -88,6 +88,12 @@ fn retire(
         begin(env, plan, index)?;
         return pending_step();
     }
+    // The fence must precede the drain/idle proof. Existing approvals and input
+    // stay reachable until both admitted native work and upstream activity end.
+    marker(plan, index)?;
+    if plan.entries[index].phase == "retiring" {
+        require_presentation_drained(&plan.entries[index])?;
+    }
     close_presentation(env, plan, index)?;
     require_frontends_gone(&plan.entries[index])?;
     if plan.entries[index].phase == "retiring" {
@@ -98,6 +104,14 @@ fn retire(
     plan.entries[index].phase = "complete".into();
     save(env, plan)?;
     marker(plan, index)
+}
+
+fn require_presentation_drained(entry: &Entry) -> Result<()> {
+    if let Some(record) = &entry.presentation {
+        tui::require_retirement_drained(record)?;
+        idle(&entry.sessions[0])?;
+    }
+    Ok(())
 }
 
 fn stop_transport(
