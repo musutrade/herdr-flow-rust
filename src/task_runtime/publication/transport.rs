@@ -115,18 +115,7 @@ impl Remote {
 impl GitHubApi for Remote {
     fn get(&self, suffix: &str) -> Result<J> {
         validate_policy(&self.policy)
-            .and_then(|()| {
-                require(
-                    !suffix.starts_with('/'),
-                    "GitHub suffix must be repository relative",
-                )
-            })
-            .and_then(|()| {
-                require(
-                    !suffix.contains(".."),
-                    "GitHub suffix must not traverse paths",
-                )
-            })
+            .and_then(|()| validate_get_suffix(suffix))
             .and_then(|()| {
                 GitHub::new(self.policy.clone())
                     .get(suffix)
@@ -138,6 +127,71 @@ impl GitHubApi for Remote {
                     })
             })
     }
+}
+
+/// Validate only path segments: compare uses an embedded `...` separator and
+/// query values are data, rather than repository-relative path components.
+fn validate_get_suffix(suffix: &str) -> Result<()> {
+    require(
+        !suffix.contains('#'),
+        "GitHub suffix must not contain a fragment",
+    )
+    .and_then(|()| decode_get_path(suffix))
+    .and_then(|path| validate_get_path(&path))
+}
+
+fn decode_get_path(suffix: &str) -> Result<String> {
+    let path = suffix.split('?').next().unwrap_or_default();
+    let mut remaining = path.as_bytes();
+    let mut decoded = Vec::with_capacity(remaining.len());
+    while let Some((&byte, rest)) = remaining.split_first() {
+        let (byte, rest) = decode_path_byte(byte, rest)?;
+        decoded.push(byte);
+        remaining = rest;
+    }
+    String::from_utf8(decoded).map_err(|_| denied("GitHub suffix path must be valid UTF-8"))
+}
+
+fn decode_path_byte(byte: u8, rest: &[u8]) -> Result<(u8, &[u8])> {
+    if byte != b'%' {
+        return Ok((byte, rest));
+    }
+    let (digits, remaining) = rest
+        .split_first_chunk::<2>()
+        .ok_or_else(|| denied("GitHub suffix has an invalid path escape"))?;
+    path_hex(digits[0]).and_then(|high| path_hex(digits[1]).map(|low| (high * 16 + low, remaining)))
+}
+
+fn path_hex(byte: u8) -> Result<u8> {
+    char::from(byte)
+        .to_digit(16)
+        .map(|value| value as u8)
+        .ok_or_else(|| denied("GitHub suffix has an invalid path escape"))
+}
+
+fn validate_get_path(path: &str) -> Result<()> {
+    require(
+        !path.starts_with('/'),
+        "GitHub suffix must be repository relative",
+    )
+    .and_then(|()| {
+        require(
+            !path.bytes().any(ambiguous_path_byte),
+            "GitHub suffix contains an ambiguous path byte",
+        )
+    })
+    .and_then(|()| {
+        path.split('/').try_for_each(|segment| {
+            require(
+                !matches!(segment, "." | ".."),
+                "GitHub suffix must not traverse paths",
+            )
+        })
+    })
+}
+
+fn ambiguous_path_byte(byte: u8) -> bool {
+    byte.is_ascii_control() || b"\\%?#".contains(&byte)
 }
 
 fn denied(message: impl Into<String>) -> FlowError {
@@ -887,6 +941,59 @@ mod tests {
         assert!(successful(failed).is_err());
         let observed = git(&remote, &["rev-parse", "refs/heads/publish/task-1"]).unwrap();
         assert_eq!(observed.stdout_text().trim(), sha);
+    }
+
+    #[test]
+    fn real_get_path_validator_accepts_compare_and_other_nontraversal_dots() {
+        let base = "a".repeat(40);
+        let head = "b".repeat(40);
+        for suffix in [
+            format!("compare/{base}...{head}"),
+            format!("compare/{base}%2E%2e%2E{head}"),
+            "compare/main...feature/topic".to_string(),
+            "actions/workflows/ci..yml/runs?event=pull_request".to_string(),
+            "branches/release%2F1.0".to_string(),
+            "pulls?head=owner%3Afeature%2F..%2Ftopic&state=all".to_string(),
+        ] {
+            validate_get_suffix(&suffix).unwrap_or_else(|error| panic!("{suffix}: {error}"));
+        }
+        assert_eq!(
+            decode_get_path(&format!("compare/{base}...{head}")).unwrap(),
+            format!("compare/{base}...{head}")
+        );
+    }
+
+    #[test]
+    fn real_get_adapter_refuses_raw_encoded_and_ambiguous_traversal_before_network() {
+        let remote = Remote::new(&policy());
+        for suffix in [
+            "../pulls",
+            "pulls/../issues",
+            "./pulls",
+            "pulls/./1",
+            "/pulls",
+            "%2fpulls",
+            "git/ref/heads/feature%2F..%2Fmain",
+            "pulls/%2e%2e/issues",
+            "pulls/.%2e/issues",
+            "pulls/%2e./issues",
+            "pulls/%2E%2E%2Fissues",
+            "pulls%2F..%2Fissues",
+            "pulls/%252e%252e/issues",
+            "pulls/%252f../issues",
+            "pulls\\..\\issues",
+            "pulls/%5c..%5cissues",
+            "pulls/%",
+            "pulls/%2",
+            "pulls/%zz",
+            "pulls/%ff",
+            "pulls/%00",
+            "pulls#../issues",
+            "pulls/%3f../issues",
+        ] {
+            let error = remote.get(suffix).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::PolicyDenied, "{suffix}: {error}");
+        }
     }
 
     #[test]
