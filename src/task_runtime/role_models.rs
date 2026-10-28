@@ -39,16 +39,10 @@ pub(super) fn validate(spec: &J) -> Result<()> {
             && fields.contains_key("reviewer")
             && fields
                 .keys()
-                .all(|k| ["developer", "reviewer", "recovery"].contains(&k.as_str())),
-        "role_models requires developer/reviewer and accepts an explicit recovery model",
+                .all(|k| ["developer", "reviewer", "recovery", "publisher"].contains(&k.as_str())),
+        "role_models requires developer/reviewer and accepts explicit recovery/publisher models",
     )?;
-    for role in ["developer", "reviewer"] {
-        validate_model(&models[role])?;
-    }
-    if let Some(model) = models.get("recovery") {
-        validate_model(model)?;
-    }
-    Ok(())
+    fields.values().try_for_each(validate_model)
 }
 
 pub(super) fn select(runtime: &J, role: &J) -> Result<J> {

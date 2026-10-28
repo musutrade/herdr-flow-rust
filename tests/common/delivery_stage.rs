@@ -1,4 +1,6 @@
 use super::*;
+#[path = "delivery_publication.rs"]
+mod publication;
 
 fn begin(f: &Fixture, id: &str) {
     begin_scope(f, id, "goal");

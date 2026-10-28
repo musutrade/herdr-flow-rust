@@ -13,11 +13,11 @@ pub(crate) fn definitions(state: &J) -> J {
         return json!([{"name":"herdr_queue","description":"Inspect, ACK and apply the assigned result only. Stop after application.",
             "inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["inspect","ack","apply"]},"delivery":{"type":"string"},"spec":{"type":"string"}},"required":["action","delivery","spec"],"additionalProperties":false}}]);
     }
-    json!([{"name":"herdr_queue","description":"Inspect your assigned task, acknowledge a notification delivery, or apply its recorded result. Continue only the assigned task using lineage (artifact/candidate/activity/continue/stage), run (wait,instruction,evidence), deliver (existing authorized local Git target), or finalize (task,state_version,outcome,reason). No account, authorization creation, arbitrary shell or remote publication operations. run uses the operator-configured developer/reviewer model and this receiver upstream endpoint; no tool overrides or model fallback. It starts an existing linked activity; the queue driver collects its result. deliver requires adapter,target,ref,expected,authorization,state_version. lineage stage requires task,state_version,id,scope,criteria (existing requirement criterion IDs only). After confirmed stage delivery, stage-complete requires delivery (the exact intent ID); it resumes the same parent with fresh candidate and acceptance. All specs are JSON strings. For apply, spec is JSON with task, state_version (not expected_version), event, verdict and next_action. next_action requires kind, owner, reason, condition. A passed acceptance verdict requires kind delivery: this records a planned continuation and does not publish or grant authorization. Inspect supplies current task versions, events, immutable verdicts and runtime_results. For development apply include the collected output, acceptance evidence and release_evidence; acceptance reports cannot be rewritten. ACK confirms receipt only.",
+    json!([{"name":"herdr_queue","description":"Inspect your assigned task, acknowledge a notification delivery, or apply its recorded result. Continue only the assigned task using lineage (artifact/candidate/activity/continue/stage), run (wait,instruction,evidence), deliver (existing authorized local Git target), publish (existing authorized GitHub publication), or finalize (task,state_version,outcome,reason). No account, authorization creation, arbitrary shell or model-selected endpoints. run uses the operator-configured developer/reviewer model and this receiver upstream endpoint; no tool overrides or model fallback. It starts an existing linked activity; the queue driver collects its result. deliver requires adapter,target,ref,expected,authorization,state_version. publish accepts only state_version,authorization,publication_authorization,merge_authorization,issue,title,body and uses the operator-configured publisher model with the frozen target and current independent acceptance. Its reply confirms asynchronous dispatch only: stop and await the original publication result wait; never loop or restart publish, push, create or merge. lineage stage requires task,state_version,id,scope,criteria (existing requirement criterion IDs only). After confirmed stage delivery, stage-complete requires delivery (the exact intent ID); it resumes the same parent with fresh candidate and acceptance. All specs are JSON strings. For apply, spec is JSON with task, state_version (not expected_version), event, verdict and next_action. next_action requires kind, owner, reason, condition. A passed acceptance verdict requires kind delivery: this records a planned continuation and does not publish or grant authorization. Inspect supplies current task versions, events, immutable verdicts, runtime_results and publication status. For development apply include the collected output, acceptance evidence and release_evidence; acceptance reports cannot be rewritten. ACK confirms receipt only.",
         "inputSchema":{"type":"object","properties":{
-            "action":{"type":"string","enum":["inspect","ack","apply","lineage","run","deliver","stage-complete","finalize"]},
+            "action":{"type":"string","enum":["inspect","ack","apply","lineage","run","deliver","publish","stage-complete","finalize"]},
             "delivery":{"type":"string","description":"Delivery ID for ack; empty otherwise"},
-            "spec":{"type":"string","description":"JSON spec for apply, lineage, run, deliver, stage-complete or finalize; empty for inspect/ack"}},
+            "spec":{"type":"string","description":"JSON spec for apply, lineage, run, deliver, publish, stage-complete or finalize; empty for inspect/ack"}},
             "required":["action","delivery","spec"],"additionalProperties":false}}])
 }
 
@@ -28,7 +28,7 @@ pub(super) fn prompt(state: &J, text: &str) -> String {
     if state["control_protocol"] == "queue-tool-v1" {
         return format!("{text}\nUse herdr_queue inspect, ack and apply only; stop after application. Unknown outcomes must not be replayed.");
     }
-    format!("{text}\nFor this isolated receiver, replace the CLI/file instructions above with the herdr_queue tool: inspect; for a result notification ack the exact delivery, then apply its recorded result using the current version and immutable verdict ID. Never edit queue files or set session environment variables. Do not execute shell commands for control operations. For apply use spec JSON with keys task, state_version (not expected_version), event, verdict, next_action. next_action must contain kind, owner, reason, condition. For a passed acceptance verdict use kind delivery: this only plans a continuation and does not publish, deliver or grant permission. Continue the assigned task through existing lineage activities, run, independent review, authorized local delivery and finalize when applicable. A run reply confirms dispatch only; stop and wait for its result notification, do not poll. Never invent authorization or revise the requirement. A stage selects existing requirement criteria without changing their meaning or authority. Finish its confirmed delivery with stage-complete, then continue the same parent with fresh development and independent acceptance. Finalize success only after overall acceptance and confirmed non-stage delivery; failures require an explicit final decision. On an unknown operation outcome stop and report the blocker.")
+    format!("{text}\nFor this isolated receiver, replace the CLI/file instructions above with the herdr_queue tool: inspect; for a result notification ack the exact delivery, then apply its recorded result using the current version and immutable verdict ID. Never edit queue files or set session environment variables. Do not execute shell commands for control operations. For apply use spec JSON with keys task, state_version (not expected_version), event, verdict, next_action. next_action must contain kind, owner, reason, condition. For a passed acceptance verdict use kind delivery: this only plans a continuation and does not publish, deliver or grant permission. Continue the assigned task through existing lineage activities, run, independent review, authorized local delivery or publish and finalize when applicable. publish requires existing delivery/publication/merge authorization and current independent acceptance; the host uses the configured publisher and frozen endpoint. A publish reply confirms asynchronous dispatch only: stop and await its original result wait. Do not poll or loop publish, start another publisher, or replay push, create or merge. Inspect publication status when handling its notification or a blocker. A run reply confirms dispatch only; stop and wait for its result notification, do not poll. Never invent authorization or revise the requirement. A stage selects existing requirement criteria without changing their meaning or authority. Finish its confirmed delivery with stage-complete, then continue the same parent with fresh development and independent acceptance. Finalize success only after overall acceptance and confirmed non-stage delivery; failures require an explicit final decision. On an unknown operation outcome stop and report the blocker.")
 }
 
 /// Caller holds the queue lock. Old receivers have no control-tool service.
@@ -180,16 +180,47 @@ fn execute_queue(root: &Path, state: &J, owner: &Owner, args: &J) -> Result<J> {
 }
 
 fn inspect_runtime(root: &Path, q: &J, owner: &Owner) -> Result<J> {
-    let mut view = inspect(q, owner)?;
-    view["runtime_results"] = continuation::results(root)?;
-    view["recovery"] = crate::task_runtime::recovery::status(root)?;
-    view["record_checkpoint"] =
-        util::read_state_json_bounded_if_exists(root, "record-checkpoint.json", 1024 * 1024)?
-            .unwrap_or(J::Null);
-    view["record_capacity"] =
-        util::read_state_json_bounded_if_exists(root, "record-capacity.json", 1024 * 1024)?
-            .unwrap_or(J::Null);
-    Ok(view)
+    inspect(q, owner)
+        .and_then(|view| inspect_section(root, view, "runtime_results", continuation::results))
+        .and_then(|view| {
+            inspect_section(
+                root,
+                view,
+                "recovery",
+                crate::task_runtime::recovery::status,
+            )
+        })
+        .and_then(|view| {
+            inspect_section(
+                root,
+                view,
+                "publication",
+                crate::task_runtime::publication::status,
+            )
+        })
+        .and_then(|view| {
+            inspect_optional(root, view, "record_checkpoint", "record-checkpoint.json")
+        })
+        .and_then(|view| inspect_optional(root, view, "record_capacity", "record-capacity.json"))
+}
+
+fn inspect_section(
+    root: &Path,
+    mut view: J,
+    name: &str,
+    read: fn(&Path) -> Result<J>,
+) -> Result<J> {
+    read(root).map(|section| {
+        view[name] = section;
+        view
+    })
+}
+
+fn inspect_optional(root: &Path, mut view: J, name: &str, file: &str) -> Result<J> {
+    util::read_state_json_bounded_if_exists(root, file, 1024 * 1024).map(|section| {
+        view[name] = section.unwrap_or(J::Null);
+        view
+    })
 }
 
 fn supported_action(state: &J, args: &J) -> bool {
@@ -349,6 +380,19 @@ mod tests {
                 .unwrap()
                 .contains(&json!("run"))
         );
+        assert!(
+            definitions(&new)[0]["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("publish"))
+        );
+        assert!(!supported_action(&old, &json!({"action":"publish"})));
+        assert!(supported_action(&new, &json!({"action":"publish"})));
+        assert!(definitions(&new)[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("original publication result wait"));
+        assert!(prompt(&new, "notification").contains("Do not poll or loop publish"));
         assert_eq!(definitions(&json!({})), json!([]));
         assert!(prompt(&old, "notification").contains("stop after application"));
         assert_eq!(prompt(&json!({}), "notification"), "notification");
@@ -362,6 +406,10 @@ mod tests {
             "arguments":{"action":"run","delivery":"","spec":"{}"}}});
         assert!(validate_request(root.path(), &old, &request).is_err());
         assert!(validate_request(root.path(), &new, &request).is_ok());
+        let mut publication = request;
+        publication["params"]["arguments"]["action"] = json!("publish");
+        assert!(validate_request(root.path(), &old, &publication).is_err());
+        assert!(validate_request(root.path(), &new, &publication).is_ok());
     }
     fn fixture() -> (J, Owner) {
         let owner = Owner {

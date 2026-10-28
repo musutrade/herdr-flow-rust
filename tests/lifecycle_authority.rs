@@ -4,6 +4,8 @@ pub mod common;
 mod coordinator_continuation;
 #[path = "common/native_tui_live.rs"]
 mod native_tui_live;
+#[path = "common/publication_isolated.rs"]
+mod publication;
 #[path = "common/recovery_incidents.rs"]
 mod recovery_incidents;
 #[path = "common/recovery_live.rs"]

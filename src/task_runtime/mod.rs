@@ -17,6 +17,7 @@ mod launcher;
 mod role_models;
 pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
+pub mod publication;
 pub mod recovery;
 pub mod review;
 pub mod status;

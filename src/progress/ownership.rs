@@ -130,18 +130,20 @@ fn foreign_slot(task: &J, requested: &[String; 4]) -> Result<()> {
         return Ok(());
     }
     ensure(
-        slot_available(pr),
+        slot_available(task, pr),
         "publication target is occupied by another task; reconcile its landing before beginning",
     )
 }
 
-fn slot_available(pr: &J) -> bool {
+fn slot_available(task: &J, pr: &J) -> bool {
     match (
         model::dig_str(pr, &["publication", "phase"]).as_deref(),
         model::string(pr, "phase").as_deref(),
     ) {
         (Some("prepared"), Some("publication_prepared")) => unstarted_create(pr),
-        (Some("observed"), Some("merged")) => confirmed_landing(pr),
+        (Some("observed"), Some("merged")) => {
+            confirmed_landing(pr) && super::lineage::publication::delivery_confirmed(task)
+        }
         // Open/repair/update, ambiguous sends, closed-unmerged, and unknown or
         // contradictory records retain the slot. Task cancel/release is not a
         // publication disposition and is deliberately not consulted.

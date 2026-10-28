@@ -143,6 +143,10 @@ pub fn open(env: &TaskEnvironment, root: &Path) -> Result<J> {
 /// its presentation must not require the environment lock held by a stuck
 /// primary operation. The same live Owner, broker and pane checks still apply.
 pub(in crate::task_runtime) fn open_recovery(root: &Path) -> Result<J> {
+    open_readonly(root)
+}
+
+pub(in crate::task_runtime) fn open_readonly(root: &Path) -> Result<J> {
     let permit = crate::lifecycle::runtime_permit(root)?
         .ok_or_else(|| FlowError::guard("recovery presentation requires a task Owner"))?;
     let runtime = util::read_state_json_bounded(root, "runtime.json", 1024 * 1024)?;
@@ -160,7 +164,7 @@ fn verify_recovery_runtime(
     owner: &crate::lifecycle::Owner,
 ) -> Result<()> {
     ensure(
-        runtime["recovery_role"] == true
+        (runtime["recovery_role"] == true || runtime["publication_role"] == true)
             && runtime["root"] == json!(root)
             && util::resolve_path(root) == root,
         "recovery presentation runtime changed",

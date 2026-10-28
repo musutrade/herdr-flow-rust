@@ -282,6 +282,7 @@ pub fn mutable(s: &J, spec: &J) -> Result<J> {
         model::get(spec, "task"),
         model::get(spec, "state_version"),
     )?;
+    publication_current(s, &t)?;
     progress::require_unowned(&t, false)?;
     progress::claim::execution(s, &t)?;
     if model::bool_or(s, "stopped", false)
@@ -293,6 +294,13 @@ pub fn mutable(s: &J, spec: &J) -> Result<J> {
         ));
     }
     Ok(t)
+}
+
+fn publication_current(s: &J, t: &J) -> Result<()> {
+    if t["lineage"]["role"] == "publication" {
+        return progress::lineage::ensure_current(s, t);
+    }
+    Ok(())
 }
 
 pub fn store(s: &mut J, mut t: J, now: f64, action: &str) -> Result<J> {
@@ -846,6 +854,42 @@ fn prepare_assemble(
 pub fn publication_begin(s: &mut J, spec: &J, now: f64) -> Result<J> {
     let t = mutable(s, spec)?;
     publication_record(s, spec, now, t)
+}
+
+/// Reserve publication using caller-supplied read-only remote observations.
+/// Call on a snapshot outside the queue lock, then atomically revalidate/save.
+pub fn publication_begin_with_api(s: &mut J, spec: &J, now: f64, api: &dyn GitHubApi) -> Result<J> {
+    let t = mutable(s, spec)?;
+    progress::lineage::ensure_current(s, &t)?;
+    let r = model::get(&t, "pr")
+        .cloned()
+        .ok_or_else(|| FlowError::progress("PR provenance is unavailable"))?;
+    let authorization = model::string(spec, "authorization").unwrap_or_default();
+    publication_api_terms(&t, &r, &authorization)?;
+    progress::ownership::publication(s, &t, &r)?;
+    progress::ownership::publication_slot(s, &t, &r)?;
+    publication_check(s, &t, now, Some(api))?;
+    publication_dependencies(
+        s,
+        now,
+        PullRequestState { task: t, record: r },
+        authorization,
+        api,
+    )
+}
+
+fn publication_api_terms(t: &J, r: &J, authorization: &str) -> Result<()> {
+    if !publication_authorized(t, authorization) {
+        return Err(FlowError::progress(
+            "publication requires an existing explicit publication authorization",
+        ));
+    }
+    if r["publication"]["phase"] != "prepared" {
+        return Err(FlowError::progress(
+            "publication may already have executed; reconcile, never replay",
+        ));
+    }
+    Ok(())
 }
 
 fn publication_record(s: &mut J, spec: &J, now: f64, t: J) -> Result<J> {
@@ -2127,7 +2171,11 @@ fn observe_record(
         "source": observation_state.source.join("status.json").display().to_string(),
         "config_hash": observation_state.digest
     });
-    observe_set_phase(&mut pull_request_state.record, &observation_state.result);
+    observe_set_phase(
+        &pull_request_state.task,
+        &mut pull_request_state.record,
+        &observation_state.result,
+    );
     pull_request_state.task["pr"] = pull_request_state.record;
     observation_state.working["tasks"]
         [&model::string(&pull_request_state.task, "task").unwrap_or_default()] =
@@ -2172,11 +2220,16 @@ fn observe_token(r: &J, runs_seen: &[J], digest: &str) -> String {
     }))
 }
 
-fn observe_set_phase(r: &mut J, result: &J) {
-    if model::string(r, "phase").as_deref() != Some("registered") {
+fn observe_set_phase(t: &J, r: &mut J, result: &J) {
+    if !observe_phase_assignable(t, r) {
         return;
     }
     observe_assign_phase(r, result);
+}
+
+fn observe_phase_assignable(t: &J, r: &J) -> bool {
+    r["phase"] == "registered"
+        || (t["lineage"]["role"] == "publication" && r["phase"] == "native_merge_not_enabled")
 }
 
 fn observe_assign_phase(r: &mut J, result: &J) {
@@ -3099,4 +3152,52 @@ fn action_unknown(command: &str) -> Result<J> {
 #[allow(dead_code)]
 fn _unused_map() -> Map<String, Value> {
     Map::new()
+}
+
+#[cfg(test)]
+mod publication_observation_tests {
+    use super::*;
+
+    #[test]
+    fn publisher_without_native_auto_merge_uses_observed_ci_state() {
+        let task = json!({"lineage":{"role":"publication"}});
+        for (state, failures, expected) in [
+            ("success", json!([]), "checks_satisfied"),
+            ("pending", json!([]), "checks_pending"),
+            ("failure", json!([{"name":"test"}]), "repair_needed"),
+        ] {
+            let mut record =
+                json!({"phase":"native_merge_not_enabled","observation":{"failures":failures}});
+            observe_set_phase(&task, &mut record, &json!({"state":state}));
+            assert_eq!(record["phase"], expected);
+        }
+    }
+
+    #[test]
+    fn observation_preserves_other_roles_and_remote_blocking_phases() {
+        for (role, phase, expected) in [
+            (
+                "development",
+                "native_merge_not_enabled",
+                "native_merge_not_enabled",
+            ),
+            (
+                "acceptance",
+                "native_merge_not_enabled",
+                "native_merge_not_enabled",
+            ),
+            ("", "native_merge_not_enabled", "native_merge_not_enabled"),
+            ("", "registered", "checks_satisfied"),
+            ("publication", "registered", "checks_satisfied"),
+            ("publication", "conflict", "conflict"),
+            ("publication", "base_changed", "base_changed"),
+            ("publication", "head_changed", "head_changed"),
+            ("publication", "closed_unmerged", "closed_unmerged"),
+        ] {
+            let task = json!({"lineage":{"role":role}});
+            let mut record = json!({"phase":phase});
+            observe_set_phase(&task, &mut record, &json!({"state":"success"}));
+            assert_eq!(record["phase"], expected);
+        }
+    }
 }

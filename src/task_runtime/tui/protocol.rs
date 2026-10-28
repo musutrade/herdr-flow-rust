@@ -114,7 +114,7 @@ impl Direction {
 
 fn selected_runtime(message: &J, runtime: &J) -> Result<()> {
     let params = &message["params"];
-    if runtime["recovery_role"] == true {
+    if runtime["recovery_role"] == true || runtime["publication_role"] == true {
         readonly_recovery(params)?;
     }
     for (key, expected) in [

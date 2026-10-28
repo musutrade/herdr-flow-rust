@@ -2,6 +2,131 @@
 
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
+## Independent publisher slice (2026-10-28, current)
+
+The current implementation adds an independent publisher to fresh, lifecycle-owned
+upstream coordinators. Its source of truth is `task_runtime::publication`, the
+existing PR ledger, CI observer and delivery journal. The earlier acceptance
+records below retain their original local-delivery scope. The new implementation
+and local protocol fixtures do not establish a real coordinator → publisher →
+GitHub PR/CI → receipt → reclamation acceptance run. Full-suite and remote CI
+results for this slice must be recorded separately when available.
+
+Resolve `roles.publish` explicitly into `role_models.publisher`; it does not
+inherit the coordinator, developer or reviewer model. Merge the following fragment
+into a complete fresh coordinator launch spec, retaining its required explicit
+developer/reviewer selections:
+
+```json
+{
+  "role_models": {
+    "publisher": {
+      "providerID": "openai",
+      "id": "PUBLISHER_MODEL",
+      "reasoning_effort": "high"
+    }
+  },
+  "publication": {
+    "host": "github.com",
+    "repo": "OWNER/REPO",
+    "base_ref": "main",
+    "endpoint": "https://github.com/OWNER/REPO/tree/main",
+    "merge_method": "merge",
+    "workflows": [
+      {"file": "rust.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["test"]},
+      {"file": "crap.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["crap"]},
+      {"file": "audit.yml", "event": "pull_request", "decision": "required_jobs", "jobs": ["audit"]}
+    ],
+    "landing_workflows": []
+  }
+}
+```
+
+The model/provider and repository are placeholders, not defaults or availability
+claims. The operator selects the actual existing workflow/event inventory and
+exact job names. `workflows` must be nonempty. Each premerge entry requires
+`file`, `event`, `decision: "required_jobs"` and a nonempty list of unique exact
+`jobs`, matching the existing PR observer's contract. Whole-workflow decisions
+are rejected for premerge publication before any remote action.
+`landing_workflows` may be omitted or explicitly `[]` when no postmerge inventory
+is agreed. A nonempty landing inventory uses the general CI schema, for example
+`{"file":"rust.yml","event":"push"}`; it may observe the whole workflow or
+select `required_jobs`. Both inventories are validated through
+`ci::validate` before creating the publication child, querying GitHub or freezing
+the parent. Configuration selects existing checks; it does not create workflows
+or grant permission to change their rules.
+
+This slice accepts `github.com` and `merge_method: "merge"`. The endpoint must
+exactly equal the immutable requirement's `basis.endpoint` and the policy's
+`https://github.com/OWNER/REPO/tree/BASE_REF`. The model cannot choose a repository,
+branch, executable, shell command or endpoint. Remote publication uses this real
+target rather than a synthetic local delivery path. The accepted Git artifact
+must belong to the disposable task environment.
+
+After independent acceptance plans delivery, the coordinator requests
+`herdr_queue` action `publish` with only these spec fields:
+
+```json
+{
+  "state_version": 12,
+  "authorization": "EXISTING_DELIVERY_ID",
+  "publication_authorization": "EXISTING_PUBLICATION_ID",
+  "merge_authorization": "EXISTING_MERGE_ID",
+  "issue": 130,
+  "title": "Reviewed change",
+  "body": "Implements the agreed scope."
+}
+```
+
+Replace the version and issue with the current parent version and actual issue.
+All three IDs must already exist in the requirement with actions `delivery`,
+`publication` and `merge`, each with its recorded source. This request creates
+no authority. The host pins revision, scope epoch, acceptance round, candidate,
+exact approval and a single delivery ID. It registers `publish-<id>` and its
+result wait before freezing the parent. Repeating the exact preparation may
+finish a persisted local prefix; changed inputs and inactive parents are rejected.
+
+The publisher uses a fresh, separately configured read-only Codex session with
+network access disabled for its model turns and no queue-control tools. It makes
+two bounded typed requests: `publish` permits host-validated push/PR creation;
+after observed exact-head CI, `merge` requests the existing PR's merge. Either
+turn may report a blocker. The host rechecks the live PR, candidate, target and
+successful CI before submitting a merge. Premerge observations bind the accepted
+head and PR; nonempty landing observations bind the actual merge commit with
+`pr: null`. A command's successful exit and a model's text are not receipts.
+
+After real landing verification and the agreed landing CI, a host-confirmed,
+matching delivery receipt marks the operation complete directly. There is no
+required final model-report turn. The publication retains its same-target slot
+from sending through this confirmation, including the interval after merge while
+landing CI is pending. Its result wait has no business timeout. The supervisor
+signals that original wait; status can then show `signalled` with outcome
+`complete`. Unknown push/create/merge outcomes are retained for observation of
+the original operation, never automatic resubmission or replacement PR creation.
+An unavailable remote read retains the original phase and pending result wait;
+the supervisor retries only observation after 30 seconds. A verified changed PR
+identity or failed CI requires a decision. The `planned` startup prefix can
+launch its watcher only while both the saved send marker and watcher identity
+are absent; uncertain watcher or model sends are not automatically replayed.
+
+`publish` returns asynchronous dispatch status. The coordinator stops and awaits
+the original result notification rather than polling or calling `publish` again.
+Inspection includes publication state, and operators can query it without
+starting or resuming any remote operation:
+
+```sh
+herdr-flow task-runtime publication-status --task TASK --state-dir COORDINATOR_ROOT
+```
+
+For a stage delivery, ACK the notification and apply the original publication
+result first, then invoke `stage-complete` with the exact delivery ID. The same
+parent and environment continue with a new scope epoch, candidate and independent
+acceptance. A confirmed receipt alone does not bypass the applied-result gate.
+Overall acceptance and a confirmed non-stage final delivery are required before
+success finalization reclaims task resources. Stage completion does not reclaim
+the parent or manufacture a new requirement. Login, credentials, provider,
+proxy and shared service configuration remain upstream and unchanged.
+
 
 ## Failure and recovery acceptance (2026-10-26, latest)
 
@@ -272,7 +397,9 @@ this run does not establish arbitrary child-cwd or other upstream-version suppor
 
 ## Role model configuration (2026-10-26, current)
 
-Coordinator, developer and reviewer models are independently configurable.
+Coordinator, developer and reviewer models are independently configurable;
+the [current publisher slice](#independent-publisher-slice-2026-10-28-current)
+also accepts a separately resolved `role_models.publisher`.
 This corrects the previous continuation implementation, which incorrectly reused
 one coordinator model for every worker. The following selection takes precedence
 over earlier same-model examples; historical evidence remains unchanged.
@@ -316,8 +443,10 @@ configuration is not silently migrated or edited. New defaults take effect in ne
 explicitly prepared tasks. Receiver recovery rejects changed role selections.
 Model-issued `run` requests cannot override the model, provider or endpoint.
 
-The local delivery executor is not a publishing Agent and makes no model call;
-`roles.publish` remains the existing separate publishing-role configuration.
+The local delivery executor makes no model call. The independent publisher maps
+`roles.publish` to `role_models.publisher` and uses the frozen `publication`
+policy described above; it is not launched through a generic development or
+acceptance `run` request.
 The optional `reasoning_effort` field in each model selection snapshots that
 role's resolved effort. It is passed as a per-thread `model_reasoning_effort`
 setting and as `effort` on every turn, without editing shared configuration.
@@ -380,6 +509,11 @@ The existing queue watcher executes the coordinator's bounded continuations:
   authorization and predeclared delivery target. Current independent acceptance,
   candidate/version, target identity and expected ref are still required. It does
   not add remote publication or manufacture an authorization/receipt.
+- `publish`: dispatches the independently configured publisher using current
+  acceptance and existing delivery/publication/merge authority. The operator's
+  frozen policy supplies the remote target and CI inventory. Its asynchronous
+  reply requires waiting for the original publication result; see the
+  [publisher contract](#independent-publisher-slice-2026-10-28-current).
 - `finalize`: validates success against confirmed delivery, or records an explicit
   final failure. After its exact tool response is recorded sent, the watcher commits
   the terminal obligation under the existing exclusive lifecycle gate. Subsequent
@@ -525,13 +659,17 @@ implemented. The restart test covers a broker restarted before bootstrap.
 
 ## Bounded coordinator control tools
 
-Fresh upstream receivers expose `herdr_queue` through Codex dynamic tools. The
-only operations are inspection of the assigned Owner's tasks/events, ACK of a
+Upstream receivers expose `herdr_queue` through Codex dynamic tools. For retained
+`queue-tool-v1` receivers, the only operations are inspection of the assigned Owner's tasks/events, ACK of a
 notification containing only that Owner's events, and application of an existing
 result. The existing result/version/verdict checks still apply. The tool cannot
 create work, grant authorization, execute shell commands, publish, change accounts
 or accept arbitrary queue paths. Model turns remain workspace-write confined with
 network and temporary/global writes excluded.
+
+Fresh `queue-tool-v2` receivers additionally expose the bounded continuations
+above, including the current independently configured `publish` path. They do
+not gain arbitrary shell, target selection or authority creation.
 
 The task broker records native tool requests. The **new queue's driver**, while
 holding its queue lock, validates the registered receiver, lifecycle Owner and

@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -20,21 +20,34 @@ fn run(args: &[String]) -> Result<J> {
         .map(|p| util::read_json(Path::new(p)))
         .transpose()?
         .unwrap_or(json!({}));
-    if action == "recovery-status" {
-        return recovery_status(&root, task);
+    if let Some(result) = read_only_status(action, &root, task) {
+        return result;
     }
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
 }
-fn recovery_status(root: &Path, task: &str) -> Result<J> {
-    let permit = crate::lifecycle::runtime_permit(root)?
-        .ok_or_else(|| FlowError::guard("recovery status requires an isolated Owner"))?;
-    ensure(
-        permit.owner().task_id == task,
-        "recovery status task changed",
-    )?;
-    recovery::status(root)
+fn read_only_status(action: &str, root: &Path, task: &str) -> Option<Result<J>> {
+    match action {
+        "recovery-status" => Some(bound_status(root, task, recovery::status)),
+        "publication-status" => Some(bound_status(root, task, publication::status)),
+        _ => None,
+    }
 }
+
+fn bound_status(root: &Path, task: &str, inspect: fn(&Path) -> Result<J>) -> Result<J> {
+    crate::lifecycle::runtime_permit(root)
+        .and_then(|permit| {
+            permit.ok_or_else(|| FlowError::guard("runtime status requires an isolated Owner"))
+        })
+        .and_then(|permit| {
+            ensure(
+                permit.owner().task_id == task,
+                "runtime status task changed",
+            )
+            .and_then(|()| inspect(root))
+        })
+}
+
 fn special(args: &[String]) -> Option<Result<J>> {
     if args
         .first()
@@ -42,15 +55,25 @@ fn special(args: &[String]) -> Option<Result<J>> {
     {
         return Some(configuration_status(args));
     }
+    watch_special(args)
+}
+
+fn watch_special(args: &[String]) -> Option<Result<J>> {
     match args {
-        [action, option, path] if action == "recovery-watch" && option == "--state-dir" => {
-            Some(recovery::watch(Path::new(path)).map(|_| json!({"stopped":true})))
+        [action, option, path] if option == "--state-dir" => {
+            background_action(action, Path::new(path))
         }
-        [action, option, path] if action == "tui-serve" && option == "--state-dir" => {
-            Some(tui::serve(Path::new(path)).map(|code| json!({"exit_code":code})))
-        }
-        [action, option, path] if action == "receiver-watch" && option == "--state-dir" => {
-            Some(native::receiver::active::watch(Path::new(path)).map(|_| json!({"stopped":true})))
+        _ => None,
+    }
+}
+
+fn background_action(action: &str, root: &Path) -> Option<Result<J>> {
+    match action {
+        "publication-watch" => Some(publication::watch(root).map(|_| json!({"stopped":true}))),
+        "recovery-watch" => Some(recovery::watch(root).map(|_| json!({"stopped":true}))),
+        "tui-serve" => Some(tui::serve(root).map(|code| json!({"exit_code":code}))),
+        "receiver-watch" => {
+            Some(native::receiver::active::watch(root).map(|_| json!({"stopped":true})))
         }
         _ => None,
     }
@@ -138,6 +161,53 @@ pub fn cli(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_status_is_read_only_and_requires_the_coordinator_owner() {
+        let root = crate::util::fs::test_tempdir();
+        let report = read_only_status("publication-status", root.path(), "ours")
+            .unwrap()
+            .unwrap_err();
+        assert!(report.to_string().contains("isolated Owner"));
+        assert!(read_only_status("other", root.path(), "ours").is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let error = run(&[
+            "publication-status".into(),
+            "--task".into(),
+            "ours".into(),
+            "--state-dir".into(),
+            root.path().to_string_lossy().into_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("isolated Owner"));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn publication_watcher_refuses_an_untrusted_process_marker() {
+        let root = crate::util::fs::test_tempdir();
+        let owner = crate::lifecycle::Owner {
+            queue_root: "/unused".into(),
+            queue_id: "q".into(),
+            task_id: "ours".into(),
+            epoch: 1,
+            instance_id: "untrusted-publication-cli-test".into(),
+        };
+        util::atomic_write_json(
+            &root.path().join("publisher.json"),
+            &json!({"root":root.path(),"owner":owner}),
+        )
+        .unwrap();
+        let args = [
+            "publication-watch".into(),
+            "--state-dir".into(),
+            root.path().to_string_lossy().into_owned(),
+        ];
+        let error = special(&args).unwrap().unwrap_err();
+        assert!(error.to_string().contains("watcher identity changed"));
+        assert!(!root.path().join("watch.json").exists());
+        assert!(special(&["publication-watch".into(), "--unknown".into(), "x".into()]).is_none());
+    }
+
     #[test]
     fn rejects_missing_duplicate_and_unknown_cli_fields() {
         // The valid missing-task case reaches restore, which can create control
