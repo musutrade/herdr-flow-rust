@@ -297,7 +297,7 @@ where
         loop {
             let stop = tick()?;
             state["heartbeat_at"] = json!(util::now());
-            save_watch(root, state)?;
+            save_heartbeat(root, state)?;
             if once || stop {
                 return Ok(());
             }
@@ -429,6 +429,16 @@ fn ready_watch_background(root: &Path, child: BackgroundChild, mut state: J) -> 
     state["state_dir"] = json!(root.display().to_string());
     let _ = pid;
     state
+}
+
+fn save_heartbeat(root: &Path, state: &J) -> Result<()> {
+    let _permit = match crate::lifecycle::runtime_permit(root) {
+        // This acquisition precedes only the heartbeat write. Never catch a
+        // tick's error or weaken initial readiness/final stop persistence here.
+        Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(()),
+        result => result?,
+    };
+    util::atomic_write_json(&root.join("watch.json"), state)
 }
 
 fn save_watch(root: &Path, state: &J) -> Result<()> {

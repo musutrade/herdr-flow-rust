@@ -78,7 +78,10 @@ pub(super) fn resume(root: &Path) -> Result<bool> {
     if plan["phase"] != "pruning" {
         return Ok(true);
     }
-    let _permit = crate::lifecycle::runtime_permit(root)?;
+    let _permit = match crate::lifecycle::runtime_permit(root) {
+        Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(false),
+        result => result?,
+    };
     let Some(_lock) = util::FileLock::acquire(&root.join("control-service.lock"), false)? else {
         return Ok(false);
     };

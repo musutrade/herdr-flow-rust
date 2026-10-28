@@ -79,10 +79,23 @@ fn handle(
         Ok(request) => request,
         Err(_) => return Ok(()), // A malformed or abandoned frame owns only this connection.
     };
-    let _permit = crate::lifecycle::runtime_permit(root)?;
+    let _permit = request_permit(root)?;
     owner.verify()?;
     // Keep the action permit in this outer scope through execution and response.
     reply(root, &mut stream, connection, &request)
+}
+
+fn request_permit(root: &Path) -> Result<Option<crate::lifecycle::Permit>> {
+    loop {
+        match crate::lifecycle::runtime_permit(root) {
+            Err(error) if error.kind == crate::ErrorKind::StateBusy => {
+                // The complete frame has not reached execute or upstream yet.
+                // Keep that same frame; hold no queue/action permit while waiting.
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn reply(
@@ -181,7 +194,10 @@ fn execute_native(
     result
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
-    let _permit = crate::lifecycle::runtime_permit(root)?;
+    let _permit = match crate::lifecycle::runtime_permit(root) {
+        Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(()),
+        result => result?,
+    };
     checkpoint::compact(root)?;
     // EOF may arrive after valid frames in the same drain. Persist those
     // frames before reporting the disconnected transport to the supervisor.
