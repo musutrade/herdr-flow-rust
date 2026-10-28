@@ -183,15 +183,27 @@ fn execute_native(
     }
     let client = connection.as_mut().unwrap();
     super::upstream::before(root, method, &request["params"])?;
+    super::upstream::subscription::prepare(root, client, method)?;
     let result = client.call(method, &request["params"]);
     if let Ok(value) = &result {
-        super::upstream::after(root, method, value)?;
-        if method == "turn/start" {
-            checkpoint::advance(root, &request["params"]["threadId"], &value["turn"]["id"])?;
-        }
+        record_native(root, client, method, &request["params"], value)?;
     }
     observe(root, client)?;
     result
+}
+fn record_native(
+    root: &Path,
+    client: &mut super::native::DirectClient,
+    method: &str,
+    params: &J,
+    value: &J,
+) -> Result<()> {
+    super::upstream::after(root, method, value)?;
+    super::upstream::subscription::completed(root, client, method, params, value)?;
+    if method == "turn/start" {
+        checkpoint::advance(root, &params["threadId"], &value["turn"]["id"])?;
+    }
+    Ok(())
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
     let _permit = match crate::lifecycle::runtime_permit(root) {

@@ -3,6 +3,7 @@
 use super::*;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 mod descendants;
+pub(in crate::task_runtime) mod subscription;
 pub(crate) use descendants::discover;
 
 pub(super) fn selected(spec: &J) -> bool {
@@ -120,6 +121,13 @@ pub(super) fn before(root: &Path, method: &str, params: &J) -> Result<()> {
         return Ok(());
     }
     endpoint(&runtime)?;
+    if method == "thread/resume" {
+        ensure(params == &json!({"threadId":params["threadId"]}),
+            "broker resume only rejoins the recorded thread; configuration overrides are not allowed")?;
+    }
+    if method == "turn/start" {
+        subscription::validate_turn(&runtime, params)?;
+    }
     if method == "thread/start" {
         reserve_creation(root, &runtime, params)
     } else {
@@ -164,6 +172,7 @@ pub(super) fn after(root: &Path, method: &str, result: &J) -> Result<()> {
     // newly created thread still has to be reclaimed.
     journal["session"] = result["thread"]["id"].clone();
     journal["phase"] = json!("created");
+    journal["session_configuration"] = subscription::configuration(result);
     util::atomic_write_json(&root.join("upstream-session.json"), &journal)
 }
 
@@ -290,6 +299,12 @@ mod tests {
         )
         .unwrap();
         before(root, "thread/read", &json!({"threadId":ID})).unwrap();
+        assert!(before(
+            root,
+            "thread/resume",
+            &json!({"threadId":ID,"model":"other"})
+        )
+        .is_err());
         for id in [J::Null, json!("foreign")] {
             assert!(before(root, "turn/start", &json!({"threadId":id})).is_err());
         }

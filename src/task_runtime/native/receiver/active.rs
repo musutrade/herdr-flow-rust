@@ -3,6 +3,10 @@
 use super::*;
 use crate::herdr::ReceiverAdapter;
 
+#[cfg(test)]
+#[path = "../../../../tests/common/receiver_observation.rs"]
+mod observation_tests;
+
 pub struct Adapter {
     state: J,
     root: PathBuf,

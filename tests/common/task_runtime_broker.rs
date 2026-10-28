@@ -3,6 +3,8 @@ use super::*;
 mod common;
 #[path = "rpc_server.rs"]
 mod rpc_fixture;
+#[path = "broker_subscription.rs"]
+mod subscription;
 #[test]
 fn persistent_connection_records_exact_turns_and_never_answers_approval() {
     let (release, received) = std::sync::mpsc::channel();
