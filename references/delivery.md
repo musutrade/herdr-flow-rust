@@ -1,5 +1,11 @@
 # Correct delivery and disposable completion
 
+The separate [real-model / Herdr stage acceptance](stage-live-acceptance.md)
+passed on 2026-10-28: one stage followed by fresh development, full independent
+acceptance, final local Git delivery and cleanup. The initial harness failure and
+inspected continuation remain separate evidence. Publishing roles and remote
+PR/CI integration are still outside that scenario.
+
 ## Stage delivery within the same requirement (2026-10-27)
 
 An explicit `task-lineage` action with `kind: "stage"` selects existing requirement
