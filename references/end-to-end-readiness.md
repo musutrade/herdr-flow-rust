@@ -1,5 +1,44 @@
 # End-to-end acceptance readiness (#38)
 
+## Current execution order (2026-10-28)
+
+This section supersedes the dated sequence and current-status statements below.
+The user-confirmed 2026-10-27 scope in
+[#32](https://github.com/musutrade/herdr-flow-rust/issues/32),
+[#130](https://github.com/musutrade/herdr-flow-rust/issues/130),
+[#112](https://github.com/musutrade/herdr-flow-rust/issues/112) and
+[#38](https://github.com/musutrade/herdr-flow-rust/issues/38) requires the core
+normal, recovery, stage-delivery and cleanup paths. It no longer makes twenty
+consecutive tasks, an exhaustive fault matrix, global installation switching or
+legacy queue migration universal prerequisites. Previous failures retain their
+original outcomes; this scope correction does not waive known defects.
+
+[PR #156](https://github.com/musutrade/herdr-flow-rust/pull/156) is merged at
+`6e01da08a8a11e7207943ced57ed5ed47b2c82ca`; all three push workflows passed:
+[Rust](https://github.com/musutrade/herdr-flow-rust/actions/runs/40640494288),
+[CRAP](https://github.com/musutrade/herdr-flow-rust/actions/runs/40640494344) and
+[audit](https://github.com/musutrade/herdr-flow-rust/actions/runs/40640494296).
+Its separate real single-PR acceptance and earlier recovered attempt remain
+scoped as recorded in that PR. Existing upstream login reuse, visible role tabs,
+local stage continuation and the independent remote publisher are implemented.
+
+The [same-parent remote stage scenario](remote-stage-live-acceptance.md) now has
+actual #159/#160 delivery, original result application, fresh overall acceptance
+and final cleanup evidence on main `6e01da0`. Its inspected pre-turn startup
+recovery remains distinct from an uninterrupted first invocation. It does not
+claim arbitrary stage counts or early stage reclamation.
+
+1. Reclaim stage resources when no continuing operation references them.
+2. Complete human writer handoff and recovery verification using existing
+   ownership and unknown-operation rules.
+
+Herdr remains an adapter to the core lifecycle; visible role tabs are required
+for this selected product workflow. Do not replace them with a background model
+and claim Herdr acceptance. Global entrypoints, old queues and shared services
+remain outside this isolated acceptance work. Keep #146 after the core flow.
+
+## Historical readiness and failed campaigns
+
 > **2026-10-26 最新补充（优先适用）：** Codex 单条真实本地成功链路、真实评审失败后的最终失败回收、worker 提交后的监督进程重启接续、失败首稿的修复和新会话复审已分别通过。两队列并行测试一条通过、一条超时，整组不计通过；超时任务另行恢复并回收。连续验收在第 3 条超时后停止，仅 2/20 通过；恢复收尾不补计通过次数。新失败/恢复夹具的失败记录、修复及未完成项见[当前验收记录](upstream-configuration.md#failure-and-recovery-acceptance-2026-10-26-latest)。历史 OpenCode 记录不充当当前 Codex 矩阵证据；全局迁移和远端发布未完成。
 
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.

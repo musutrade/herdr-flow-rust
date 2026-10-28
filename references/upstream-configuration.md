@@ -7,10 +7,25 @@
 The current implementation adds an independent publisher to fresh, lifecycle-owned
 upstream coordinators. Its source of truth is `task_runtime::publication`, the
 existing PR ledger, CI observer and delivery journal. The earlier acceptance
-records below retain their original local-delivery scope. The new implementation
-and local protocol fixtures do not establish a real coordinator → publisher →
-GitHub PR/CI → receipt → reclamation acceptance run. Full-suite and remote CI
-results for this slice must be recorded separately when available.
+records below retain their original local-delivery scope.
+
+[PR #156](https://github.com/musutrade/herdr-flow-rust/pull/156) merged at
+`6e01da08a8a11e7207943ced57ed5ed47b2c82ca`; its three main push workflows passed.
+The real four-role run at preceding source `f29c0be` delivered candidate
+`cf973e9d2b40917a483bfa5410a8a5f823900c76` through
+[PR #158](https://github.com/musutrade/herdr-flow-rust/pull/158), merged as
+`5a581f9a85d284bf9ae5e881d62f618352e328e0` on its isolated acceptance branch.
+The original coordinator applied the host-confirmed result and finalized cleanup.
+This is one non-stage final delivery. The earlier #157 run required inspected
+recovery and remains separate. The final hooks/fsmonitor fix at `f5a597c` has
+actual Git regressions and exact-head CI; the preceding real run did not exercise
+that configuration. The PR records these distinct evidence layers.
+
+On main `6e01da0`, the subsequent [two-PR stage scenario](remote-stage-live-acceptance.md)
+completed through #159 and #160 in one parent with fresh overall acceptance and
+final cleanup. It includes inspected recovery before the first model turn;
+the failed startup invocation is retained separately. Each PR passed its exact-head
+CI, and no landing workflow inventory was claimed on the isolated target.
 
 Resolve `roles.publish` explicitly into `role_models.publisher`; it does not
 inherit the coordinator, developer or reviewer model. Merge the following fragment
