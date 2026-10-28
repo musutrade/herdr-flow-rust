@@ -122,6 +122,7 @@ fn review_snapshot_and_runtime_are_removed_by_existing_terminal_cleanup() {
     .unwrap();
     upstream_runtime::finalize_with_retry(&f);
     let report = queue::finalization::drive(&f.queue).unwrap();
+    let report = upstream_runtime::retry_cleanup_contention(&f.queue, report);
     assert_eq!(report.completed, 1, "{:?}", report);
     assert!(child.0.try_wait().unwrap().is_some());
     assert!(!workspace.exists());
