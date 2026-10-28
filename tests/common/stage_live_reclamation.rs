@@ -1,5 +1,7 @@
 //! Read-only checks at the successor barrier; no delivery or lifecycle mutations.
 use super::*;
+#[path = "stage_live_deletion.rs"]
+mod deletion;
 
 fn contains_identity(inventory: &J, identity: &J) -> bool {
     match inventory {
@@ -60,20 +62,6 @@ pub(super) fn rpc(socket: &str, session: &J) -> herdr_flow::Result<J> {
     );
     assert!(Instant::now() < deadline, "audit RPC exhausted budget");
     reply
-}
-
-fn deleted(reply: herdr_flow::Result<J>, session: &str) -> J {
-    match reply {
-        Err(error)
-            if error.rpc_code == Some(-32600)
-                && error.message == format!("thread not found: {session}") =>
-        {
-            json!({"method":"thread/read","session":session,"rpc_code":error.rpc_code,"message":error.message})
-        }
-        other => {
-            panic!("upstream deletion not authoritatively established for {session}: {other:?}")
-        }
-    }
 }
 
 /// Parent cleanup summary and persisted plan must agree at an admitted successor.
@@ -146,13 +134,19 @@ pub(super) fn observe(
         "--workspace",
         audit.parent["agent"]["workspace_id"].as_str().unwrap(),
     ]);
-    let mut deleted_sessions = Vec::new();
+    let mut expected_sessions = BTreeMap::new();
+    let workspace = PathBuf::from(env["workspace_root"].as_str().unwrap());
+    let scope = [
+        workspace.join("checkout"),
+        workspace.join("reviews/stage-review-a1"),
+    ];
     let mut originals = std::collections::BTreeSet::new();
     for entry in plan["entries"].as_array().unwrap() {
         let name = entry["binding"]["assignment"].as_str().unwrap();
         let original = &audit.views[name];
         assert_eq!(entry["runtime"]["root"], entry["root"]);
         assert_eq!(entry["sessions"][0]["session"], original["session"]);
+        assert_eq!(entry["runtime"]["cwd"], original["cwd"]);
         for process in
             std::iter::once(&entry["broker"]).chain(entry["frontends"].as_array().unwrap())
         {
@@ -171,7 +165,15 @@ pub(super) fn observe(
         }
         for session in entry["sessions"].as_array().unwrap() {
             let id = session["session"].as_str().unwrap();
-            deleted_sessions.push(deleted(rpc(socket, &session["session"]), id));
+            assert_eq!(session["instance"], audit.owner["instance_id"]);
+            assert_eq!(session["runtime"]["lifecycle_owner"], audit.owner);
+            assert_eq!(session["runtime"]["cwd"], entry["runtime"]["cwd"]);
+            assert_eq!(session["runtime"]["upstream_socket"]["path"], socket);
+            let cwd = PathBuf::from(session["runtime"]["cwd"].as_str().unwrap());
+            assert!(
+                expected_sessions.insert(id.to_owned(), cwd).is_none(),
+                "duplicate original session binding"
+            );
             originals.insert(id);
         }
         let root = Path::new(entry["root"].as_str().unwrap());
@@ -186,6 +188,18 @@ pub(super) fn observe(
         );
         assert!(read(root, "collection-receipt.json").is_some());
     }
+    let parents: std::collections::BTreeSet<String> = audit
+        .views
+        .values()
+        .map(|view| view["session"].as_str().unwrap().to_owned())
+        .chain(expected_sessions.keys().cloned())
+        .collect();
+    let deletion_proof = deletion::observe(
+        socket,
+        &scope,
+        &expected_sessions,
+        &parents.into_iter().collect::<Vec<_>>(),
+    );
     saved_presentations_absent(store, &originals);
     let mut alive = BTreeMap::new();
     for name in ["coordinator", "final-dev-a1"] {
@@ -223,7 +237,7 @@ pub(super) fn observe(
     );
     assert!(task_env::is_registered("task").unwrap());
     json!({"barrier":"fresh final-dev presentation; before final parent outcome","plan":plan,
-        "original_sessions_absent":deleted_sessions,"same_owner_alive":alive,
+        "original_sessions_absent":deletion_proof,"same_owner_alive":alive,
         "parent_before":q["tasks"]["task"],"parent_after":after["tasks"]["task"],
         "review_workspace":env["review_workspaces"]["stage-review-a1"],"registration_retained":true})
 }

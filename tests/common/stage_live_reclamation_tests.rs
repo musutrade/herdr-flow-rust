@@ -42,26 +42,6 @@ fn complete_plan_is_read_from_protected_storage_without_observing_pending() {
 }
 
 #[test]
-fn only_exact_authoritative_thread_absence_proves_upstream_deletion() {
-    let missing = || {
-        herdr_flow::FlowError::rpc(format!("thread not found: {SESSION}"))
-            .with_rpc(Some(-32600), None)
-    };
-    assert_eq!(deleted(Err(missing()), SESSION)["session"], SESSION);
-    for reply in [
-        Ok(json!({"thread":{"id":SESSION,"status":{"type":"notLoaded"}}})),
-        Err(herdr_flow::FlowError::rpc_timeout("timeout")),
-        Err(herdr_flow::FlowError::rpc("thread not found: other").with_rpc(Some(-32600), None)),
-        Err(
-            herdr_flow::FlowError::rpc(format!("thread not found: {SESSION}"))
-                .with_rpc(Some(-32601), None),
-        ),
-    ] {
-        assert!(std::panic::catch_unwind(|| deleted(reply, SESSION)).is_err());
-    }
-}
-
-#[test]
 fn process_observation_requires_original_start_identity_and_actual_exit() {
     let mut child = Command::new("sleep").arg("30").spawn().unwrap();
     let pid = child.id() as i32;
