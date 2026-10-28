@@ -76,9 +76,12 @@ evidence handles a terminal event arriving before its request response.
 
 Missing, changed or malformed drain evidence retains the presentation. This
 includes a TUI launched by an older binary without this capability. Unknown
-work-producing responses (including review/start without a supported turn proof)
-remain under the original parent's terminal cleanup obligation; they are not
-replayed or silently inferred complete from an idle snapshot.
+work-producing responses (including compact/start, shellCommand and review/start
+without a supported turn proof) remain under the original parent's terminal
+cleanup obligation. Only exact supported no-work RPCs can settle on their
+response; even an unknown read/list method is retained. An acknowledged unknown
+operation survives request-ID reuse or a later duplicate error. Such work is
+not replayed or silently inferred complete from an idle snapshot.
 
 The broker stop uses only its exact registered PID/start identity. Each later
 tick deletes at most one recorded upstream session. Deletion and descendant

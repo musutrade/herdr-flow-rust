@@ -221,22 +221,24 @@ impl Drain {
 
     fn success(&self, ledger: &mut Ledger, index: usize, result: &J) {
         let pending = &mut ledger.pending[index];
+        // An acknowledgment consumes this RPC ID even when it cannot prove
+        // the work complete. A later reused ID/error must not erase that debt.
+        pending.responded = true;
         let turn = match pending.method.as_str() {
             "turn/start" => turn_id(&result["turn"]["id"]),
             "turn/steer" => turn_id(&result["turnId"]),
-            // An unrecognized work-producing response stays unknown. In
-            // particular an inline/detached review is not a proven idle turn.
-            "review/start" => None,
-            _ => {
+            method if response_completes(method) => {
                 ledger.pending.remove(index);
                 return;
             }
+            // Compact, shell commands and other operations can acknowledge
+            // queueing before native activity is visible. No inferred turn ID.
+            _ => None,
         };
         let Some(turn) = turn else {
             return;
         };
         pending.turn = Some(turn.clone());
-        pending.responded = true;
         if ledger
             .completed
             .iter()
@@ -267,6 +269,32 @@ impl Drain {
             ledger.completed.remove(0);
         }
     }
+}
+
+fn response_completes(method: &str) -> bool {
+    // Exact protocol methods only. Unknown reads also retain evidence until
+    // their semantics are supported; a suffix/prefix cannot prove no work.
+    const METHODS: &[&str] = &[
+        "initialize",
+        "thread/resume",
+        "thread/read",
+        "thread/list",
+        "thread/loaded/list",
+        "thread/turns/list",
+        "model/list",
+        "skills/list",
+        "mcpServerStatus/list",
+        "app/list",
+        "plugin/list",
+        "config/read",
+        "configRequirements/read",
+        "account/read",
+        "account/rateLimits/read",
+        "experimentalFeature/list",
+        "externalAgentConfig/detect",
+        "turn/interrupt",
+    ];
+    METHODS.contains(&method)
 }
 
 fn valid_id(id: &J) -> bool {

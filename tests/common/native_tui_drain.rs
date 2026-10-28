@@ -169,11 +169,9 @@ fn malformed_and_unknown_work_results_keep_the_original_obligation() {
         .is_err());
     f.send(false, json!({"id":1,"result":{}}));
     f.pending();
-    f.send(
-        false,
-        json!({"id":1,"error":{"message":"definite refusal"}}),
-    );
-    f.empty();
+    f.send(false, json!({"id":1,"error":{"message":"late duplicate"}}));
+    f.pending();
+    assert_eq!(load(&f.binding).unwrap().unwrap().pending.len(), 1);
     f.send(true, json!({"id":2,"method":"review/start"}));
     f.send(false, json!({"id":2,"result":{"reviewThreadId":"other"}}));
     f.pending();
@@ -214,4 +212,68 @@ fn ledger_bounds_preserve_existing_work() {
     f.complete("last");
     f.empty();
     assert_eq!(load(&f.binding).unwrap().unwrap().completed.len(), CAPACITY);
+}
+
+#[test]
+fn acknowledged_unknown_operations_survive_rpc_id_reuse_and_late_errors() {
+    for method in [
+        "thread/compact/start",
+        "thread/shellCommand",
+        "future/work/read",
+    ] {
+        let mut f = Fixture::new();
+        f.ready();
+        f.send(true, json!({"id":1,"method":method}));
+        f.send(false, json!({"id":1,"result":{}}));
+        f.pending();
+        f.send(true, json!({"id":1,"method":"thread/read"}));
+        f.send(
+            false,
+            json!({"id":1,"error":{"message":"new request refused"}}),
+        );
+        f.send(false, json!({"id":1,"error":{"message":"late duplicate"}}));
+        f.complete("unrelated");
+        f.pending();
+        let pending = load(&f.binding).unwrap().unwrap().pending;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].method, method);
+        assert!(pending[0].responded);
+    }
+}
+
+#[test]
+fn native_handshake_owned_resume_and_read_can_settle_without_new_work() {
+    let mut f = Fixture::new();
+    f.ready();
+    for (id, method, result) in [
+        (
+            1,
+            "initialize",
+            json!({"serverInfo":{"name":"codex","version":"fixture"}}),
+        ),
+        (
+            2,
+            "thread/resume",
+            json!({"thread":{"id":"session","status":{"type":"idle"}}}),
+        ),
+        (
+            3,
+            "thread/read",
+            json!({"thread":{"id":"session","status":{"type":"idle"}}}),
+        ),
+    ] {
+        f.send(
+            true,
+            json!({"id":id,"method":method,"params":{"threadId":"session"}}),
+        );
+        f.pending();
+        f.send(false, json!({"id":id,"result":result}));
+        f.empty();
+    }
+    f.send(true, json!({"id":4,"method":"turn/start"}));
+    f.send(
+        false,
+        json!({"id":4,"error":{"message":"refused before submission"}}),
+    );
+    f.empty();
 }

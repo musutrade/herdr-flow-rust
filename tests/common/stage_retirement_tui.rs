@@ -306,7 +306,14 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
         );
         assert_eq!(peer.frontend_message()["id"], id);
         let reply = json!({"id":id,"result":{"decision":"accept","answers":{}}});
+        let exclusive = lifecycle::acquire(&fixture.owner, true).unwrap();
         peer.client(&reply, true);
+        assert!(
+            peer.upstream_empty(),
+            "human reply must remain buffered while source Owner EX is held"
+        );
+        drop(exclusive);
+        peer.bridge.test_iteration().unwrap();
         assert_eq!(peer.upstream.request(), reply);
     }
     assert!(drive_owner(&fixture.owner).is_err());
@@ -338,4 +345,51 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
     );
     assert!(frontend.0.try_wait().unwrap().is_none());
     assert!(fixture.broker.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn async_acknowledgement_keeps_queued_native_work_and_original_pane() {
+    for method in [
+        "thread/compact/start",
+        "thread/shellCommand",
+        "thread/backgroundTerminals/clean",
+        "thread/futureAsyncOperation/start",
+    ] {
+        let active = Arc::new(AtomicBool::new(false));
+        let cwd = Arc::new(Mutex::new(J::Null));
+        let (service, incoming) = native_service(active, cwd.clone());
+        let mut fixture = Fixture::new(&service.path);
+        *cwd.lock().unwrap() = json!(fixture.clone_path());
+        let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
+        let mut frontend = Frontend::new();
+        install_presentation(&fixture, &herdr, &frontend);
+        let mut peer = NativePeer::new(&fixture, incoming);
+        install_presentation(&fixture, &herdr, &frontend);
+        let request = json!({"id":"queued-operation","method":method,
+            "params":{"threadId":WORKER}});
+        peer.client(&request, true);
+        assert_eq!(peer.upstream.request(), request);
+        // These are protocol ACKs, with no proof that enqueued native work
+        // ended. The separate production idle probe deliberately stays idle.
+        let acknowledged = json!({"id":"queued-operation","result":{}});
+        peer.server(&acknowledged);
+        assert_eq!(peer.frontend_message(), acknowledged);
+        fixture.pending_tick();
+        assert!(fixture.root().join(MARKER).exists());
+        assert!(drive_owner(&fixture.owner).is_err());
+        assert!(
+            herdr
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| call["method"] != "pane.close"),
+            "{method} ACK discharged unknown queued work and closed the original pane"
+        );
+        assert!(peer.bridge.is_connected());
+        assert!(frontend.0.try_wait().unwrap().is_none());
+        assert!(fixture.broker.try_wait().unwrap().is_none());
+        assert!(fixture.clone_path().join("evidence").is_file());
+        assert_eq!(fixture.plan().entries[0].phase, "retiring");
+    }
 }
