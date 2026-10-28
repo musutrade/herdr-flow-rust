@@ -114,18 +114,28 @@ fn save_prepared(env: &mut TaskEnvironment, queue: &Path, before: &J, intent: J)
 fn new_intent(env: &TaskEnvironment, queue: &Path, spec: &J, state: &J) -> Result<J> {
     let parent = &state["tasks"][&env.task_id];
     validate_parent(parent, spec)?;
+    if spec["adapter"] == "github-pr" {
+        publication::validate_parent(state, parent, spec)?;
+    }
     let candidate = field(parent, "candidate")?;
     let artifact = parent["artifacts"][candidate]["object"].clone();
     crate::progress::artifact::LocalArtifacts.verify(&artifact)?;
     validate_target(env, spec)?;
     cleanup::validate_sources(env, queue, state)?;
     Ok(
-        json!({"id":util::uuid_hex(),"phase":"prepared","request":spec,
+        json!({"id":intent_id(spec)?,"phase":"prepared","request":spec,
         "task":env.task_id,"instance":env.instance_id,"queue":queue,
         "workspace_root":env.workspace_root,"temp_root":env.temp_root,
         "approval":parent["approved"],"artifact":artifact,"stage":parent["stage"],
         "endpoint":requirement(parent)["basis"]["endpoint"],"receipt":null}),
     )
+}
+
+fn intent_id(spec: &J) -> Result<String> {
+    if spec["adapter"] == "github-pr" {
+        return field(spec, "id");
+    }
+    Ok(util::uuid_hex())
 }
 
 fn requirement(parent: &J) -> &J {
@@ -156,7 +166,7 @@ fn validate_terms(parent: &J, spec: &J) -> Result<()> {
     crate::progress::delivery_prerequisites(parent)
 }
 
-fn validate_approval(parent: &J) -> Result<()> {
+pub(crate) fn validate_approval(parent: &J) -> Result<()> {
     let approval = &parent["approved"];
     ensure(
         lineage::stage::current(parent, approval),
@@ -183,6 +193,9 @@ fn validate_approval(parent: &J) -> Result<()> {
 }
 
 fn validate_target(env: &TaskEnvironment, spec: &J) -> Result<()> {
+    if spec["adapter"] == "github-pr" {
+        return publication::validate_target(spec);
+    }
     let target = field(spec, "target")?;
     let path = Path::new(&target);
     ensure(path.is_absolute(), "delivery target must be absolute")?;
@@ -207,6 +220,14 @@ fn freeze(state: &mut J, env: &TaskEnvironment) -> Result<()> {
 
 fn validate_freeze(state: &J, intent: &J) -> Result<()> {
     let parent = &state["tasks"][field(intent, "task")?];
+    validate_frozen_parent(state, parent, intent)?;
+    if intent["request"]["adapter"] == "github-pr" {
+        publication::validate_parent(state, parent, &intent["request"])?;
+    }
+    validate_terms(parent, &intent["request"])
+}
+
+fn validate_frozen_parent(state: &J, parent: &J, intent: &J) -> Result<()> {
     ensure(parent["stage"] == intent["stage"], "delivery stage changed")?;
     ensure(
         state["stopped"] != true
@@ -222,7 +243,7 @@ fn validate_freeze(state: &J, intent: &J) -> Result<()> {
         parent["delivery"].is_null() || parent["delivery"] == intent["id"],
         "another delivery owns parent",
     )?;
-    validate_terms(parent, &intent["request"])
+    Ok(())
 }
 
 /// Save uncertainty before the one allowed submission. All retries must use

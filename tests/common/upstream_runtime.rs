@@ -376,7 +376,7 @@ const LIFECYCLE_BUSY: &str = "lifecycle action busy; release other locks and ret
 // drive() deliberately performs one bounded attempt. Retry only the known
 // pre-mutation permit contention; lost delete replies and other errors must
 // reach the scenario assertions instead of being hidden by this helper.
-fn retry_cleanup_contention(
+pub(super) fn retry_cleanup_contention(
     root: &Path,
     mut report: queue::finalization::CleanupReport,
 ) -> queue::finalization::CleanupReport {

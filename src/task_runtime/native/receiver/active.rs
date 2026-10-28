@@ -3,6 +3,10 @@
 use super::*;
 use crate::herdr::ReceiverAdapter;
 
+#[cfg(test)]
+#[path = "../../../../tests/common/receiver_observation.rs"]
+mod observation_tests;
+
 pub struct Adapter {
     state: J,
     root: PathBuf,
@@ -200,12 +204,22 @@ fn watcher_ready(guard: &Path, identity: &J) -> bool {
 pub fn watch(guard: &Path) -> Result<()> {
     crate::watch_service::run(
         guard,
-        || observe(guard).map(|_| false),
+        || observe_tick(guard),
         || validate_watch(guard),
         2,
         None,
         false,
     )
+}
+
+fn observe_tick(guard: &Path) -> Result<bool> {
+    let _permit = match crate::lifecycle::runtime_permit(guard) {
+        Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(false),
+        result => result?,
+    };
+    // The outer permit prevents a new exclusive gate between the public
+    // observation's identity checks and its RPC. Other errors remain fatal.
+    observe(guard).map(|_| false)
 }
 
 /// One read-only observation; the watcher uses the same exact-identity path.

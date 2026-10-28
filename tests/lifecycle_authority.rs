@@ -1,9 +1,13 @@
 //! Instance admission and crash checkpoints over isolated Git/queue fixtures.
+#[path = "common/broker_contention.rs"]
+mod broker_contention;
 pub mod common;
 #[path = "common/coordinator_continuation.rs"]
 mod coordinator_continuation;
 #[path = "common/native_tui_live.rs"]
 mod native_tui_live;
+#[path = "common/publication_isolated.rs"]
+mod publication;
 #[path = "common/recovery_incidents.rs"]
 mod recovery_incidents;
 #[path = "common/recovery_live.rs"]

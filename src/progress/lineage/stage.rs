@@ -167,7 +167,12 @@ fn applied_execution(s: &J, child: &J) -> Result<()> {
 pub(crate) fn continue_parent(s: &mut J, name: &str, now: f64) -> Result<J> {
     let mut parent = s["tasks"][name].clone();
     advance_scope(&mut parent)?;
-    for field in ["stage", "delivery", "continuation"] {
+    for field in [
+        "stage",
+        "delivery",
+        "continuation",
+        "publication_preparation",
+    ] {
         parent[field] = J::Null;
     }
     replace_candidate(&mut parent, J::Null);

@@ -2,6 +2,9 @@
 //! intents and CI/Gate policy; this read-only bridge rechecks the actual landing.
 use super::*;
 use crate::ci::GitHubApi;
+mod remote;
+pub use remote::{confirm_remote, prepare_remote, reserve_remote, revalidate_slot};
+pub(super) use remote::{validate_parent, validate_target};
 
 /// `publication` is the PR/lane task already reconciled by the existing path;
 /// `member` is the accepted source task (the same task for a direct PR).

@@ -1,5 +1,14 @@
 # Team configuration
 
+Current publisher mapping (2026-10-28): resolve `roles.publish` into the independent
+`role_models.publisher` entry in a fresh coordinator launch spec. This selection
+is explicit and optional for tasks that do not publish; a `publish` request
+requires it and never inherits another role's model. The publisher uses a fresh
+read-only session and two typed `publish`/`merge` request turns. Host-verified
+delivery completes directly without a final model-report turn. This is the
+current implementation and local-fixture scope; real remote-role acceptance is
+still separate. See [publisher policy and operation](upstream-configuration.md#independent-publisher-slice-2026-10-28-current).
+
 Current recovery-role mapping (2026-10-27): `roles.recovery` accepts the same
 explicit `agent`, `model`, and `reasoning_effort` fields as the other roles.
 The coordinator resolves it into `role_models.recovery` in the native launch
@@ -19,14 +28,48 @@ than silently falling back. Treat repository configuration as data, not shell co
 
 For a fresh lifecycle-managed coordinator, materialize the resolved model IDs in
 its launch spec: `model` for coordinator, `role_models.developer` for `roles.dev`,
-and `role_models.reviewer` for `roles.review`, each as `{providerID, id, reasoning_effort}` using the
-explicit existing upstream provider. Both worker selections are required for
+`role_models.reviewer` for `roles.review`, `role_models.publisher` for `roles.publish`,
+and `role_models.recovery` for `roles.recovery`, each as `{providerID, id, reasoning_effort}` using the
+explicit existing upstream provider. Developer and reviewer selections are required for
 automatic continuation; no missing role inherits the coordinator's model. See
 [the concrete launch example and compatibility rules](upstream-configuration.md#role-model-configuration-2026-10-26-current).
-The local Git executor has no publishing model; separate publishing agents keep
-`roles.publish`. This runtime snapshot does not automatically load TOML. Copy each resolved role's
+The local Git executor has no publishing model; independent remote publication
+uses the explicit publisher selection. This runtime snapshot does not automatically load TOML. Copy each resolved role's
 `reasoning_effort` into its model selection so the per-thread setting and every
 turn request preserve it; an explicit creation response mismatch is rejected.
+
+The operator also supplies a frozen `publication` object in the native launch
+spec, separate from the role-model TOML tables. It selects `host: "github.com"`,
+`repo`, `base_ref`, the exact immutable requirement `endpoint`, and
+`merge_method: "merge"`. Its nonempty premerge `workflows` inventory uses CI's
+actual `file`/`event` keys. Every premerge entry requires
+`decision: "required_jobs"` and nonempty, unique exact `jobs`, as required by the
+PR observer; a general whole-workflow decision is refused before remote action.
+Optional `landing_workflows` uses the general CI schema on the actual merge
+commit and may observe whole workflows or exact required jobs; omit it or
+use `[]` only when no postmerge inventory is agreed. Both inventories are checked
+through `ci::validate` before creating the publisher child or querying GitHub.
+Model selection and policy configuration do not grant delivery, publication or
+merge authority; those three actions require existing requirement authorization.
+
+For example, this role selection is resolved into the native snapshot rather
+than loaded automatically by the runtime:
+
+```toml
+version = 1
+
+[roles.publish]
+agent = "codex"
+model = "PUBLISHER_MODEL"
+reasoning_effort = "high"
+```
+
+`PUBLISHER_MODEL` is a placeholder for the explicitly selected available model.
+The [launch-policy example](upstream-configuration.md#independent-publisher-slice-2026-10-28-current)
+also describes asynchronous dispatch, `publication-status`, and the original
+publication result wait. A stage requires ACK/apply of that result before
+`stage-complete` resumes the same parent; final acceptance and a confirmed final
+delivery precede terminal cleanup.
 
 Schema version 1 supports:
 

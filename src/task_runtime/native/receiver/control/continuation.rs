@@ -6,7 +6,7 @@ use crate::task_runtime as runtime;
 pub(super) fn external(request: &J) -> bool {
     matches!(
         request["params"]["arguments"]["action"].as_str(),
-        Some("run" | "deliver" | "stage-complete" | "finalize")
+        Some("run" | "deliver" | "publish" | "stage-complete" | "finalize")
     )
 }
 
@@ -127,6 +127,7 @@ fn execute_owned(
     match args["action"].as_str() {
         Some("run") => run(root, env, owner, spec),
         Some("deliver") => deliver(env, owner, spec),
+        Some("publish") => publish(root, env, spec),
         Some("stage-complete") => complete_stage(env, owner, spec),
         _ => Err(FlowError::guard("unsupported continuation")),
     }
@@ -212,6 +213,22 @@ fn launch_spec(
         launch["review_snapshot"] = snapshot["review_snapshot"].clone();
     }
     Ok(launch)
+}
+
+fn publish(coordinator: &Path, env: &mut TaskEnvironment, spec: &J) -> Result<J> {
+    fields(
+        spec,
+        &[
+            "state_version",
+            "authorization",
+            "publication_authorization",
+            "merge_authorization",
+            "issue",
+            "title",
+            "body",
+        ],
+    )
+    .and_then(|()| runtime::publication::start(env, coordinator, spec))
 }
 
 fn deliver(env: &mut TaskEnvironment, owner: &Owner, spec: &J) -> Result<J> {
@@ -348,6 +365,53 @@ pub(super) fn results(root: &Path) -> Result<J> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_uses_the_external_journal_and_its_original_result_wait() {
+        let publication = json!({"params":{"arguments":{"action":"publish"}}});
+        assert!(external(&publication));
+        assert!(!external(
+            &json!({"params":{"arguments":{"action":"inspect"}}})
+        ));
+        assert!(!collecting(
+            &json!({"phase":"complete","request":publication,"result":{"success":true}})
+        ));
+    }
+
+    #[test]
+    fn publication_rejects_new_authority_endpoints_models_and_waits_before_start() {
+        let root = util::fs::test_tempdir();
+        let _registry = crate::task_env::test_env_root(&root.path().join("registry"));
+        let mut env = crate::task_env::create_environment(
+            "publish-control",
+            &root.path().join("work"),
+            vec![],
+            &root.path().join("tmp"),
+        )
+        .unwrap();
+        let spec = json!({"state_version":7,"authorization":"existing-delivery", "publication_authorization":"existing-publication", "merge_authorization":"existing-merge", "issue":130,"title":"Title","body":"Body"});
+        for field in [
+            "policy",
+            "repo",
+            "host",
+            "endpoint",
+            "model",
+            "binary",
+            "wait",
+            "new_authorization",
+        ] {
+            let mut untrusted = spec.clone();
+            untrusted[field] = json!("injected");
+            let error = publish(root.path(), &mut env, &untrusted).unwrap_err();
+            assert!(
+                error.to_string().contains("unsupported continuation field"),
+                "{field}: {error}"
+            );
+        }
+        assert!(!root.path().join("publication-current.json").exists());
+        assert!(env.delivery.is_null());
+        crate::task_env::destroy_environment(&env).unwrap();
+    }
+
     #[test]
     fn terminal_requires_exact_completed_response_not_an_unknown_send() {
         let root = util::fs::test_tempdir();

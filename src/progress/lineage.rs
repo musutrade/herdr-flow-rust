@@ -6,6 +6,7 @@ use super::{
     artifact::{ArtifactAdapter, LocalArtifacts},
     *,
 };
+pub(crate) mod publication;
 pub(crate) mod stage;
 
 pub fn action(s: &mut J, spec: &J, now: f64) -> Result<J> {
@@ -362,6 +363,9 @@ fn parent_revision_current(parent: &J, link: &J) -> bool {
 }
 
 fn candidate_current(parent: &J, t: &J, link: &J) -> bool {
+    if link["role"] == "publication" {
+        return publication::current(parent, t, link);
+    }
     if link["role"] != "acceptance" {
         return true;
     }
@@ -469,6 +473,13 @@ pub fn applied(
             "output requires a linked activity",
         );
     };
+    if link["role"] == "publication" {
+        ensure_current(s, child)?;
+        return ensure(
+            model::get(spec, "output").is_none(),
+            "publication cannot produce a new candidate",
+        );
+    }
     let name = field(link, "requirement")?;
     let mut parent = s["tasks"][&name].clone();
     apply_output(&mut parent, child, spec, adapter)?;
@@ -545,4 +556,7 @@ fn parent_running(s: &J, t: &J) -> bool {
     };
     let parent = &s["tasks"][link["requirement"].as_str().unwrap_or("")];
     task_running(parent)
+        || (parent["control"] == "delivering"
+            && link["role"] == "publication"
+            && publication::current(parent, t, link))
 }

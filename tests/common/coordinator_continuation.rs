@@ -54,6 +54,8 @@ fn exercise(success: bool, staged: bool) {
             "id":GUARDIAN,"parent_thread_id":WORKER,"cwd":cwd,"source":{"subagent":{"other":"guardian"}}}}))).unwrap();
     }
     let shared_guardian = guardian.clone();
+    let coordinator_sandbox =
+        Mutex::new(json!({"type":"workspaceWrite","networkAccess":false,"writableRoots":[]}));
     let server = parallel(
         if staged {
             15
@@ -63,7 +65,14 @@ fn exercise(success: bool, staged: bool) {
             6
         },
         move |peer| {
-            peer_loop(peer, &server_cwd, &commands, &replies, &shared_guardian);
+            peer_loop(
+                peer,
+                &server_cwd,
+                &commands,
+                &replies,
+                &shared_guardian,
+                &coordinator_sandbox,
+            );
         },
     );
     let mut broker = task_runtime::launch(
@@ -327,14 +336,16 @@ fn peer_loop(
     commands: &Mutex<mpsc::Receiver<J>>,
     replies: &mpsc::Sender<J>,
     guardian: &Path,
+    coordinator_sandbox: &Mutex<J>,
 ) {
     use std::os::fd::AsRawFd;
     peer.initialize();
     let mut coordinator = false;
+    let mut subscribed = false;
     let mut cwd = cwd.to_path_buf();
     let mut turns = json!([]);
     loop {
-        if coordinator {
+        if coordinator && subscribed {
             if let Ok(command) = commands.lock().unwrap().try_recv() {
                 peer.json(&command);
             }
@@ -366,14 +377,26 @@ fn peer_loop(
             replies.send(request).unwrap();
             continue;
         }
-        if request["method"] == "thread/read" && request["params"]["threadId"] == COORD {
+        if matches!(
+            request["method"].as_str(),
+            Some("thread/read" | "thread/resume")
+        ) && request["params"]["threadId"] == COORD
+        {
             coordinator = true;
         }
         if request["method"] == "thread/start" {
+            subscribed = true;
             cwd = PathBuf::from(request["params"]["cwd"].as_str().unwrap());
             coordinator = request["params"]["dynamicTools"]
                 .as_array()
                 .is_some_and(|a| !a.is_empty());
+        }
+        if request["method"] == "thread/resume" {
+            assert_eq!(
+                request["params"],
+                json!({"threadId":request["params"]["threadId"]})
+            );
+            subscribed = true;
         }
         let review = cwd.to_string_lossy().contains("/reviews/");
         let id = if coordinator {
@@ -410,13 +433,28 @@ fn peer_loop(
             );
         }
         if request["method"] == "turn/start" {
+            assert!(
+                subscribed,
+                "new broker connection must resume before another notification turn"
+            );
             assert_eq!(request["params"]["effort"], selected_effort);
+            if coordinator {
+                let mut sandbox = request["params"]["sandboxPolicy"].clone();
+                sandbox["writableRoots"] = json!([]);
+                *coordinator_sandbox.lock().unwrap() = sandbox;
+            }
         }
         let thread = json!({"id":id,"cwd":cwd,"modelProvider":"openai","model":selected_model,
             "status":{"type":"idle"},"canAcceptDirectInput":true,"turns":turns});
         let result = match request["method"].as_str().unwrap() {
-            "thread/start" | "thread/read" => {
-                json!({"thread":thread,"model":selected_model,"modelProvider":"openai","reasoningEffort":selected_effort})
+            "thread/start" | "thread/read" | "thread/resume" => {
+                let mut sandbox =
+                    json!({"type":"workspaceWrite","networkAccess":false,"writableRoots":[]});
+                if coordinator {
+                    sandbox = coordinator_sandbox.lock().unwrap().clone();
+                }
+                json!({"thread":thread,"model":selected_model,"modelProvider":"openai","reasoningEffort":selected_effort,
+                    "cwd":cwd,"approvalPolicy":"untrusted","sandbox":sandbox})
             }
             "turn/start" if coordinator => json!({"turn":{"id":"coordinator-turn"}}),
             "turn/start" if review => {

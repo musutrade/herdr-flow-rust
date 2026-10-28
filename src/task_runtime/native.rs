@@ -135,6 +135,7 @@ fn create_native(root: &Path, runtime: &J, journal: &J) -> Result<J> {
 pub(super) struct DirectClient {
     rpc: Client,
     _directory: std::fs::File,
+    pub(super) subscribed_session: Option<String>,
 }
 impl std::ops::Deref for DirectClient {
     type Target = Client;
@@ -166,6 +167,7 @@ pub(super) fn direct_client(root: &Path) -> Result<DirectClient> {
     Ok(DirectClient {
         rpc: Client::new(&endpoint),
         _directory: directory,
+        subscribed_session: None,
     })
 }
 struct NativeClient {
