@@ -25,10 +25,70 @@ fn read(root: &Path, name: &str) -> Option<J> {
     if !root.exists() {
         return None;
     }
-    match util::read_state_json_bounded_if_exists(root, name, 8 * 1024 * 1024) {
+    // open_bound holds this producer lock through first protected publication
+    // and readiness. Never observe its mkdir/marker/payload initialization gap.
+    let _publication = if name == "presentation.json" {
+        Some(presentation_lock(root)?)
+    } else {
+        None
+    };
+    let value = match util::read_state_json_bounded_if_exists(root, name, 8 * 1024 * 1024) {
         Ok(value) => value,
         Err(_) if !root.exists() => None,
-        Err(e) => panic!("audit read {name}: {e}"),
+        Err(e) => panic!(
+            "audit op=read runtime={} document={}: {e}",
+            root.display(),
+            root.join(name).display()
+        ),
+    };
+    if name == "presentation.json" && value.is_none() && document_present(root, name) {
+        panic!("audit op=read runtime={} document={}: protected presentation has no authority payload at quiescent publication boundary",
+            root.display(), root.join(name).display());
+    }
+    value
+}
+
+fn document_present(root: &Path, name: &str) -> bool {
+    match fs::symlink_metadata(root.join(name)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!(
+            "audit op=stat runtime={} document={}: {error}",
+            root.display(),
+            root.join(name).display()
+        ),
+    }
+}
+
+fn presentation_lock(root: &Path) -> Option<util::FileLock> {
+    let path = root.join("presentation.lock");
+    let probe = || match util::probe_existing_lock(&path) {
+        Ok(probe) => Some(probe),
+        Err(_) if !root.exists() => None,
+        Err(error) => panic!(
+            "audit op=probe runtime={} lock={}: {error}",
+            root.display(),
+            path.display()
+        ),
+    };
+    let mut state = probe()?;
+    if matches!(state, util::LockProbe::Missing) {
+        if !document_present(root, "presentation.json") {
+            return None;
+        }
+        // A producer may have created the lock and reserved its document
+        // since our first probe. Recheck once; persistent missing locks fail.
+        state = probe()?;
+    }
+    match state {
+        util::LockProbe::Acquired(lock) => Some(lock),
+        util::LockProbe::Busy => None,
+        util::LockProbe::Missing => panic!(
+            "audit op=probe runtime={} document={}: producer lock missing: {}",
+            root.display(),
+            root.join("presentation.json").display(),
+            path.display()
+        ),
     }
 }
 
@@ -339,3 +399,6 @@ fn audit_reads_actual_protected_document_storage() {
     upstream_runtime::finalize_with_retry(&f);
     assert_eq!(queue::finalization::drive(&f.queue).unwrap().pending, 0);
 }
+
+#[path = "stage_live_publication_tests.rs"]
+mod publication_tests;
