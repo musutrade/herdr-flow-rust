@@ -25,13 +25,6 @@ fn read(root: &Path, name: &str) -> Option<J> {
     if !root.exists() {
         return None;
     }
-    // open_bound holds this producer lock through first protected publication
-    // and readiness. Never observe its mkdir/marker/payload initialization gap.
-    let _publication = if name == "presentation.json" {
-        Some(presentation_lock(root)?)
-    } else {
-        None
-    };
     let value = match util::read_state_json_bounded_if_exists(root, name, 8 * 1024 * 1024) {
         Ok(value) => value,
         Err(_) if !root.exists() => None,
@@ -60,36 +53,102 @@ fn document_present(root: &Path, name: &str) -> bool {
     }
 }
 
-fn presentation_lock(root: &Path) -> Option<util::FileLock> {
-    let path = root.join("presentation.lock");
+const WORKERS: &[&str] = &[
+    "dev-a1",
+    "stage-review-a1",
+    "final-dev-a1",
+    "final-review-a1",
+];
+
+fn coordinator_identity(coordinator: &Path, owner: &J) {
+    assert_eq!(coordinator.file_name().unwrap(), "coordinator");
+    assert_eq!(
+        read(coordinator, "lifecycle-owner.json"),
+        Some(owner.clone()),
+        "audit op=identity coordinator={} Owner changed",
+        coordinator.display()
+    );
+}
+
+pub(super) fn observation_gate(
+    coordinator: &Path,
+    owner: &J,
+    worker: &Path,
+) -> Option<util::FileLock> {
+    assert_eq!(
+        worker.parent(),
+        coordinator.parent(),
+        "audit worker escaped runtime parent"
+    );
+    if !WORKERS.contains(&worker.file_name()?.to_str()?) {
+        return None;
+    }
+    coordinator_identity(coordinator, owner);
+    let path = coordinator.join("control-service.lock");
     let probe = || match util::probe_existing_lock(&path) {
         Ok(probe) => Some(probe),
-        Err(_) if !root.exists() => None,
+        Err(_) if !coordinator.exists() => None,
         Err(error) => panic!(
-            "audit op=probe runtime={} lock={}: {error}",
-            root.display(),
+            "audit op=probe runtime={} coordinator={} lock={}: {error}",
+            worker.display(),
+            coordinator.display(),
             path.display()
         ),
     };
     let mut state = probe()?;
     if matches!(state, util::LockProbe::Missing) {
-        if !document_present(root, "presentation.json") {
+        if !document_present(worker, "presentation.json") {
             return None;
         }
-        // A producer may have created the lock and reserved its document
-        // since our first probe. Recheck once; persistent missing locks fail.
         state = probe()?;
     }
     match state {
         util::LockProbe::Acquired(lock) => Some(lock),
         util::LockProbe::Busy => None,
         util::LockProbe::Missing => panic!(
-            "audit op=probe runtime={} document={}: producer lock missing: {}",
-            root.display(),
-            root.join("presentation.json").display(),
+            "audit op=probe runtime={} document={}: coordinator service gate missing: {}",
+            worker.display(),
+            worker.join("presentation.json").display(),
             path.display()
         ),
     }
+}
+
+fn publication_view(coordinator: &Path, owner: &J, root: &Path) -> Option<J> {
+    let name = root.file_name()?.to_str()?;
+    if root != coordinator && !WORKERS.contains(&name) {
+        return None;
+    }
+    // Only ordinary five-role worker dispatch is serialized by this gate.
+    // The coordinator's initial presentation finished before the audit loop.
+    let _service = if root == coordinator {
+        coordinator_identity(coordinator, owner);
+        None
+    } else {
+        Some(observation_gate(coordinator, owner, root)?)
+    };
+    let view = read(root, "presentation.json")?;
+    if view["phase"] != "ready" {
+        return None;
+    }
+    assert_eq!(
+        read(root, "lifecycle-owner.json"),
+        Some(owner.clone()),
+        "audit op=identity runtime={} Owner changed",
+        root.display()
+    );
+    let runtime = read(root, "runtime.json").unwrap();
+    assert_eq!(runtime["lifecycle_owner"], *owner);
+    assert!(
+        runtime["recovery_role"] != true && runtime["publication_role"] != true,
+        "audit op=scope runtime={}: independent presentation is outside the ordinary five-role audit", root.display()
+    );
+    let state_root = read(root, "receiver.json")
+        .and_then(|receiver| receiver["guard_dir"].as_str().map(PathBuf::from))
+        .unwrap_or_else(|| root.to_path_buf());
+    let state = read(&state_root, "state.json").unwrap();
+    // Returning only owned JSON releases the gate before Herdr/RPC/git work.
+    Some(json!({"presentation":view,"runtime":runtime,"state":state}))
 }
 
 impl StageAudit {
@@ -221,17 +280,14 @@ impl StageAudit {
             if self.views.contains_key(name) {
                 continue;
             }
-            let Some(view) = read(&path, "presentation.json") else {
+            let Some(snapshot) =
+                publication_view(&self.root.join("coordinator"), &self.owner, &path)
+            else {
                 continue;
             };
-            if view["phase"] != "ready" {
-                continue;
-            }
-            let runtime = read(&path, "runtime.json").unwrap();
-            let state_root = read(&path, "receiver.json")
-                .and_then(|receiver| receiver["guard_dir"].as_str().map(PathBuf::from))
-                .unwrap_or_else(|| path.clone());
-            let state = read(&state_root, "state.json").unwrap();
+            let view = &snapshot["presentation"];
+            let runtime = &snapshot["runtime"];
+            let state = &snapshot["state"];
             let role = state["role"].as_str().unwrap();
             assert_eq!(
                 runtime["model"], self.models[role],

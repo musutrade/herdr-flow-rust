@@ -28,7 +28,17 @@ fn coordinator_completes_stage_then_reaccepts_the_same_parent_before_finalizing(
     exercise(true, true);
 }
 
+type AuditGate = fn(&Path, &J, &Path) -> Option<util::FileLock>;
+
+pub(super) fn observer_first_run(gate: AuditGate) {
+    exercise_with_observer(false, false, Some(gate));
+}
+
 fn exercise(success: bool, staged: bool) {
+    exercise_with_observer(success, staged, None);
+}
+
+fn exercise_with_observer(success: bool, staged: bool, audit: Option<AuditGate>) {
     let f = Fixture::new();
     let target = f.temp.path().join("output.git");
     if success {
@@ -219,13 +229,20 @@ fn exercise(success: bool, staged: bool) {
         assert_eq!(tool(&send, &receive, id, "lineage", spec)["success"], false);
     }
     assert_eq!(f.state()["tasks"], before["tasks"]);
-    let run = tool(
-        &send,
-        &receive,
-        2,
-        "run",
-        json!({"wait":"dev","instruction":"synthetic local development","evidence":[]}),
-    );
+    let (run, audit_error) = if let Some(gate) = audit {
+        run_while_observed(&f, &coord, &mut watcher, &send, &receive, gate)
+    } else {
+        (
+            tool(
+                &send,
+                &receive,
+                2,
+                "run",
+                json!({"wait":"dev","instruction":"synthetic local development","evidence":[]}),
+            ),
+            None,
+        )
+    };
     assert_eq!(
         run["success"],
         true,
@@ -308,7 +325,100 @@ fn exercise(success: bool, staged: bool) {
     assert!(watcher.0.wait().unwrap().success());
     broker.wait().unwrap();
     server.finish();
+    if audit.is_some() {
+        assert_eq!(
+            threads.lock().unwrap()[WORKER]
+                .turns
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(audit_error.is_none(), "{}", audit_error.unwrap_or_default());
+    }
     assert!(!guardian.exists());
+}
+
+fn run_while_observed(
+    f: &Fixture,
+    coordinator: &Path,
+    watcher: &mut FixtureChild,
+    send: &mpsc::Sender<J>,
+    receive: &mpsc::Receiver<J>,
+    gate: AuditGate,
+) -> (J, Option<String>) {
+    // Only this offline fixture's ordinary queue watcher is stopped. The
+    // original coordinator/broker and pending operation retain their identity.
+    watcher.0.kill().unwrap();
+    watcher.0.wait().unwrap();
+    let env = task_env::restore_environment("task").unwrap();
+    let worker = task_runtime::prepare(&env, "dev-a1").unwrap();
+    drop(env);
+    // Also expose the old presentation open-before-flock schedule. The audit
+    // must never acquire this file; the corrected gate is the coordinator's.
+    drop(
+        util::FileLock::acquire(&worker.join("presentation.lock"), false)
+            .unwrap()
+            .unwrap(),
+    );
+    let owner =
+        serde_json::to_value(lifecycle::task_owner(&f.state(), "task").unwrap().unwrap()).unwrap();
+    let mut held = None;
+    await_condition(|| {
+        held = gate(coordinator, &owner, &worker);
+        held.is_some()
+    });
+    let before = util::read_state_json(coordinator, "control-tools.json").unwrap();
+    let request = json!({"id":2,"method":"item/tool/call","params":{"threadId":COORD,
+        "turnId":"coordinator-turn","tool":"herdr_queue","arguments":{"action":"run","delivery":"",
+        "spec":json!({"wait":"dev","instruction":"synthetic local development","evidence":[]}).to_string()}}});
+    send.send(request.clone()).unwrap();
+    await_condition(|| {
+        util::read_state_json(coordinator, "broker-tools.json")
+            .is_ok_and(|j| j["2"]["phase"] == "pending")
+    });
+    let once = Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+        .args(["queue", "watch", "--once", "--state-dir"])
+        .arg(&f.queue)
+        .output()
+        .unwrap();
+    let after = util::read_state_json(coordinator, "control-tools.json").unwrap();
+    let pending = util::read_state_json(coordinator, "broker-tools.json").unwrap();
+    let deferred = once.status.success()
+        && before == after
+        && after.get("2").is_none()
+        && pending["2"]["phase"] == "pending"
+        && pending["2"]["request"] == request
+        && !worker.join("runtime.json").exists()
+        && !worker.join("turn.json").exists();
+    let error = (!deferred).then(|| format!("observer-first real driver failed to defer: status={:?}, stderr={}, journal={}, pending={}", once.status, String::from_utf8_lossy(&once.stderr), after, pending["2"]));
+    drop(held);
+    let log = fs::OpenOptions::new()
+        .append(true)
+        .open(f.temp.path().join("continuation-watch.log"))
+        .unwrap();
+    *watcher = FixtureChild(
+        Command::new(env!("CARGO_BIN_EXE_herdr-flow"))
+            .args(["queue", "watch", "--state-dir"])
+            .arg(&f.queue)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let reply = receive.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(reply["id"], 2);
+    let value = reply["result"].clone();
+    assert_eq!(value["success"], true, "{value}");
+    let result: J =
+        serde_json::from_str(value["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(result["runtime"], json!(worker));
+    assert_eq!(result["turn"]["presentation"]["phase"], "not_configured");
+    assert_eq!(
+        util::read_state_json(&worker, "turn.json").unwrap()["turn"],
+        result["turn"]["turn"]
+    );
+    (value, error)
 }
 
 fn tool(send: &mpsc::Sender<J>, receive: &mpsc::Receiver<J>, id: u64, action: &str, spec: J) -> J {
