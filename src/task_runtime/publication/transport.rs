@@ -437,12 +437,22 @@ fn git(checkout: &Path, arguments: &[&str]) -> Result<CommandOutput> {
     successful(run_command(&git_argv(arguments), &options(Some(checkout)))?)
 }
 
+// Preserve authentication configuration while preventing repository-controlled
+// hooks and fsmonitor programs from running inside the publisher.
 fn git_argv(arguments: &[&str]) -> Vec<String> {
-    ["git", "-c", "remote.origin.mirror=false"]
-        .into_iter()
-        .chain(arguments.iter().copied())
-        .map(str::to_string)
-        .collect()
+    [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "remote.origin.mirror=false",
+    ]
+    .into_iter()
+    .chain(arguments.iter().copied())
+    .map(str::to_string)
+    .collect()
 }
 
 fn push_argv(record: &J) -> Result<Vec<String>> {
@@ -850,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn real_git_empty_lease_creates_only_fresh_ref_and_preserves_hooks() {
+    fn real_git_empty_lease_creates_only_fresh_ref_and_blocks_repository_hooks() {
         let directory = local_repo();
         let root = directory.path();
         git(root, &["config", "user.name", "Publication test"]).unwrap();
@@ -912,7 +922,10 @@ mod tests {
         let argv = push_argv(&candidate).unwrap();
         assert!(argv.contains(&"--force-with-lease=refs/heads/publish/task-1:".to_string()));
         successful(run_command(&argv, &options(Some(root))).unwrap()).unwrap();
-        assert!(marker.is_file());
+        assert!(
+            !marker.exists(),
+            "publication push executed repository pre-push hook"
+        );
         assert_eq!(
             git(&remote, &["for-each-ref", "--format=%(refname)"])
                 .unwrap()
@@ -941,6 +954,99 @@ mod tests {
         assert!(successful(failed).is_err());
         let observed = git(&remote, &["rev-parse", "refs/heads/publish/task-1"]).unwrap();
         assert_eq!(observed.stdout_text().trim(), sha);
+    }
+
+    #[test]
+    fn real_git_status_blocks_the_configured_repository_fsmonitor() {
+        let directory = local_repo();
+        let root = directory.path();
+        fs::write(root.join("tracked"), "indexed content\n").unwrap();
+        git(root, &["add", "tracked"]).unwrap();
+        let monitor = root.join("repository-fsmonitor");
+        fs::write(
+            &monitor,
+            "#!/bin/sh\ntouch \"$PWD/fsmonitor-ran\"\nprintf 'fixture-token\\0/\\0'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o700)).unwrap();
+        git(
+            root,
+            &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+        )
+        .unwrap();
+        git(root, &["config", "core.fsmonitorHookVersion", "2"]).unwrap();
+        git(root, &["status", "--porcelain"]).unwrap();
+        assert!(
+            !root.join("fsmonitor-ran").exists(),
+            "publication Git command executed repository fsmonitor"
+        );
+    }
+
+    #[test]
+    fn git_keeps_system_global_authentication_and_proxy_configuration() {
+        let directory = local_repo();
+        let root = directory.path();
+        let helper = root.join("fake-credential-helper");
+        fs::write(&helper, "#!/bin/sh\n[ \"$1\" = get ] || exit 1\ntouch \"$PWD/fake-credential-ran\"\nprintf 'username=fixture-user\\npassword=fixture-token\\n'\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        let system = root.join("fake-system.gitconfig");
+        let global = root.join("fake-global.gitconfig");
+        fs::write(&system, "[fixture]\n fromSystem = present\n").unwrap();
+        fs::write(&global, format!("[fixture]\n fromGlobal = present\n[credential]\n helper =\n helper = {}\n[http \"https://publication-auth-fixture.invalid\"]\n proxy = http://fixture-proxy.invalid:4123\n", helper.display())).unwrap();
+        let mut settings = options(Some(root));
+        assert!(!settings.clear_env);
+        for key in [
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_COUNT",
+        ] {
+            assert!(
+                !settings.env.contains_key(key),
+                "publication overrides authentication configuration: {key}"
+            );
+        }
+        // Substitute only this child's two Git configuration files. The real
+        // global/system files, credentials, HOME and proxy environment are untouched.
+        settings.env.insert(
+            "GIT_CONFIG_SYSTEM".into(),
+            system.to_string_lossy().into_owned(),
+        );
+        settings.env.insert(
+            "GIT_CONFIG_GLOBAL".into(),
+            global.to_string_lossy().into_owned(),
+        );
+        for key in ["fixture.fromSystem", "fixture.fromGlobal"] {
+            let output =
+                successful(run_command(&git_argv(&["config", "--get", key]), &settings).unwrap())
+                    .unwrap();
+            assert_eq!(output.stdout_text().trim(), "present");
+        }
+        let proxy = successful(
+            run_command(
+                &git_argv(&[
+                    "config",
+                    "--get-urlmatch",
+                    "http.proxy",
+                    "https://publication-auth-fixture.invalid/repo",
+                ]),
+                &settings,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            proxy.stdout_text().trim(),
+            "http://fixture-proxy.invalid:4123"
+        );
+        settings.stdin =
+            Some(b"protocol=https\nhost=publication-auth-fixture.invalid\n\n".to_vec());
+        let credential =
+            successful(run_command(&git_argv(&["credential", "fill"]), &settings).unwrap())
+                .unwrap();
+        assert!(root.join("fake-credential-ran").is_file());
+        assert!(credential.stdout_text().contains("username=fixture-user"));
+        assert!(credential.stdout_text().contains("password=fixture-token"));
     }
 
     #[test]
