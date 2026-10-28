@@ -107,6 +107,10 @@ fn load_parent(s: &J, spec: &J) -> Result<J> {
     )?;
     ensure(is_parent(&t), "requires a version 2 requirement task")?;
     ensure(task_running(&t), "requirement task is paused or cancelled")?;
+    ensure(
+        t["stage_delivery"]["resource_cleanup"]["phase"] != "pending",
+        "stage resources are pending; inspect or recover the existing cleanup before new lineage work",
+    )?;
     object(&t["requirements"], "requirements")?;
     object(req(&t), "current requirement")?;
     Ok(t)

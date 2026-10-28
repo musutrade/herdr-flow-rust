@@ -132,6 +132,9 @@ pub struct TaskEnvironment {
     /// Temporary delivery/cleanup journal; removed with the environment.
     #[serde(default)]
     pub delivery: serde_json::Value,
+    /// Bounded pending stage resource obligations; business completion is separate.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub stage_resources: serde_json::Value,
     pub created_at: f64,
     pub updated_at: f64,
     pub worktree_registrations: Vec<WorktreeRegistration>,
@@ -1159,6 +1162,7 @@ fn build_environment(
         worktree_registrations: Vec::new(),
         review_workspaces: BTreeMap::new(),
         child_processes: Vec::new(),
+        stage_resources: serde_json::Value::Null,
         open_files: Vec::new(),
         state_file,
         file_handles: new_handle_slot(),

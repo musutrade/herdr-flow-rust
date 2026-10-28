@@ -1410,6 +1410,43 @@ fn observation_event(event_id: &str, wait_id: &str, now: f64, observed: &Observe
     })
 }
 
+/// The existing stage driver supplies a host observation while holding the
+/// parent's exclusive gate. Normal event identity, deduplication, delivery and
+/// final association cleanup still belong to this queue.
+pub(crate) fn record_stage_observation(
+    s: &mut J,
+    id: &str,
+    permit: &crate::lifecycle::Permit,
+    observed: Observed,
+    complete: bool,
+) -> Result<()> {
+    permit.check(s, false)?;
+    let owner = permit.owner();
+    let wait = s["waits"][id].clone();
+    ensure_stage_observation(s, &wait, permit)?;
+    apply_observation(s, util::now(), &owner.queue_id, id, wait, observed)?;
+    if complete {
+        s["waits"][id]["closed"] = json!(true);
+    }
+    Ok(())
+}
+
+fn ensure_stage_observation(s: &J, wait: &J, permit: &crate::lifecycle::Permit) -> Result<()> {
+    let owner = permit.owner();
+    if !permit.exclusive()
+        || wait["task"] != owner.task_id
+        || wait["epoch"] != owner.epoch
+        || wait["kind"] != "signal"
+        || !wait["assignment"].is_null()
+        || wait["stage_delivery"] != s["tasks"][&owner.task_id]["stage_delivery"]["delivery"]["id"]
+    {
+        return Err(queue_error(
+            "stage observation requires its exact exclusive Owner and original wait",
+        ));
+    }
+    Ok(())
+}
+
 fn guard_root(s: &J) -> Result<PathBuf> {
     match model::string(s, "guard_dir") {
         Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),

@@ -4,16 +4,32 @@ use super::*;
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
+use std::time::{Duration, Instant};
 
 pub(crate) fn discover(sessions: &[J]) -> Result<Vec<J>> {
+    discover_with(sessions, None, &mut scan)
+}
+
+/// One deadline covers every socket/cwd scope, both archive inventories, all
+/// pages, and their RPC connection setup. Partial inventories are never used.
+pub(crate) fn discover_bounded(sessions: &[J], timeout: Duration) -> Result<Vec<J>> {
+    discover_with(sessions, Some(upstream_deadline(timeout)?), &mut scan)
+}
+
+type Scan<'a> = dyn FnMut(&Path, &str, &[J], Option<Instant>) -> Result<Vec<J>> + 'a;
+
+fn discover_with(sessions: &[J], deadline: Option<Instant>, scan: &mut Scan<'_>) -> Result<Vec<J>> {
+    check_deadline(deadline)?;
     let mut visited = BTreeSet::new();
     let mut found = vec![];
     for journal in sessions {
+        check_deadline(deadline)?;
         let (socket, cwd) = scope(journal)?;
         if !visited.insert((socket.clone(), cwd.clone())) {
             continue;
         }
-        found.extend(scan(&socket, &cwd, sessions)?);
+        found.extend(scan(&socket, &cwd, sessions, deadline)?);
+        check_deadline(deadline)?;
     }
     ensure(found.len() <= 128, "upstream descendant bound exceeded")?;
     Ok(found)
@@ -28,23 +44,50 @@ fn scope(journal: &J) -> Result<(PathBuf, String)> {
     Ok((endpoint(runtime)?, required(runtime, "cwd")?))
 }
 
-fn scan(socket: &Path, cwd: &str, sessions: &[J]) -> Result<Vec<J>> {
+fn scan(socket: &Path, cwd: &str, sessions: &[J], deadline: Option<Instant>) -> Result<Vec<J>> {
     let mut client = crate::codex::rpc::Client::new(&socket.to_string_lossy());
-    let rows = list(cwd, &mut |method, params| client.call(method, params))?;
+    let mut call = |method: &str, params: &J| match deadline {
+        Some(deadline) => call_before(&mut client, method, params, deadline),
+        None => client.call(method, params),
+    };
+    let rows = match deadline {
+        Some(_) => list_before(cwd, deadline, &mut call),
+        None => list(cwd, &mut call),
+    }?;
+    owned_rows(rows, cwd, sessions, deadline)
+}
+
+fn owned_rows(
+    rows: Vec<J>,
+    cwd: &str,
+    sessions: &[J],
+    deadline: Option<Instant>,
+) -> Result<Vec<J>> {
     let mut found = vec![];
     for row in rows {
+        check_deadline(deadline)?;
         if let Some(child) = owned(&row, cwd, sessions)? {
             found.push(child);
         }
+        check_deadline(deadline)?;
     }
     Ok(found)
 }
 
 fn list(cwd: &str, call: &mut dyn FnMut(&str, &J) -> Result<J>) -> Result<Vec<J>> {
+    list_before(cwd, None, call)
+}
+
+fn list_before(
+    cwd: &str,
+    deadline: Option<Instant>,
+    call: &mut dyn FnMut(&str, &J) -> Result<J>,
+) -> Result<Vec<J>> {
     let mut rows = vec![];
     for archived in [false, true] {
         let mut cursor = J::Null;
         for page in 0..8 {
+            check_deadline(deadline)?;
             let reply = call(
                 "thread/list",
                 &json!({"cwd":cwd,"archived":archived,
@@ -52,6 +95,7 @@ fn list(cwd: &str, call: &mut dyn FnMut(&str, &J) -> Result<J>) -> Result<Vec<J>
                     "subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"],
                 "useStateDbOnly":true,"limit":128,"cursor":cursor}),
             )?;
+            check_deadline(deadline)?;
             append_page(&mut rows, &reply)?;
             match next_cursor(&reply, &cursor, page)? {
                 None => break,
@@ -60,6 +104,13 @@ fn list(cwd: &str, call: &mut dyn FnMut(&str, &J) -> Result<J>) -> Result<Vec<J>
         }
     }
     Ok(rows)
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<()> {
+    if let Some(deadline) = deadline {
+        remaining_budget(deadline)?;
+    }
+    Ok(())
 }
 
 fn next_cursor(reply: &J, cursor: &J, page: usize) -> Result<Option<J>> {
@@ -182,6 +233,7 @@ fn validate_metadata(row: &J, first: &J, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     const PARENT: &str = "11111111-1111-1111-1111-111111111111";
     const CHILD: &str = "22222222-2222-2222-2222-222222222222";
     #[test]
@@ -247,5 +299,85 @@ mod tests {
         ] {
             assert!(list("/owned", &mut |_, _| Ok(response.clone())).is_err());
         }
+    }
+
+    #[test]
+    fn bounded_discovery_shares_the_same_deadline_across_scopes() {
+        let temp = util::fs::test_tempdir();
+        let socket = temp.path().join("shared.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let identity = socket_identity(&socket).unwrap();
+        let sessions = ["/first", "/second"].map(|cwd| {
+            json!({"phase":"deleted",
+            "session":PARENT,"runtime":{"upstream_socket":identity,"cwd":cwd}})
+        });
+        let deadline = upstream_deadline(Duration::from_millis(80)).unwrap();
+        let mut calls = 0;
+        let error = discover_with(&sessions, Some(deadline), &mut |_, _, _, passed| {
+            assert_eq!(passed, Some(deadline));
+            calls += 1;
+            if calls == 2 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(vec![])
+        })
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        assert_eq!(error.kind, crate::ErrorKind::RpcTimeout);
+        assert!(discover_bounded(&sessions, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn one_pagination_budget_covers_all_pages_and_both_archive_scans() {
+        for expire_on in [1, 2] {
+            let deadline = upstream_deadline(Duration::from_millis(80)).unwrap();
+            let mut calls = 0;
+            let error = list_before("/owned", Some(deadline), &mut |_, params| {
+                calls += 1;
+                assert_eq!(params["archived"], json!(calls == 2));
+                if calls == expire_on {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(json!({"data":[],"nextCursor":null}))
+            })
+            .unwrap_err();
+            assert_eq!(calls, expire_on);
+            assert_eq!(error.kind, crate::ErrorKind::RpcTimeout);
+        }
+        let deadline = upstream_deadline(Duration::from_millis(80)).unwrap();
+        let mut calls = 0;
+        assert!(list_before("/owned", Some(deadline), &mut |_, params| {
+            calls += 1;
+            assert_eq!(params["archived"], false);
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(json!({"data":[],"nextCursor":"next-page"}))
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn bounded_pagination_preserves_cursor_and_page_validation() {
+        for response in [
+            json!({}),
+            json!({"data":{}}),
+            json!({"data":[]}),
+            json!({"data":[],"nextCursor":"repeat"}),
+        ] {
+            let deadline = upstream_deadline(Duration::from_secs(1)).unwrap();
+            assert!(
+                list_before("/owned", Some(deadline), &mut |_, _| Ok(response.clone())).is_err()
+            );
+        }
+        let deadline = upstream_deadline(Duration::from_secs(1)).unwrap();
+        let mut calls = 0;
+        let rows = list_before("/owned", Some(deadline), &mut |_, _| {
+            calls += 1;
+            Ok(json!({"data":[],"nextCursor":if calls == 1 {json!("next")} else {J::Null}}))
+        })
+        .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(calls, 3);
     }
 }

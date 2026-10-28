@@ -329,6 +329,9 @@ fn collect_workers(root: &Path, state: &J, owner: &Owner) -> Result<()> {
     }
     if !journal.as_object().unwrap().is_empty() {
         save(root, &journal)?;
+        for entry in journal.as_object().unwrap().values() {
+            runtime::retirement::collection(root, owner, entry)?;
+        }
     }
     Ok(())
 }

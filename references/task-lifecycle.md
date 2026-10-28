@@ -94,6 +94,11 @@ queue permits, and independent legacy CI observers retain their contract.
 
 ## Explicit final outcome
 
+Confirmed intermediate stages can reclaim settled child execution resources
+before this final outcome. The original parent and referenced runtime evidence
+remain active; see [stage resource reclamation](stage-resource-reclamation.md)
+for eligibility, pending continuation, retirement fences and terminal takeover.
+
 The existing coordinator invokes:
 
 ```text

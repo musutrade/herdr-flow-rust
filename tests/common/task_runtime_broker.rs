@@ -2,7 +2,7 @@ use super::*;
 #[path = "mod.rs"]
 mod common;
 #[path = "rpc_server.rs"]
-mod rpc_fixture;
+pub(crate) mod rpc_fixture;
 #[path = "broker_subscription.rs"]
 mod subscription;
 #[test]

@@ -5,6 +5,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 mod descendants;
 pub(in crate::task_runtime) mod subscription;
 pub(crate) use descendants::discover;
+pub(crate) use descendants::discover_bounded;
 
 pub(super) fn selected(spec: &J) -> bool {
     spec["configuration"] == "upstream"
@@ -224,6 +225,19 @@ fn bound_obligation(env: &TaskEnvironment, root: &Path, runtime: &J) -> Result<O
 /// Delete only IDs recorded from this task's thread/start response. A transport
 /// error or an ambiguous creation retains the obligation and all local evidence.
 pub(crate) fn reclaim(journal: &mut J) -> Result<()> {
+    reclaim_before(journal, None)
+}
+
+/// Reclaim one recorded session within one budget shared by connection setup
+/// and deletion. The shared service remains external and is never restarted.
+pub(crate) fn reclaim_bounded(journal: &mut J, timeout: f64) -> Result<()> {
+    let duration = std::time::Duration::try_from_secs_f64(timeout)
+        .map_err(|_| FlowError::guard("invalid upstream reclamation timeout"))?;
+    let deadline = upstream_deadline(duration)?;
+    reclaim_before(journal, Some(deadline))
+}
+
+fn reclaim_before(journal: &mut J, deadline: Option<std::time::Instant>) -> Result<()> {
     if journal["phase"] == "deleted" {
         return Ok(());
     }
@@ -235,9 +249,42 @@ pub(crate) fn reclaim(journal: &mut J) -> Result<()> {
     crate::identity::validate(&json!({"adapter":"codex","session":id}))?;
     let socket = endpoint(&journal["runtime"])?;
     let mut client = crate::codex::rpc::Client::new(&socket.to_string_lossy());
-    reclaim_with(journal, &id, &mut |method, params| {
-        client.call(method, params)
+    reclaim_with(journal, &id, &mut |method, params| match deadline {
+        Some(deadline) => call_before(&mut client, method, params, deadline),
+        None => client.call(method, params),
     })
+}
+
+fn upstream_deadline(timeout: std::time::Duration) -> Result<std::time::Instant> {
+    std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| FlowError::guard("invalid upstream deadline"))
+}
+
+fn remaining_budget(deadline: std::time::Instant) -> Result<f64> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(FlowError::rpc_timeout(
+            "upstream retirement deadline elapsed",
+        ));
+    }
+    Ok(remaining.as_secs_f64())
+}
+
+fn call_before(
+    client: &mut crate::codex::rpc::Client,
+    method: &str,
+    params: &J,
+    deadline: std::time::Instant,
+) -> Result<J> {
+    client.timeout = remaining_budget(deadline)?;
+    client.connect()?;
+    // Client::call starts its own RPC clock after connecting. Recalculate the
+    // remaining budget so initialization never grants another full allowance.
+    client.timeout = remaining_budget(deadline)?;
+    let reply = client.call(method, params)?;
+    remaining_budget(deadline)?;
+    Ok(reply)
 }
 
 fn reclaim_with(
@@ -354,5 +401,21 @@ mod tests {
         }
         reclaim_with(&mut journal, ID, &mut |_, _| Ok(json!({}))).unwrap();
         assert_eq!(journal["phase"], "deleted");
+    }
+
+    #[test]
+    fn bounded_reclamation_times_out_during_handshake_without_losing_the_obligation() {
+        let (_temp, _listener, runtime) = fixture();
+        // A live listener deliberately never services the WebSocket handshake.
+        // The bounded API must not inherit the default ten-second setup wait.
+        let mut journal = json!({"phase":"deleting","session":ID,"runtime":runtime});
+        let start = std::time::Instant::now();
+        let error = reclaim_bounded(&mut journal, 0.03).unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::RpcTimeout);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(journal["phase"], "deleting");
+        for timeout in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(reclaim_bounded(&mut journal, timeout).is_err());
+        }
     }
 }

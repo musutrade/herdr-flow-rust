@@ -18,7 +18,7 @@ pub fn complete(env: &mut TaskEnvironment, queue: &Path, delivery: &str) -> Resu
     resume(env, queue, &mut state)
 }
 
-fn checkpoint(env: &TaskEnvironment, queue: &Path, id: &str, state: &mut J) -> Result<()> {
+fn checkpoint(env: &mut TaskEnvironment, queue: &Path, id: &str, state: &mut J) -> Result<()> {
     let previous = &state["tasks"][&env.task_id]["stage_delivery"];
     if previous["delivery"]["id"] == id {
         return validate_checkpoint(env, queue, previous);
@@ -28,8 +28,9 @@ fn checkpoint(env: &TaskEnvironment, queue: &Path, id: &str, state: &mut J) -> R
         "finish the recorded stage transition first",
     )?;
     validate_confirmed(env, queue, id, state)?;
+    let resource_cleanup = crate::task_runtime::retirement::prepare(env, state)?;
     state["tasks"][&env.task_id]["stage_delivery"] =
-        json!({"phase":"continuing","delivery":env.delivery});
+        json!({"phase":"continuing","delivery":env.delivery,"resource_cleanup":resource_cleanup});
     crate::queue::save(queue, state)
 }
 

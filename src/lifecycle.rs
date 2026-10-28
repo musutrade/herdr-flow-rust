@@ -193,6 +193,7 @@ fn acquire_runtime(root: &std::path::Path, marker: &std::path::Path) -> Result<O
         serde_json::from_value(util::read_state_json(root, "lifecycle-owner.json")?)?;
     let permit = write_permit(&owner)?;
     verify_runtime_record(root, &owner)?;
+    crate::task_runtime::retirement::admit(root)?;
     Ok(Some(permit))
 }
 

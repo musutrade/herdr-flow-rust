@@ -129,10 +129,18 @@ pub fn prepare(owner: &Owner, permit: &Permit, associations: J) -> Result<()> {
 }
 
 fn native_obligations(env: &crate::task_env::TaskEnvironment) -> Result<(Vec<J>, Vec<J>)> {
-    Ok((
-        crate::task_runtime::upstream::obligations(env)?,
-        crate::task_runtime::tui::obligations(env)?,
-    ))
+    let mut sessions = crate::task_runtime::upstream::obligations(env)?;
+    for journal in crate::task_runtime::retirement::sessions(env)? {
+        if let Some(existing) = sessions
+            .iter_mut()
+            .find(|v| v["session"] == journal["session"])
+        {
+            *existing = journal;
+        } else {
+            sessions.push(journal);
+        }
+    }
+    Ok((sessions, crate::task_runtime::tui::obligations(env)?))
 }
 
 pub fn association_plan(owner: &Owner, permit: &Permit) -> Result<J> {

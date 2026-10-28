@@ -362,4 +362,4 @@ pub(super) fn turn(root: &Path, state: &J, id: &J) -> Result<Option<J>> {
 
 #[cfg(test)]
 #[path = "../../tests/common/task_runtime_broker.rs"]
-mod tests;
+pub(super) mod tests;
