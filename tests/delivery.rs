@@ -14,6 +14,8 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 static LOCK: Mutex<()> = Mutex::new(());
+#[path = "common/delivery_contention.rs"]
+mod contention;
 struct Fixture {
     _lock: MutexGuard<'static, ()>,
     dir: tempfile::TempDir,

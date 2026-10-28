@@ -8,8 +8,15 @@ pub(super) fn advance(root: &Path, context: &J, incident: &mut J) -> Result<()> 
     let result = if incident["repair"].is_null() {
         attempt(root, context, incident)
     } else {
-        reconcile(context, incident)
+        reconcile(context, incident).map(|()| true)
     };
+    if matches!(result, Ok(false)) {
+        incident["repair_wait"] = json!({"reason":"control checkpoint or watcher lock is busy",
+            "next_step":"Wait for the existing lock/checkpoint to finish, then revalidate the original operation before any spawn.",
+            "operation_replay_allowed":false});
+        return save(root, "incident.json", incident);
+    }
+    incident.as_object_mut().unwrap().remove("repair_wait");
     if let Err(error) = result {
         let phase = if incident["repair"].is_null() {
             "blocked"
@@ -115,30 +122,49 @@ fn environment(context: &J) -> Result<(crate::lifecycle::Permit, TaskEnvironment
     Ok((permit, env))
 }
 
-fn attempt(root: &Path, context: &J, incident: &mut J) -> Result<()> {
+fn attempt(root: &Path, context: &J, incident: &mut J) -> Result<bool> {
     let (permit, mut env) = environment(context)?;
     let receiver = Receiver::load(context, &env)?;
     let _runtime = crate::guard::locked_existing(&receiver.root)?;
     let _guard = crate::guard::locked_existing(&receiver.guard)?;
-    let _control = lock(&receiver.root.join("control-service.lock"))?;
-    let watch = lock(&receiver.guard.join("watch.lock"))?;
-    let previous = stopped_watcher(&receiver, &env, incident)?;
+    let Some((_control, watch)) = available_locks(&receiver)? else {
+        return Ok(false);
+    };
+    start_locked(root, &receiver, &mut env, &permit, incident, watch)?;
+    Ok(true)
+}
+
+fn available_locks(receiver: &Receiver) -> Result<Option<(util::FileLock, util::FileLock)>> {
+    let Some(control) =
+        util::FileLock::acquire(&receiver.root.join("control-service.lock"), false)?
+    else {
+        return Ok(None);
+    };
+    if !super::super::broker::checkpoint::available(&receiver.root)? {
+        return Ok(None);
+    }
+    let Some(watch) = util::FileLock::acquire(&receiver.guard.join("watch.lock"), false)? else {
+        return Ok(None);
+    };
+    Ok(Some((control, watch)))
+}
+
+fn start_locked(
+    root: &Path,
+    receiver: &Receiver,
+    env: &mut TaskEnvironment,
+    permit: &crate::lifecycle::Permit,
+    incident: &mut J,
+    watch: util::FileLock,
+) -> Result<()> {
+    let previous = stopped_watcher(receiver, env, incident)?;
     let operation = receiver.original_operation()?;
     incident["repair"] = json!({"phase":"executing","kind":"restart_receiver_watch",
         "guard":receiver.guard,"previous":previous,"original_operation":operation,
         "operation_replay_allowed":false,"business_outcome":"unchanged"});
     save(root, "incident.json", incident)?;
     drop(watch); // The new child must acquire this same existing watcher lock.
-    spawn(root, &receiver, &mut env, &permit, incident)
-}
-
-fn lock(path: &Path) -> Result<util::FileLock> {
-    util::FileLock::acquire(path, false)?.ok_or_else(|| {
-        FlowError::new(
-            crate::ErrorKind::StateBusy,
-            "repair control or watcher lock is held",
-        )
-    })
+    spawn(root, receiver, env, permit, incident)
 }
 
 fn stopped_watcher(receiver: &Receiver, env: &TaskEnvironment, incident: &J) -> Result<J> {
@@ -394,11 +420,15 @@ mod tests {
         ] {
             assert!(registered_process(&env, &identity).is_err());
         }
-        let path = temp.path().join("held.lock");
-        let held = lock(&path).unwrap();
-        assert_eq!(lock(&path).err().unwrap().kind, crate::ErrorKind::StateBusy);
-        drop(held);
-        lock(&path).unwrap();
+        for path in [
+            receiver.root.join("control-service.lock"),
+            receiver.guard.join("watch.lock"),
+        ] {
+            let held = util::FileLock::acquire(&path, false).unwrap().unwrap();
+            assert!(available_locks(&receiver).unwrap().is_none());
+            drop(held);
+            assert!(available_locks(&receiver).unwrap().is_some());
+        }
         env.child_processes.clear();
         crate::task_env::destroy_environment(&env).unwrap();
     }
