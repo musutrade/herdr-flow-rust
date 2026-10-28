@@ -5,6 +5,7 @@ use crate::{lifecycle::Owner, queue};
 mod agent;
 mod drive;
 #[cfg(test)]
+#[path = "../../../tests/common/publication_runtime.rs"]
 mod tests;
 mod transport;
 

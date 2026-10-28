@@ -1,3 +1,4 @@
+//! Publisher state-machine fixtures, compiled only by the library test module.
 use super::*;
 use crate::ci::GitHubApi;
 use crate::progress::{self, acceptance, lineage};
