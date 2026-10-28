@@ -183,18 +183,24 @@ pub fn runtime_permit(root: &std::path::Path) -> Result<Option<Permit>> {
 }
 
 fn acquire_runtime(root: &std::path::Path, marker: &std::path::Path) -> Result<Option<Permit>> {
+    let owner = runtime_owner(root, marker)?;
+    let permit = write_permit(&owner)?;
+    verify_runtime_record(root, &owner)?;
+    crate::task_runtime::retirement::admit(root)?;
+    Ok(Some(permit))
+}
+
+fn runtime_owner(root: &std::path::Path, marker: &std::path::Path) -> Result<Owner> {
     if !util::protected::is_runtime_namespace(root)? {
         return Err(FlowError::guard("runtime authority namespace is missing"));
     }
     if !util::protected::is_document(marker)? {
         return Err(FlowError::guard("runtime owner must be isolated authority"));
     }
-    let owner: Owner =
-        serde_json::from_value(util::read_state_json(root, "lifecycle-owner.json")?)?;
-    let permit = write_permit(&owner)?;
-    verify_runtime_record(root, &owner)?;
-    crate::task_runtime::retirement::admit(root)?;
-    Ok(Some(permit))
+    Ok(serde_json::from_value(util::read_state_json(
+        root,
+        "lifecycle-owner.json",
+    )?)?)
 }
 
 /// Stored submission identity, never reconstructed from a later queue snapshot.

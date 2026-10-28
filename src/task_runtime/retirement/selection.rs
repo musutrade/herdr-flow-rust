@@ -249,14 +249,17 @@ pub(super) fn no_recovery_incident(env: &TaskEnvironment) -> Result<()> {
         if !root.try_exists()? {
             continue;
         }
-        if let Some(incident) =
-            util::read_state_json_bounded_if_exists(&root, "incident.json", LIMIT)?
-        {
-            ensure(
-                incident["phase"] == "handled",
-                "unresolved recovery incident retains stage evidence",
-            )?;
-        }
+        handled_recovery(&root)?;
+    }
+    Ok(())
+}
+
+fn handled_recovery(root: &Path) -> Result<()> {
+    if let Some(incident) = util::read_state_json_bounded_if_exists(root, "incident.json", LIMIT)? {
+        ensure(
+            incident["phase"] == "handled",
+            "unresolved recovery incident retains stage evidence",
+        )?;
     }
     Ok(())
 }

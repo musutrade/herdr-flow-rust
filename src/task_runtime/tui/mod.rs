@@ -583,11 +583,7 @@ fn entry_obligations(
     let root = entry?.path();
     let frozen = super::retirement::presentation(env, &root)?;
     let current = binding(&root)?;
-    let mut records = Vec::new();
-    if let Some(frozen) = &frozen {
-        validate_obligation(env, &root, frozen)?;
-        records.push(frozen.clone());
-    }
+    let mut records = frozen_obligations(env, &root, frozen.as_ref())?;
     if let Some(current) = current {
         validate_obligation(env, &root, &current)?;
         if frozen
@@ -598,6 +594,14 @@ fn entry_obligations(
         }
     }
     Ok(records)
+}
+
+fn frozen_obligations(env: &TaskEnvironment, root: &Path, frozen: Option<&J>) -> Result<Vec<J>> {
+    if let Some(frozen) = frozen {
+        validate_obligation(env, root, frozen)?;
+        return Ok(vec![frozen.clone()]);
+    }
+    Ok(vec![])
 }
 
 fn same_attachment(left: &J, right: &J) -> bool {

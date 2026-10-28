@@ -37,11 +37,7 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
 /// credentials. This does not establish support for an upstream login.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
-    verify_instance_owner(env)?;
-    ensure(
-        env.owns_lock() && env.state == EnvironmentState::Active,
-        "runtime requires an owned active environment",
-    )?;
+    require_preparation(env)?;
     validate_assignment(assignment)?;
     let root = env.temp_root.join("rt").join(assignment);
     retirement::admit(&root)?;
@@ -49,6 +45,14 @@ pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     crate::task_env::validate_path(env, &root)?;
     prepare_runtime_dirs(&root)?;
     Ok(root)
+}
+
+fn require_preparation(env: &TaskEnvironment) -> Result<()> {
+    verify_instance_owner(env)?;
+    ensure(
+        env.owns_lock() && env.state == EnvironmentState::Active,
+        "runtime requires an owned active environment",
+    )
 }
 
 fn prepare_runtime_dirs(root: &Path) -> Result<()> {

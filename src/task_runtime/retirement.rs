@@ -323,6 +323,8 @@ pub(crate) fn presentation(env: &TaskEnvironment, root: &Path) -> Result<Option<
 }
 
 #[cfg(test)]
+#[path = "../../tests/common/stage_retirement_selection.rs"]
 mod selection_tests;
 #[cfg(test)]
+#[path = "../../tests/common/stage_retirement.rs"]
 mod tests;

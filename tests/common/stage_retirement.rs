@@ -493,7 +493,7 @@ fn terminal_finalizer_absorbs_frozen_guardian_and_removes_stage_host_wait() {
     assert!(!task_env::is_registered("parent").unwrap());
 }
 
-#[path = "execution_faults.rs"]
+#[path = "stage_retirement_faults.rs"]
 mod faults;
 
 #[test]

@@ -85,22 +85,33 @@ fn list_before(
 ) -> Result<Vec<J>> {
     let mut rows = vec![];
     for archived in [false, true] {
-        let mut cursor = J::Null;
-        for page in 0..8 {
-            check_deadline(deadline)?;
-            let reply = call(
-                "thread/list",
-                &json!({"cwd":cwd,"archived":archived,
-                "sourceKinds":["cli","vscode","exec","appServer","subAgent","subAgentReview",
-                    "subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"],
-                "useStateDbOnly":true,"limit":128,"cursor":cursor}),
-            )?;
-            check_deadline(deadline)?;
-            append_page(&mut rows, &reply)?;
-            match next_cursor(&reply, &cursor, page)? {
-                None => break,
-                Some(next) => cursor = next,
-            }
+        rows.extend(list_archive(cwd, archived, deadline, call)?);
+    }
+    Ok(rows)
+}
+
+fn list_archive(
+    cwd: &str,
+    archived: bool,
+    deadline: Option<Instant>,
+    call: &mut dyn FnMut(&str, &J) -> Result<J>,
+) -> Result<Vec<J>> {
+    let mut rows = vec![];
+    let mut cursor = J::Null;
+    for page in 0..8 {
+        check_deadline(deadline)?;
+        let reply = call(
+            "thread/list",
+            &json!({"cwd":cwd,"archived":archived,
+            "sourceKinds":["cli","vscode","exec","appServer","subAgent","subAgentReview",
+                "subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"],
+            "useStateDbOnly":true,"limit":128,"cursor":cursor}),
+        )?;
+        check_deadline(deadline)?;
+        append_page(&mut rows, &reply)?;
+        match next_cursor(&reply, &cursor, page)? {
+            None => break,
+            Some(next) => cursor = next,
         }
     }
     Ok(rows)
