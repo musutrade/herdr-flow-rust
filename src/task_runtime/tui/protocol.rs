@@ -248,6 +248,10 @@ impl Policy {
             Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(vec![]),
             Err(error) => return Err(error),
         };
+        self.forward_buffered(client, index)
+    }
+
+    fn forward_buffered(&mut self, client: bool, index: usize) -> Result<Vec<u8>> {
         if let Some(drain) = &self.drain {
             drain.borrow_mut().initialize()?;
         }

@@ -140,15 +140,8 @@ impl Drain {
 
     fn method(&self, ledger: &mut Ledger, client: bool, method: &str, message: &J) -> Result<()> {
         if client {
-            if method == "initialized" && message.get("id").is_none() {
+            if !self.admit_client(method, message)? {
                 return Ok(());
-            }
-            ensure(
-                valid_id(&message["id"]),
-                "native operation requires an RPC request ID",
-            )?;
-            if method != "turn/interrupt" {
-                super::super::retirement::admit(&self.root()?)?;
             }
         } else if method == "turn/completed" {
             self.completed(ledger, message);
@@ -157,6 +150,20 @@ impl Drain {
             return Ok(());
         }
         self.reserve(ledger, client, method, message)
+    }
+
+    fn admit_client(&self, method: &str, message: &J) -> Result<bool> {
+        if method == "initialized" && message.get("id").is_none() {
+            return Ok(false);
+        }
+        ensure(
+            valid_id(&message["id"]),
+            "native operation requires an RPC request ID",
+        )?;
+        if method != "turn/interrupt" {
+            super::super::retirement::admit(&self.root()?)?;
+        }
+        Ok(true)
     }
 
     fn reserve(&self, ledger: &mut Ledger, client: bool, method: &str, message: &J) -> Result<()> {

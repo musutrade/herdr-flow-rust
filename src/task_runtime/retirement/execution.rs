@@ -88,14 +88,7 @@ fn retire(
         begin(env, plan, index)?;
         return pending_step();
     }
-    // The fence must precede the drain/idle proof. Existing approvals and input
-    // stay reachable until both admitted native work and upstream activity end.
-    marker(plan, index)?;
-    if plan.entries[index].phase == "retiring" {
-        require_presentation_drained(&plan.entries[index])?;
-    }
-    close_presentation(env, plan, index)?;
-    require_frontends_gone(&plan.entries[index])?;
+    close_drained_presentation(env, plan, index)?;
     if plan.entries[index].phase == "retiring" {
         stop_transport(env, plan, index, permit)?;
         return pending_step();
@@ -104,6 +97,21 @@ fn retire(
     plan.entries[index].phase = "complete".into();
     save(env, plan)?;
     marker(plan, index)
+}
+
+fn close_drained_presentation(
+    env: &mut TaskEnvironment,
+    plan: &mut Plan,
+    index: usize,
+) -> Result<()> {
+    // The fence must precede the drain/idle proof. Existing approvals and input
+    // stay reachable until both admitted native work and upstream activity end.
+    marker(plan, index)?;
+    if plan.entries[index].phase == "retiring" {
+        require_presentation_drained(&plan.entries[index])?;
+    }
+    close_presentation(env, plan, index)?;
+    require_frontends_gone(&plan.entries[index])
 }
 
 fn require_presentation_drained(entry: &Entry) -> Result<()> {
