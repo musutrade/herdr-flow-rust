@@ -95,7 +95,6 @@ fn retire(
         return pending_step();
     }
     retire_sessions(env, plan, index)?;
-    retire_review(env, plan, index)?;
     plan.entries[index].phase = "complete".into();
     save(env, plan)?;
     marker(plan, index)
@@ -223,8 +222,7 @@ fn retire_sessions(env: &mut TaskEnvironment, plan: &mut Plan, index: usize) -> 
         save(env, plan)?;
         return pending_step();
     }
-    plan.entries[index].phase = "review".into();
-    save(env, plan)
+    Ok(())
 }
 
 fn retire_session(
@@ -247,42 +245,4 @@ fn retire_session(
         )?;
     }
     Ok(())
-}
-
-fn retire_review(env: &mut TaskEnvironment, plan: &mut Plan, index: usize) -> Result<()> {
-    let Some(mut removal) = plan.entries[index].removal.clone() else {
-        return Ok(());
-    };
-    let (key, review) = review_registration(env, &plan.entries[index], &removal)?;
-    ensure(
-        selection::unreferenced(env, &queue::load_queue(&plan.owner.queue_root)?, &review)?,
-        "review clone acquired a current reference; retain the original removal obligation",
-    )?;
-    removal.drive(|proposed| {
-        plan.entries[index].removal = Some(proposed.clone());
-        save(env, plan)
-    })?;
-    env.review_workspaces.remove(&key);
-    save(env, plan)
-}
-
-fn review_registration(
-    env: &TaskEnvironment,
-    entry: &Entry,
-    removal: &crate::task_env::DirectoryRemoval,
-) -> Result<(String, crate::task_env::review::ReviewWorkspace)> {
-    let review = entry
-        .review
-        .as_ref()
-        .ok_or_else(|| FlowError::guard("review removal lost its registration"))?;
-    let key = required(&entry.binding, "assignment")?;
-    if let Some(current) = env.review_workspaces.get(&key) {
-        ensure(current == review, "review cleanup registration changed")?;
-    } else {
-        ensure(
-            removal.complete,
-            "review registration disappeared before removal",
-        )?;
-    }
-    Ok((key, review.clone()))
 }

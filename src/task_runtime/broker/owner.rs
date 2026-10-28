@@ -69,7 +69,7 @@ impl Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        let Ok(_permit) = crate::lifecycle::runtime_permit(&self.root) else {
+        let Ok(_permit) = crate::lifecycle::runtime_observer_permit(&self.root) else {
             return;
         };
         let path = self.root.join("broker.sock");

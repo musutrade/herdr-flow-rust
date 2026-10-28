@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "stage_retirement_broker.rs"]
+mod real_broker;
+
 struct Frontend(Child);
 
 impl Frontend {
@@ -220,7 +223,7 @@ fn uncertain_delete_keeps_durable_intent_and_exact_not_found_retry_completes() {
     drive_owner(&fixture.owner).unwrap();
     service.finish();
     assert_eq!(fixture.plan().phase, "complete");
-    assert!(!fixture.clone_path().exists());
+    assert!(fixture.clone_path().join("evidence").is_file());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
     assert_eq!(fixture.state()["events"]["result"], original_result);
     let calls = calls.lock().unwrap();
@@ -274,7 +277,7 @@ fn runtime_and_socket_replacements_are_rejected_before_any_native_effect() {
 }
 
 #[test]
-fn replaced_review_clone_retains_original_removal_authority_and_preserves_foreign_directory() {
+fn stage_completion_preserves_original_review_registration_and_replaced_directory() {
     let calls = Arc::new(Mutex::new(vec![json!({})]));
     let service = server(5, false, calls.clone());
     let mut fixture = Fixture::new(&service.path);
@@ -282,20 +285,15 @@ fn replaced_review_clone_retains_original_removal_authority_and_preserves_foreig
     for _ in 0..3 {
         fixture.pending_tick();
     }
-    let identity = fixture.plan().entries[0].removal.as_ref().unwrap().identity;
+    let registration = fixture.active().review_workspaces[ASSIGNMENT].clone();
     let original = fixture.clone_path().with_file_name("original-clone");
     fs::rename(fixture.clone_path(), &original).unwrap();
     util::ensure_private_dir(&fixture.clone_path(), true).unwrap();
     fs::write(fixture.clone_path().join("foreign"), "preserve").unwrap();
-    let error = drive_owner(&fixture.owner).unwrap_err();
-    assert!(error.message.contains("identity changed"), "{error}");
+    drive_owner(&fixture.owner).unwrap();
     service.finish();
-    let plan = fixture.plan();
-    let removal = plan.entries[0].removal.as_ref().unwrap();
-    assert_eq!(plan.entries[0].phase, "review");
-    assert_eq!(removal.identity, identity);
-    assert!(removal.quarantine.is_none());
-    assert!(!removal.complete);
+    assert_eq!(fixture.plan().phase, "complete");
+    assert_eq!(fixture.active().review_workspaces[ASSIGNMENT], registration);
     assert_eq!(
         fs::read_to_string(fixture.clone_path().join("foreign")).unwrap(),
         "preserve"
@@ -305,11 +303,10 @@ fn replaced_review_clone_retains_original_removal_authority_and_preserves_foreig
         "old candidate"
     );
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
-    assert!(fixture.active().review_workspaces.contains_key(ASSIGNMENT));
 }
 
 #[test]
-fn new_queue_or_runtime_clone_references_keep_the_frozen_obligation_then_allow_retry() {
+fn stage_completion_keeps_new_queue_and_runtime_clone_references_and_sources() {
     for runtime_reference in [false, true] {
         let calls = Arc::new(Mutex::new(vec![json!({})]));
         let service = server(5, false, calls.clone());
@@ -318,14 +315,13 @@ fn new_queue_or_runtime_clone_references_keep_the_frozen_obligation_then_allow_r
         for _ in 0..3 {
             fixture.pending_tick();
         }
-        let before = fixture.plan().entries[0].removal.as_ref().unwrap().identity;
+        let registration = fixture.active().review_workspaces[ASSIGNMENT].clone();
         let reference_root = fixture.temp.path().join("scratch/rt/later-worker");
         if runtime_reference {
             util::ensure_private_dir(&reference_root, true).unwrap();
             util::atomic_write_json(
                 &reference_root.join("creation.json"),
-                &json!({
-                "phase":"unknown","packet":{"cwd":fixture.clone_path()}}),
+                &json!({"phase":"unknown","packet":{"cwd":fixture.clone_path()}}),
             )
             .unwrap();
         } else {
@@ -334,35 +330,23 @@ fn new_queue_or_runtime_clone_references_keep_the_frozen_obligation_then_allow_r
             state["new_inspection"] = json!({"candidate_workspace":fixture.clone_path()});
             queue::save(&fixture.owner.queue_root, &mut state).unwrap();
         }
-        let error = drive_owner(&fixture.owner).unwrap_err();
-        assert!(error.message.contains("current reference"), "{error}");
+        drive_owner(&fixture.owner).unwrap();
         service.finish();
-        let retained = fixture.plan();
-        assert_eq!(retained.entries[0].phase, "review");
-        assert_eq!(
-            retained.entries[0].removal.as_ref().unwrap().identity,
-            before
-        );
-        assert!(retained.entries[0]
-            .removal
-            .as_ref()
-            .unwrap()
-            .quarantine
-            .is_none());
+        assert_eq!(fixture.plan().phase, "complete");
+        assert_eq!(fixture.active().review_workspaces[ASSIGNMENT], registration);
         assert!(fixture.clone_path().join("evidence").is_file());
         assert!(fixture.unrelated.try_wait().unwrap().is_none());
         if runtime_reference {
-            fs::remove_file(reference_root.join("creation.json")).unwrap();
+            assert_eq!(
+                read(&reference_root, "creation.json").unwrap()["packet"]["cwd"],
+                json!(fixture.clone_path())
+            );
         } else {
-            let _lock = queue::locked(&fixture.owner.queue_root, false).unwrap();
-            let mut state = fixture.state();
-            state.as_object_mut().unwrap().remove("new_inspection");
-            queue::save(&fixture.owner.queue_root, &mut state).unwrap();
+            assert_eq!(
+                fixture.state()["new_inspection"]["candidate_workspace"],
+                json!(fixture.clone_path())
+            );
         }
-        // Review retries need no more native deletion or delivery calls.
-        drive_owner(&fixture.owner).unwrap();
-        assert_eq!(fixture.plan().phase, "complete");
-        assert!(!fixture.clone_path().exists());
     }
 }
 
@@ -394,7 +378,7 @@ fn held_owner_shared_permit_prevents_all_effects_and_release_allows_continuation
     drive_owner(&fixture.owner).unwrap();
     service.finish();
     assert_eq!(fixture.plan().phase, "complete");
-    assert!(!fixture.clone_path().exists());
+    assert!(fixture.clone_path().join("evidence").is_file());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
 }
 
@@ -453,7 +437,7 @@ fn closed_owned_pane_keeps_live_frontend_and_native_resources_until_frontend_exi
     drive_owner(&fixture.owner).unwrap();
     service.finish();
     assert_eq!(fixture.plan().phase, "complete");
-    assert!(!fixture.clone_path().exists());
+    assert!(fixture.clone_path().join("evidence").is_file());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
     assert_eq!(
         herdr

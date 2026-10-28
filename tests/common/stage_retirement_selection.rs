@@ -412,7 +412,61 @@ fn actual_recovery_observer_unknown_incidents_retain_and_handled_incidents_allow
 }
 
 #[test]
-fn other_runtime_cwd_packets_turns_and_receiver_references_preserve_review_clone() {
+fn selection_never_grants_review_directory_or_registration_removal_authority() {
+    for change in [
+        "ready",
+        "directory",
+        "phase",
+        "binding",
+        "wait",
+        "missing-identity",
+    ] {
+        let mut f = Fixture::new();
+        let path = f.review();
+        match change {
+            "directory" => {
+                fs::rename(&path, path.with_file_name("saved-original")).unwrap();
+                util::ensure_private_dir(&path, true).unwrap();
+            }
+            "phase" => {
+                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().phase =
+                    task_env::review::Phase::Cloning
+            }
+            "binding" => {
+                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().binding["candidate"] =
+                    json!("later-candidate")
+            }
+            "wait" => {
+                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().wait = "another-result".into()
+            }
+            "missing-identity" => {
+                f.env
+                    .review_workspaces
+                    .get_mut(ASSIGNMENT)
+                    .unwrap()
+                    .identity = None
+            }
+            _ => (),
+        }
+        fs::write(path.join("source-kept"), "retain for parent finalization").unwrap();
+        let registration = f.env.review_workspaces[ASSIGNMENT].clone();
+        let identity = RootIdentity::of(&fs::metadata(&path).unwrap());
+        let plan = f.plan();
+        assert_eq!(plan.entries.len(), 1, "{change}");
+        let entry = serde_json::to_value(&plan.entries[0]).unwrap();
+        assert!(entry.get("review").is_none());
+        assert!(entry.get("removal").is_none());
+        assert_eq!(f.env.review_workspaces[ASSIGNMENT], registration);
+        assert_eq!(RootIdentity::of(&fs::metadata(&path).unwrap()), identity);
+        assert_eq!(
+            fs::read_to_string(path.join("source-kept")).unwrap(),
+            "retain for parent finalization"
+        );
+    }
+}
+
+#[test]
+fn queue_and_other_runtime_references_are_preserved_without_a_global_reference_scan() {
     for name in [
         "runtime.json",
         "creation.json",
@@ -421,127 +475,21 @@ fn other_runtime_cwd_packets_turns_and_receiver_references_preserve_review_clone
     ] {
         let mut f = Fixture::new();
         let path = f.review();
+        f.state["source_reference"] = json!({"location":path});
         let other = f.env.temp_root.join("rt/unrelated-worker");
         util::ensure_private_dir(&other, true).unwrap();
-        let value = match name {
-            "runtime.json" => json!({"cwd":path}),
-            "creation.json" => json!({"phase":"unknown","packet":{"context":{"cwd":path}}}),
-            "turn.json" => {
-                json!({"phase":"in_progress","packet":{"attachments":[{"path":path.join("result")}]}})
-            }
-            "receiver.json" => json!({"state":{"evidence":[path]}}),
-            _ => unreachable!(),
-        };
-        write(&other, name, &value);
-        let before = fs::read(other.join(name)).unwrap();
+        // Unknown third-party records are not converted into ownership or a
+        // purported proof that all queues have no source reference.
+        fs::write(other.join(name), "unknown partial JSON {").unwrap();
         let plan = f.plan();
-        assert_eq!(plan.entries.len(), 1, "{name}");
-        assert!(plan.entries[0].removal.is_none(), "{name}");
-        assert!(plan.entries[0].review.is_some());
+        assert_eq!(plan.entries.len(), 1);
         assert!(path.join("result").is_file());
-        assert_eq!(fs::read(other.join(name)).unwrap(), before);
+        assert_eq!(f.state["source_reference"]["location"], json!(path));
+        assert_eq!(
+            fs::read_to_string(other.join(name)).unwrap(),
+            "unknown partial JSON {"
+        );
         assert!(!other.join(MARKER).exists());
-    }
-}
-
-#[test]
-fn unknown_other_runtime_documents_and_conservative_text_matches_never_grant_removal() {
-    let mut f = Fixture::new();
-    let path = f.review();
-    let other = f.env.temp_root.join("rt/unrelated-worker");
-    util::ensure_private_dir(&other, true).unwrap();
-    // A string prefix may refer to a similarly named checkout. The bounded
-    // reference scan deliberately preserves that false positive for inspection.
-    write(
-        &other,
-        "runtime.json",
-        &json!({"cwd":format!("{}-other",path.display())}),
-    );
-    let plan = f.plan();
-    assert_eq!(plan.entries.len(), 1);
-    assert!(plan.entries[0].removal.is_none());
-    assert!(path.join("result").is_file());
-    // A known, unrelated path must permit reclamation rather than retaining
-    // every directory merely because another runtime exists.
-    write(
-        &other,
-        "runtime.json",
-        &json!({"cwd":f.env.workspace_root.join("unrelated-checkout")}),
-    );
-    assert!(f.plan().entries[0].removal.is_some());
-    fs::write(other.join("creation.json"), "unknown partial JSON {").unwrap();
-    let plan = f.plan();
-    assert!(plan.entries.is_empty());
-    assert_eq!(plan.retained.len(), 1);
-    assert!(path.join("result").is_file());
-    assert_eq!(
-        fs::read_to_string(other.join("creation.json")).unwrap(),
-        "unknown partial JSON {"
-    );
-    assert!(!f.runtime.join(MARKER).exists());
-}
-
-#[test]
-fn unreferenced_ready_review_gets_exact_removal_authority_and_references_keep_it() {
-    let mut f = Fixture::new();
-    let path = f.review();
-    let identity = f.env.review_workspaces[ASSIGNMENT].identity.unwrap();
-    let plan = f.plan();
-    let removal = plan.entries[0].removal.as_ref().unwrap();
-    assert_eq!(removal.path, path);
-    assert_eq!(removal.identity, identity);
-    assert!(path.join("result").is_file());
-    f.state["evidence"] =
-        json!({"nested":[format!("inspect {} before continuing",path.display())]});
-    let plan = f.plan();
-    assert_eq!(plan.entries.len(), 1);
-    assert!(plan.entries[0].review.is_some());
-    assert!(plan.entries[0].removal.is_none());
-    assert!(path.join("result").is_file());
-    f.state.as_object_mut().unwrap().remove("evidence");
-    let mut dependent = f.env.review_workspaces[ASSIGNMENT].clone();
-    dependent.binding["assignment"] = json!("later-review");
-    dependent.path = f.env.workspace_root.join("reviews/later-review");
-    dependent.runtime = f.env.temp_root.join("rt/later-review");
-    dependent.source = path.join("nested-source");
-    f.env
-        .review_workspaces
-        .insert("later-review".into(), dependent);
-    let plan = f.plan();
-    assert!(plan.entries[0].removal.is_none());
-    assert!(path.join("result").is_file());
-}
-
-#[test]
-fn review_identity_phase_and_original_binding_changes_are_retained() {
-    for fault in ["identity", "phase", "binding", "wait"] {
-        let mut f = Fixture::new();
-        let path = f.review();
-        let reason = match fault {
-            "identity" => {
-                let original = path.with_file_name("saved-original");
-                fs::rename(&path, &original).unwrap();
-                util::ensure_private_dir(&path, true).unwrap();
-                "identity changed"
-            }
-            "phase" => {
-                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().phase =
-                    task_env::review::Phase::Cloning;
-                "unsettled"
-            }
-            "binding" => {
-                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().binding["candidate"] =
-                    json!("later-candidate");
-                "review"
-            }
-            "wait" => {
-                f.env.review_workspaces.get_mut(ASSIGNMENT).unwrap().wait = "another-result".into();
-                "review"
-            }
-            _ => unreachable!(),
-        };
-        f.retained(reason);
-        assert!(path.is_dir());
     }
 }
 

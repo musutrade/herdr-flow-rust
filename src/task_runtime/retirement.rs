@@ -33,8 +33,6 @@ struct Entry {
     sessions: Vec<J>,
     presentation: Option<J>,
     frontends: Vec<ProcessRecord>,
-    review: Option<crate::task_env::review::ReviewWorkspace>,
-    removal: Option<crate::task_env::DirectoryRemoval>,
     phase: String,
 }
 

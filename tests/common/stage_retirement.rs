@@ -290,7 +290,7 @@ fn completed_stage_releases_only_selected_execution_and_keeps_parent_evidence_an
     service.finish();
     let state = fixture.state();
     assert_eq!(fixture.plan().phase, "complete");
-    assert!(!fixture.clone_path().exists());
+    assert!(fixture.clone_path().join("evidence").is_file());
     assert!(fixture.broker.try_wait().unwrap().is_some());
     assert!(fixture.unrelated.try_wait().unwrap().is_none());
     assert_eq!(
@@ -314,7 +314,7 @@ fn completed_stage_releases_only_selected_execution_and_keeps_parent_evidence_an
     assert!(super::super::prepare(&env, ASSIGNMENT).is_err());
     assert!(super::super::command(&env, &fixture.root(), Path::new("/bin/true")).is_err());
     assert!(super::super::prepare(&env, "fresh-next-stage").is_ok());
-    assert!(env.review_workspaces.is_empty());
+    assert!(env.review_workspaces.contains_key(ASSIGNMENT));
     assert!(env.workspace_root.join("checkout/.git").exists());
     *env.creation_permit.lock().unwrap() = None;
     let mut current = fixture.state();
@@ -486,6 +486,7 @@ fn terminal_finalizer_absorbs_frozen_guardian_and_removes_stage_host_wait() {
     );
     assert!(!fixture.temp.path().join("scratch").exists());
     assert!(!fixture.temp.path().join("workspace").exists());
+    assert!(!fixture.clone_path().exists());
     assert!(fixture.state()["tasks"]["parent"].is_null());
     assert!(fixture.state()["waits"].as_object().unwrap().is_empty());
     assert!(fixture.state()["events"].as_object().unwrap().is_empty());
@@ -495,6 +496,9 @@ fn terminal_finalizer_absorbs_frozen_guardian_and_removes_stage_host_wait() {
 
 #[path = "stage_retirement_faults.rs"]
 mod faults;
+
+#[path = "stage_retirement_references.rs"]
+mod references;
 
 #[test]
 fn retirement_fence_is_durable_and_absence_does_not_create_directories() {

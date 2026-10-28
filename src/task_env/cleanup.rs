@@ -24,7 +24,6 @@
 //! already gone count as complete so a crash mid-retry can finish.
 
 pub(super) mod observation;
-pub(crate) mod removal;
 mod signals;
 pub mod terminal;
 
@@ -1080,7 +1079,7 @@ fn commit_unlink(
     unlink_verified_directory(parent, name, check, root_path)
 }
 
-/// Final unlink shared by whole-environment and stage-local removal. The
+/// Final unlink of identity-pinned environment roots. The
 /// descriptor remains the authority even if its directory entry changes.
 fn unlink_verified_directory(
     parent: &File,

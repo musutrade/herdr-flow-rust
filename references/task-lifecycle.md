@@ -96,7 +96,12 @@ queue permits, and independent legacy CI observers retain their contract.
 
 Confirmed intermediate stages can reclaim settled child execution resources
 before this final outcome. The original parent and referenced runtime evidence
-remain active; see [stage resource reclamation](stage-resource-reclamation.md)
+remain active. Review clones and their original registrations remain until
+the existing parent finalizer: stage retirement does not have a global
+cross-task/queue reference registry and does not delete artifact sources based
+on a local snapshot. Legal cross-task Git registration remains available; it
+does not itself extend the source parent's disposable lifetime after finalization.
+See [stage resource reclamation](stage-resource-reclamation.md)
 for eligibility, pending continuation, retirement fences and terminal takeover.
 
 The existing coordinator invokes:

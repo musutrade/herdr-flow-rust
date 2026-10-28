@@ -20,12 +20,21 @@ journal remains `created`. A thread created without completing its queue binding
 does not establish eligibility.
 
 The plan may release the registered broker, its exact native presentation,
-recorded upstream thread and proven Guardian descendants, and its unreferenced
-Ready review clone. Review Owner, original wait, binding and directory identity
-must match. Queue references, other runtime records and clone sources are
-checked conservatively. The original coordinator, recovery and publication
-roles, unknown creation outcomes, unsettled operations, and referenced clones
-remain under the existing terminal cleanup obligation.
+recorded upstream thread and proven Guardian descendants. Review clones and
+their original `review_workspaces` registrations remain until the parent's
+existing terminal finalizer. The original coordinator, recovery and publication
+roles, unknown creation outcomes and unsettled operations remain under that
+terminal cleanup obligation.
+
+Artifact registration can legally refer to an existing Git repository owned by
+another task, including one in another queue. A queue snapshot and the original
+parent's EX cannot prove that no other queue or future registration references
+a review clone. This slice therefore does not rename, clear or unlink review
+directories during stage retirement. It does not disable cross-task artifact
+registration or introduce a cross-Owner pin protocol. Stage completion preserves
+these sources; it does not extend their original disposable lifetime beyond
+explicit parent finalization. Inputs that must outlive that parent need actual
+delivery or materialization into an independently retained repository first.
 
 Runtime control directories, immutable reports, original result events and
 deduplication records remain readable until parent finalization. In particular,
@@ -55,13 +64,21 @@ The broker stop uses only its exact registered PID/start identity. Each later
 tick deletes at most one recorded upstream session. Deletion and descendant
 inventory use five-second RPC budgets including connection setup; inventory
 shares one deadline across scopes and pages. Descendants require the existing
-parent/rollout proof, never a matching working directory alone. Clone removal
-reuses descriptor verification and durable quarantine receipts. Identity
-replacement, a new reference, or uncertainty leaves the original obligation
-pending instead of adopting a replacement or repeating remote delivery.
+parent/rollout proof, never a matching working directory alone. Runtime,
+presentation or frontend identity replacement and uncertain native operations
+retain the original execution obligation instead of adopting a replacement or
+repeating remote delivery. Directory destruction remains in the existing
+terminal finalizer, with its descriptor and durable quarantine protections.
 
-Retirement markers prevent prepare, launch, broker restart, native requests and
-presentation reopening for the old runtime. Completed original result waits
+Retirement markers prevent prepare, launch, broker restart, new native RPC and
+presentation reopening for the old runtime. An already-running broker keeps
+observing and draining its original connection under the same parent Owner and
+finalization gate, and can finish a prepared journal checkpoint. It may send only
+an exact already-recorded completed tool result through that original connection.
+Rejected new RPC requests do not terminate the observer. Even metadata RPC is
+fenced because the subscription layer can otherwise resume a thread implicitly.
+The watcher stops the broker only after the recorded frontends have exited and
+a fresh native observation confirms idle. Completed original result waits
 close with the checkpoint, so Recovery does not diagnose the planned broker
 stop as a fault. The existing queue emits deduplicated host notices for cleanup
 completion or a retained obligation. The coordinator ACKs these notices without
@@ -79,10 +96,20 @@ its cleanup obligation.
 
 Regression fixtures exercise protected format-3 owners, real broker processes,
 actual Unix-socket RPC connections and disposable directories. They cover
-selection, replacement and reference retention, uncertain deletion and exact
+selection, execution identity replacement, source retention, uncertain deletion and exact
 retry, lock contention, notification deduplication, retained evidence and
-terminal takeover. Directory helper tests interrupt durable quarantine prefixes
-and check that replacement resources remain untouched.
+terminal takeover. Reference regressions register actual Git artifacts through
+the coordinator's normal queue transaction before retirement, while the source
+Owner EX is held at a fixed barrier, and after stage completion. Both same-queue
+and cross-queue consumers retain valid Git objects and the original clone
+registration. The original terminal cleanup tests continue to cover directory
+and quarantine recovery.
+
+A registered child process runs the real broker serve loop across the retirement
+marker. Its regression covers checkpoint recovery, late native events, rejected
+new RPC and broker restart, original-connection tool response, frontend exit,
+active-work retention and the final idle-triggered broker stop. The original
+sleep-process fixtures alone do not establish these broker-loop properties.
 
 The ordinary staged coordinator fixture also traverses production native
 creation, binding, dispatch, collection, ACK/application and stage completion.

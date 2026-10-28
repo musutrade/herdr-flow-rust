@@ -169,6 +169,15 @@ pub fn task_owner(s: &J, name: &str) -> Result<Option<Owner>> {
 
 /// Runtime/receiver journals inherit an explicit owner; no discovery by path/name.
 pub fn runtime_permit(root: &std::path::Path) -> Result<Option<Permit>> {
+    let permit = runtime_observer_permit(root)?;
+    crate::task_runtime::retirement::admit(root)?;
+    Ok(permit)
+}
+
+/// Existing brokers may drain their original connection after stage admission
+/// closes. The parent Owner, runtime identity and finalization gate still apply;
+/// this permit cannot admit a new broker, native turn or presentation.
+pub(crate) fn runtime_observer_permit(root: &std::path::Path) -> Result<Option<Permit>> {
     let marker = root.join("lifecycle-owner.json");
     match fs::symlink_metadata(&marker) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -186,7 +195,6 @@ fn acquire_runtime(root: &std::path::Path, marker: &std::path::Path) -> Result<O
     let owner = runtime_owner(root, marker)?;
     let permit = write_permit(&owner)?;
     verify_runtime_record(root, &owner)?;
-    crate::task_runtime::retirement::admit(root)?;
     Ok(Some(permit))
 }
 
