@@ -151,7 +151,7 @@ impl Fixture {
             ("runtime.json", runtime.clone()),
             (
                 "creation.json",
-                json!({"phase":"created","wait":"original-result",
+                json!({"phase":"bound","wait":"original-result",
                 "packet":{"binding":binding},"session":WORKER}),
             ),
             (
@@ -383,6 +383,7 @@ fn changed_presentation_or_new_recovery_incident_is_retained_before_any_native_e
         .unwrap_err()
         .message
         .contains("presentation changed"));
+    drive(&fixture.owner.queue_root).unwrap();
     assert_eq!(
         read(&fixture.root(), "presentation.json").unwrap(),
         replacement
@@ -506,4 +507,22 @@ fn retirement_fence_is_durable_and_absence_does_not_create_directories() {
     assert!(admit(&root).is_err());
     util::atomic_write_json(&root.join(MARKER), &json!({"phase":"retired"})).unwrap();
     assert!(admit(&root).is_err());
+}
+
+#[test]
+fn stage_driver_leaves_legacy_and_empty_isolated_queues_unchanged() {
+    let temp = util::fs::test_tempdir();
+    for isolated in [false, true] {
+        let root = temp
+            .path()
+            .join(if isolated { "isolated" } else { "legacy" });
+        if isolated {
+            queue::init_isolated(&root, None, 30).unwrap();
+        } else {
+            queue::init(&root, None, 30).unwrap();
+        }
+        let before = queue::load_queue(&root).unwrap();
+        drive(&root).unwrap();
+        assert_eq!(queue::load_queue(&root).unwrap(), before);
+    }
 }

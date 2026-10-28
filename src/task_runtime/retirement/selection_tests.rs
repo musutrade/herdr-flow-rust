@@ -74,7 +74,7 @@ impl Fixture {
         write(
             &runtime,
             "creation.json",
-            &json!({"phase":"created","packet":{"binding":binding},"session":SESSION}),
+            &json!({"phase":"bound","packet":{"binding":binding},"session":SESSION}),
         );
         write(
             &runtime,
@@ -264,6 +264,12 @@ fn unknown_collection_unacked_unapplied_and_changed_bindings_are_retained() {
 #[test]
 fn unknown_or_inprogress_worker_creation_turn_and_session_are_retained() {
     for (name, field, value, reason) in [
+        (
+            "creation.json",
+            "phase",
+            json!("created"),
+            "creation is unknown",
+        ),
         (
             "creation.json",
             "phase",

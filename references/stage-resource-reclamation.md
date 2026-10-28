@@ -12,9 +12,12 @@ The stage checkpoint freezes a bounded plan in the existing environment
 document before clearing the old scope. Eligible resources belong to ordinary
 development or acceptance activities in that exact scope. Selection requires
 the original wait and assignment binding, persisted signalled collection,
-ACKed and applied result, known creation/session/turn, and a registered broker
+ACKed and applied result, bound worker creation, known session/turn, and a registered broker
 PID with its start identity. A worker-local collection receipt preserves the
 original collection proof when the coordinator prunes its operational journal.
+The worker's `creation.json` must be `bound`; the separate upstream-session
+journal remains `created`. A thread created without completing its queue binding
+does not establish eligibility.
 
 The plan may release the registered broker, its exact native presentation,
 recorded upstream thread and proven Guardian descendants, and its unreferenced
@@ -80,6 +83,13 @@ selection, replacement and reference retention, uncertain deletion and exact
 retry, lock contention, notification deduplication, retained evidence and
 terminal takeover. Directory helper tests interrupt durable quarantine prefixes
 and check that replacement resources remain untouched.
+
+The ordinary staged coordinator fixture also traverses production native
+creation, binding, dispatch, collection, ACK/application and stage completion.
+It checks the resulting `bound` creation and collection receipt, early deletion
+of the stage reviewer, ACK of the cleanup notice, and a distinct new session for
+overall acceptance under the same parent. Its shared protocol service records
+each thread's actual creation identity and rejects reused thread IDs.
 
 These are protocol and process fixtures, not a real model or Herdr-visible
 acceptance run, and not power-loss testing. Same-parent stage delivery evidence

@@ -191,12 +191,22 @@ fn summary(plan: &Plan) -> J {
 /// The watcher invokes this outside every control/queue/environment permit.
 /// One bounded attempt per pending parent; finalization always takes precedence.
 pub(crate) fn drive(queue_root: &Path) -> Result<()> {
+    if !queue::isolation::isolated(queue_root)? {
+        return Ok(());
+    }
     let state = queue::load_queue(queue_root)?;
-    let tasks = state["tasks"]
+    drive_tasks(&state)
+}
+
+fn drive_tasks(state: &J) -> Result<()> {
+    let Some(tasks) = state.get("tasks") else {
+        return Ok(());
+    };
+    let tasks = tasks
         .as_object()
         .ok_or_else(|| FlowError::guard("tasks missing"))?;
     for task in tasks.values().filter(|t| pending(t)) {
-        let owner = crate::lifecycle::task_owner(&state, &required(task, "task")?)?
+        let owner = crate::lifecycle::task_owner(state, &required(task, "task")?)?
             .ok_or_else(|| FlowError::guard("stage cleanup Owner missing"))?;
         if let Err(error) = drive_owner(&owner) {
             if error.kind != crate::ErrorKind::StateBusy {

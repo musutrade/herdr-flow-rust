@@ -168,7 +168,7 @@ fn applied_result(state: &J, id: &str, binding: &J) -> Result<()> {
 fn session_identity(root: &Path, runtime: &J, session: &J, binding: &J) -> Result<()> {
     let creation = read(root, "creation.json")?;
     ensure(
-        creation["phase"] == "created"
+        creation["phase"] == "bound"
             && creation["packet"]["binding"] == *binding
             && creation["session"] == session["session"],
         "original worker creation is unknown or changed",
