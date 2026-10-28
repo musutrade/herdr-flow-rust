@@ -10,6 +10,8 @@ mod recovery_incidents;
 mod recovery_live;
 #[path = "common/rpc_server.rs"]
 pub mod rpc_server;
+#[path = "common/stage_live.rs"]
+mod stage_live;
 #[path = "common/upstream_live_campaign.rs"]
 mod upstream_live_campaign;
 #[path = "common/upstream_live_review.rs"]
