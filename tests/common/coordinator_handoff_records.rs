@@ -366,8 +366,12 @@ fn intention_or_complete_label_cannot_grant_new_work_before_restore_driver() {
     let mut cancelled = q;
     entry(&mut cancelled)["phase"] = json!("cancelled");
     cancelled["tasks"]["parent"][KEY]["active_generation"] = J::Null;
-    check_workspace(&cancelled, Path::new("/workspace/checkout")).unwrap();
-    admit_control(&cancelled, &owner(), "run").unwrap();
+    // A queue-only cancelled label cannot bypass the original runtime mirror.
+    assert!(check_workspace(&cancelled, Path::new("/workspace/checkout")).is_err());
+    assert!(admit_control(&cancelled, &owner(), "run").is_err());
+    check_workspace(&cancelled, Path::new("/independent/checkout")).unwrap();
+    admit_control(&cancelled, &owner(), "inspect").unwrap();
+    admit_control(&cancelled, &owner(), "ack").unwrap();
 }
 
 #[test]
@@ -405,8 +409,8 @@ fn native_admission_keeps_reads_and_original_replies_but_refuses_new_turns() {
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
     align_receiver(&mut q);
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
-    crate::task_runtime::human::admit_native(&runtime, &turn).unwrap();
-    assert!(crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
+    assert!(crate::task_runtime::human::admit_native(&runtime, &turn).is_err());
+    assert!(!crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
     entry(&mut q)["phase"] = json!("corrupt");
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
     assert!(crate::task_runtime::human::admit_native(&runtime, &turn).is_err());

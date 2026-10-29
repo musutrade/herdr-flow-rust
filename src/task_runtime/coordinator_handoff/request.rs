@@ -56,13 +56,18 @@ pub(crate) fn action(root: &Path, task: &str, action: &str, spec: &J) -> Result<
     let env = crate::task_env::isolation::restore_active(&owner, permit.clone())?;
     let _root_lock = crate::guard::locked_ex(root, &permit)?;
     let receiver = util::read_state_json_bounded(root, "receiver.json", RECORD_BYTES)?;
-    let guard = path(&receiver, "guard_dir")?;
+    let guard = guard_path(root, &receiver)?;
+    let _guard_lock = crate::guard::locked_ex(&guard, &permit)?;
+    transact(&env, root, &guard, &receiver, &permit, action, spec)
+}
+
+fn guard_path(root: &Path, receiver: &J) -> Result<PathBuf> {
+    let guard = path(receiver, "guard_dir")?;
     ensure(
         guard.starts_with(root) && guard != root,
         "coordinator guard escapes runtime",
     )?;
-    let _guard_lock = crate::guard::locked_ex(&guard, &permit)?;
-    transact(&env, root, &guard, &receiver, &permit, action, spec)
+    Ok(guard)
 }
 
 fn transact(
@@ -84,10 +89,25 @@ fn transact(
         "receiver-handoff-cancel" => cancel(before, spec)?,
         _ => return Err(FlowError::usage("unknown coordinator handoff action")),
     };
+    finish_request(root, permit, &state, next, action, spec)
+}
+
+fn finish_request(
+    root: &Path,
+    permit: &Permit,
+    state: &J,
+    next: J,
+    action: &str,
+    spec: &J,
+) -> Result<J> {
+    let before = &state["tasks"][&permit.owner().task_id][KEY];
+    super::mirror::reconcile(root, permit, before)?;
     if &next != before {
-        commit(permit, &state, &next)?;
+        commit(permit, state, &next)?;
     }
-    start_draining(permit, action, spec, next)
+    let next = start_draining(permit, action, spec, next)?;
+    super::mirror::reconcile(root, permit, &next)?;
+    Ok(next)
 }
 
 fn start_draining(permit: &Permit, action: &str, spec: &J, mut next: J) -> Result<J> {
@@ -122,19 +142,30 @@ fn coordinator(
         runtime["configuration"] == "upstream" && runtime["adapter"] == "codex",
         "coordinator handoff requires the original upstream Codex runtime",
     )?;
-    ensure(
-        receiver["phase"] == "bound"
-            && binding["runtime"] == json!(root)
-            && binding["instance"] == env.instance_id
-            && binding["control_protocol"] == "queue-tool-v2",
-        "coordinator handoff receiver binding changed",
-    )?;
+    receiver_identity(env, root, receiver, &binding)?;
     let scope = crate::guard::scope(&binding);
     ensure(
         state["guard_dir"] == json!(guard) && state["receiver"] == scope,
         "coordinator handoff current queue scope changed",
     )?;
     Ok(json!({"runtime":root,"guard":guard,"session":binding["session"],"scope":scope}))
+}
+
+fn receiver_identity(env: &TaskEnvironment, root: &Path, receiver: &J, binding: &J) -> Result<()> {
+    ensure(
+        receiver["phase"] == "bound"
+            && binding["runtime"] == json!(root)
+            && binding["instance"] == env.instance_id
+            && binding["control_protocol"] == "queue-tool-v2",
+        "coordinator handoff receiver binding changed",
+    )
+}
+
+fn input_digest(spec: &J) -> Result<String> {
+    fields(spec, &["request_id", "reason"])?;
+    super::super::validate_assignment(&text(spec, "request_id", 128)?)?;
+    text(spec, "reason", 1024)?;
+    Ok(util::pyjson::sha256_json_compact(spec))
 }
 
 fn request(
@@ -145,10 +176,7 @@ fn request(
     owner: &Owner,
     spec: &J,
 ) -> Result<J> {
-    fields(spec, &["request_id", "reason"])?;
-    super::super::validate_assignment(&text(spec, "request_id", 128)?)?;
-    text(spec, "reason", 1024)?;
-    let input_digest = util::pyjson::sha256_json_compact(spec);
+    let input_digest = input_digest(spec)?;
     if let Some(existing) = repeated(before, spec, &input_digest)? {
         return Ok(existing);
     }
@@ -263,6 +291,20 @@ fn frozen_configuration(root: &Path, from: &J) -> Result<J> {
     let journal = util::read_state_json_bounded(root, "upstream-session.json", RECORD_BYTES)?;
     upstream::endpoint(&runtime)?;
     role_models::validate(&runtime)?;
+    let business = original_business(&runtime, &journal, from)?;
+    let driver = runtime
+        .get("driver_binary")
+        .cloned()
+        .unwrap_or(json!(std::env::current_exe()?));
+    Ok(
+        json!({"provider":runtime["model"]["providerID"],"model":runtime["model"],
+        "effort":runtime["model"]["reasoning_effort"],"approval":business["approvalPolicy"],"sandbox":business["sandbox"],
+        "cwd":runtime["cwd"],"upstream_endpoint":runtime["upstream_socket"],"role_models":runtime["role_models"],
+        "driver":driver,"business_session_configuration":business}),
+    )
+}
+
+fn original_business(runtime: &J, journal: &J, from: &J) -> Result<J> {
     ensure(
         journal["phase"] == "created" && journal["session"] == from["session"],
         "coordinator original creation identity changed",
@@ -276,21 +318,12 @@ fn frozen_configuration(root: &Path, from: &J) -> Result<J> {
         business["approvalPolicy"] == approval && business["cwd"] == runtime["cwd"],
         "coordinator original permissions/directory changed",
     )?;
-    let driver = runtime
-        .get("driver_binary")
-        .cloned()
-        .unwrap_or(json!(std::env::current_exe()?));
     ensure(
         business["model"] == runtime["model"]["id"]
             && business["modelProvider"] == runtime["model"]["providerID"],
         "coordinator original session configuration changed",
     )?;
-    Ok(
-        json!({"provider":runtime["model"]["providerID"],"model":runtime["model"],
-        "effort":runtime["model"]["reasoning_effort"],"approval":business["approvalPolicy"],"sandbox":business["sandbox"],
-        "cwd":runtime["cwd"],"upstream_endpoint":runtime["upstream_socket"],"role_models":runtime["role_models"],
-        "driver":driver,"business_session_configuration":business}),
-    )
+    Ok(business.clone())
 }
 
 fn cancel(before: &J, spec: &J) -> Result<J> {
@@ -309,6 +342,13 @@ fn cancel(before: &J, spec: &J) -> Result<J> {
     if record["phase"] == "cancelled" {
         return Ok(before.clone());
     }
+    cancellable(record)?;
+    record["phase"] = json!("cancelled");
+    next["active_generation"] = J::Null;
+    Ok(next)
+}
+
+fn cancellable(record: &J) -> Result<()> {
     ensure(
         record["phase"] == "draining",
         "only an unstarted draining handoff may be cancelled",
@@ -318,10 +358,7 @@ fn cancel(before: &J, spec: &J) -> Result<J> {
     ensure(
         record["snapshot"].is_null() && record["retirement"].is_null(),
         "handoff already has an external effect",
-    )?;
-    record["phase"] = json!("cancelled");
-    next["active_generation"] = J::Null;
-    Ok(next)
+    )
 }
 
 fn commit(permit: &Permit, before: &J, next: &J) -> Result<()> {

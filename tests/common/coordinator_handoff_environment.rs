@@ -139,3 +139,102 @@ fn real_owner_capacity_and_unknown_resource_cannot_be_bypassed_by_new_id() {
         std::io::ErrorKind::WouldBlock
     );
 }
+
+#[test]
+fn interrupted_cancellation_keeps_the_fence_until_the_same_request_repairs_its_mirror() {
+    let mut f = Fixture::new();
+    let _listener = prepare(&mut f);
+    request(&f, "replacement-1").unwrap();
+    let original = util::read_state_json(&f.root(), "receiver-handoff.json").unwrap();
+    assert_eq!(original["phase"], "draining");
+    {
+        let _exclusive = f.active();
+        let mut state = f.state();
+        let record = &mut state["tasks"]["parent"][handoff::KEY];
+        record["records"][0]["phase"] = json!("cancelled");
+        record["active_generation"] = J::Null;
+        f.write_state(&mut state);
+    }
+    let committed = f.state();
+    assert!(!automatic_input_allowed(&f.root()).unwrap());
+    assert!(check_workspace(&committed, &f.checkout()).is_err());
+    check_workspace(&committed, Path::new("/independent/checkout")).unwrap();
+    handoff::admit_control(&committed, &f.owner, "inspect").unwrap();
+    assert!(handoff::admit_control(&committed, &f.owner, "run").is_err());
+    cancel(&f, "replacement-1").unwrap();
+    assert_eq!(f.state(), committed);
+    assert!(automatic_input_allowed(&f.root()).unwrap());
+    let aligned = util::read_state_json(&f.root(), "receiver-handoff.json").unwrap();
+    assert_eq!(aligned["phase"], "cancelled");
+    assert_ne!(aligned["history_sha256"], original["history_sha256"]);
+    util::protected::remove_document(&f.root().join("receiver-handoff.json")).unwrap();
+    assert!(!automatic_input_allowed(&f.root()).unwrap());
+    request(&f, "replacement-1").unwrap();
+    assert_eq!(
+        util::read_state_json(&f.root(), "receiver-handoff.json").unwrap(),
+        aligned
+    );
+    assert!(automatic_input_allowed(&f.root()).unwrap());
+}
+
+#[test]
+fn foreign_or_unknown_mirrors_are_preserved_without_adopting_or_replaying() {
+    let mut f = Fixture::new();
+    let _listener = prepare(&mut f);
+    let mirror_path = f.root().join("receiver-handoff.json");
+    util::atomic_write_json(&mirror_path, &json!({"foreign":true})).unwrap();
+    let original = f.state();
+    assert!(!automatic_input_allowed(&f.root()).unwrap());
+    assert!(check_workspace(&original, &f.checkout()).is_err());
+    assert!(handoff::admit_control(&original, &f.owner, "run").is_err());
+    handoff::admit_control(&original, &f.owner, "inspect").unwrap();
+    assert!(request(&f, "replacement-1").is_err());
+    assert_eq!(f.state(), original);
+    util::protected::remove_document(&mirror_path).unwrap();
+    request(&f, "replacement-1").unwrap();
+    cancel(&f, "replacement-1").unwrap();
+    let original = f.state();
+    let aligned = util::read_state_json(&f.root(), "receiver-handoff.json").unwrap();
+    for (field, value) in [
+        ("owner", json!({"instance_id":"foreign"})),
+        ("history_sha256", json!("0".repeat(64))),
+        ("phase", json!("complete")),
+    ] {
+        let mut invalid = aligned.clone();
+        invalid[field] = value;
+        util::atomic_write_json(&mirror_path, &invalid).unwrap();
+        assert!(!automatic_input_allowed(&f.root()).unwrap());
+        assert!(cancel(&f, "replacement-1").is_err());
+        assert_eq!(f.state(), original);
+        assert_eq!(
+            util::read_state_json(&f.root(), "receiver-handoff.json").unwrap(),
+            invalid
+        );
+    }
+}
+
+#[test]
+fn unconfigured_recovery_remains_absent_and_cannot_adopt_an_old_observer() {
+    let mut f = Fixture::new();
+    let listener = prepare(&mut f);
+    let mut runtime = util::read_state_json(&f.root(), "runtime.json").unwrap();
+    runtime["role_models"]
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery");
+    util::atomic_write_json(&f.root().join("runtime.json"), &runtime).unwrap();
+    let before = f.state();
+    assert!(request(&f, "replacement-1").is_err());
+    assert_eq!(f.state(), before);
+    // This fixture owns only synthetic observer metadata, with no Recovery
+    // process or model session. Remove it to model a never-configured role.
+    std::fs::remove_dir_all(f.root().join("recovery-observer")).unwrap();
+    let result = request(&f, "replacement-1").unwrap();
+    assert!(result["records"][0]["recovery"].is_null());
+    cancel(&f, "replacement-1").unwrap();
+    assert!(!f.root().join("recovery-observer").exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}

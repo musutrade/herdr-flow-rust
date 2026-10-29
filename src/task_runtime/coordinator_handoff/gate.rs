@@ -12,22 +12,51 @@ fn blocked(task: &J) -> Result<bool> {
         .ok_or_else(|| FlowError::guard("coordinator handoff records missing"))?;
     // This foundation exposes no replacement/restore operation. A later phase
     // label or ready ACK alone cannot prove the native permissions were restored.
-    Ok(records.iter().any(|record| record["phase"] != "cancelled"))
+    if records.iter().any(|record| record["phase"] != "cancelled") {
+        return Ok(true);
+    }
+    super::mirror::cancelled(task)?;
+    Ok(false)
 }
 
 pub(crate) fn check_workspace(state: &J, path: &Path) -> Result<()> {
     validate_queue(state)?;
+    receiver_workspace(state, path)?;
     let Some(tasks) = state["tasks"].as_object() else {
         return Ok(());
     };
     for task in tasks.values().filter(|task| !task[KEY].is_null()) {
-        if blocked(task)? {
-            let checkout = super::path(&task["environment"], "checkout")?;
+        let checkout = super::path(&task["environment"], "checkout")?;
+        if crate::task_env::paths_overlap(path, &checkout) {
             ensure(
-                !crate::task_env::paths_overlap(path, &checkout),
+                !blocked(task)?,
                 "coordinator handoff requires verified continuation; new checkout work is fenced",
             )?;
         }
+    }
+    Ok(())
+}
+
+fn receiver_workspace(state: &J, workspace: &Path) -> Result<()> {
+    let receiver = &state["receiver"]["codex_runtime"];
+    if receiver.is_null() {
+        return Ok(());
+    }
+    let checkout = super::path(receiver, "cwd")?;
+    if crate::task_env::paths_overlap(workspace, &checkout) {
+        unregistered_receiver(state)?;
+    }
+    Ok(())
+}
+
+fn unregistered_receiver(state: &J) -> Result<()> {
+    let receiver = &state["receiver"];
+    if receiver["codex_runtime"].is_null() {
+        return Ok(());
+    }
+    let task = required(receiver, "task")?;
+    if state["tasks"][task][KEY].is_null() {
+        super::mirror::unregistered(&super::path(&receiver["codex_runtime"], "runtime")?)?;
     }
     Ok(())
 }
@@ -42,16 +71,21 @@ pub(crate) fn runtime_blocked(root: &Path, runtime: &J) -> Result<bool> {
         crate::lifecycle::task_owner(&state, &owner.task_id)?.as_ref() == Some(&owner),
         "coordinator handoff runtime Owner changed",
     )?;
-    blocked(&state["tasks"][&owner.task_id])
+    let task = &state["tasks"][&owner.task_id];
+    if task[KEY].is_null() {
+        super::mirror::unregistered(root)?;
+    }
+    blocked(task)
 }
 
 pub(crate) fn admit_control(state: &J, owner: &Owner, action: &str) -> Result<()> {
     validate_queue(state)?;
     let task = &state["tasks"][&owner.task_id];
-    if !blocked(task)? {
+    if matches!(action, "inspect" | "ack") {
         return Ok(());
     }
-    if matches!(action, "inspect" | "ack") {
+    unregistered_receiver(state)?;
+    if !blocked(task)? {
         return Ok(());
     }
     let phase = task[KEY]["records"]

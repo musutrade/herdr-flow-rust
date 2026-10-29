@@ -11,28 +11,36 @@ pub(super) fn reference(
 ) -> Result<J> {
     let origin = origin(root, before)?;
     let observer = origin.join("recovery-observer");
-    let context =
-        util::read_state_json_bounded_if_exists(&observer, "observer.json", RECORD_BYTES)?;
     let runtime = util::read_state_json_bounded(root, "runtime.json", RECORD_BYTES)?;
     if runtime["role_models"]["recovery"].is_null() {
-        ensure(
-            context.is_none(),
-            "unconfigured recovery observer cannot be silently adopted",
-        )?;
+        absent_observer(&observer)?;
         return Ok(J::Null);
     }
     let context =
+        util::read_state_json_bounded_if_exists(&observer, "observer.json", RECORD_BYTES)?;
+    let context =
         context.ok_or_else(|| FlowError::guard("configured original recovery observer missing"))?;
+    context_identity(&context, &observer, &origin, owner)?;
+    let from_target = current_target(&context, from, before)?;
+    Ok(
+        json!({"observer":observer,"origin_coordinator":origin,"phase":"pending","from_target":from_target,
+        "to_target":{"generation":generation,"runtime":to["runtime"],"scope":null,"transaction_id":null}}),
+    )
+}
+
+fn absent_observer(observer: &Path) -> Result<()> {
+    ensure(
+        !observer.try_exists()?,
+        "unconfigured recovery observer cannot be silently adopted",
+    )
+}
+
+fn context_identity(context: &J, observer: &Path, origin: &Path, owner: &Owner) -> Result<()> {
     ensure(
         context["owner"] == json!(owner)
             && context["coordinator"] == json!(origin)
             && context["observer"] == json!(observer),
         "original recovery observer binding changed",
-    )?;
-    let from_target = current_target(&context, from, before)?;
-    Ok(
-        json!({"observer":observer,"origin_coordinator":origin,"phase":"pending","from_target":from_target,
-        "to_target":{"generation":generation,"runtime":to["runtime"],"scope":null,"transaction_id":null}}),
     )
 }
 

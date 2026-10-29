@@ -17,6 +17,8 @@ fn authority(temp: &Path) -> (Owner, J) {
     task["environment"]["queue_id"] = json!(owner.queue_id);
     task["environment"]["phase"] = json!("active");
     state["tasks"] = json!({"parent":task});
+    state["guard_dir"] = fixture::queue()["guard_dir"].clone();
+    state["receiver"] = fixture::queue()["receiver"].clone();
     // A queue-only fixture: no environment is created or adopted. Subsequent
     // commits exercise the real protected save/CAS and lifecycle locks.
     util::atomic_write_json(&owner.queue_root.join("queue.json"), &state).unwrap();
@@ -32,18 +34,19 @@ fn initial(owner: &Owner) -> J {
 #[test]
 fn request_commit_serializes_under_ex_and_cancel_preserves_history() {
     let temp = util::fs::test_tempdir();
-    let (owner, state) = authority(temp.path());
+    let (owner, mut state) = authority(temp.path());
     let permit = exclusive(&owner).unwrap();
-    let next = initial(&owner);
-    commit(&permit, &state, &next).unwrap();
-    let requested = queue::load_queue(&owner.queue_root).unwrap();
-    assert_eq!(requested["tasks"]["parent"]["state_version"], 2);
-    assert!(commit(&permit, &state, &next).is_err());
-    assert_eq!(queue::load_queue(&owner.queue_root).unwrap(), requested);
-    let mut draining = next.clone();
+    // This test starts at an already admitted request to isolate CAS/EX.
+    // First-admission journal checks run in the real environment tests.
+    state["tasks"]["parent"][KEY] = initial(&owner);
+    util::atomic_write_json(&owner.queue_root.join("queue.json"), &state).unwrap();
+    let mut draining = initial(&owner);
     draining["records"][0]["phase"] = json!("draining");
-    commit(&permit, &requested, &draining).unwrap();
+    commit(&permit, &state, &draining).unwrap();
     let before_cancel = queue::load_queue(&owner.queue_root).unwrap();
+    assert_eq!(before_cancel["tasks"]["parent"]["state_version"], 2);
+    assert!(commit(&permit, &state, &draining).is_err());
+    assert_eq!(queue::load_queue(&owner.queue_root).unwrap(), before_cancel);
     let cancelled = cancel(&draining, &json!({"request_id":"request-1"})).unwrap();
     commit(&permit, &before_cancel, &cancelled).unwrap();
     let settled = queue::load_queue(&owner.queue_root).unwrap();
@@ -58,7 +61,7 @@ fn request_commit_serializes_under_ex_and_cancel_preserves_history() {
         settled["tasks"]["parent"][KEY]["records"][0]["phase"],
         "cancelled"
     );
-    assert_eq!(settled["tasks"]["parent"]["state_version"], 4);
+    assert_eq!(settled["tasks"]["parent"]["state_version"], 3);
     assert!(crate::lifecycle::write_permit(&owner).is_err());
     drop(permit);
     crate::lifecycle::write_permit(&owner).unwrap();
