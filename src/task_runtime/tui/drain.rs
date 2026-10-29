@@ -153,6 +153,7 @@ impl Drain {
     }
 
     fn admit_client(&self, method: &str, message: &J) -> Result<bool> {
+        super::super::human::admit_native(&self.root()?, message)?;
         if method == "initialized" && message.get("id").is_none() {
             return Ok(false);
         }
@@ -290,6 +291,7 @@ fn response_completes(method: &str, result: &J) -> bool {
         "thread/read",
         "thread/list",
         "thread/loaded/list",
+        "thread/backgroundTerminals/list",
         "thread/turns/list",
         "thread/items/list",
         "thread/goal/get",

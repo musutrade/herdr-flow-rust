@@ -78,7 +78,8 @@ impl ReceiverAdapter for Adapter {
         )?;
         Ok(json!({"agent_session":{"value":self.state["session"]},
             "agent_status":if status == "idle" {"idle"} else {"working"},
-            "interactive_ready":status == "idle" && result["thread"]["canAcceptDirectInput"] == true}))
+            "interactive_ready":status == "idle" && result["thread"]["canAcceptDirectInput"] == true
+                && crate::task_runtime::human::automatic_input_allowed(&self.root)?}))
     }
     fn prompt(&self, text: &str) -> Result<String> {
         let _permit = crate::lifecycle::runtime_permit(&self.root)?;

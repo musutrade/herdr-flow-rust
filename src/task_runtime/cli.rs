@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|human-status|human-request|human-acquire|human-return|human-abandon|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Human writer transfer requires an explicit request, successful acquisition and recovery verification on return. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -20,14 +20,24 @@ fn run(args: &[String]) -> Result<J> {
         .map(|p| util::read_json(Path::new(p)))
         .transpose()?
         .unwrap_or(json!({}));
-    if let Some(result) = read_only_status(action, &root, task) {
+    if let Some(result) = owned_action(action, &root, task, &spec) {
         return result;
     }
     let mut env = crate::task_env::restore_environment(task)?;
     action_run(action, &mut env, &root, &spec)
 }
+
+fn owned_action(action: &str, root: &Path, task: &str, spec: &J) -> Option<Result<J>> {
+    match action {
+        "human-request" | "human-acquire" | "human-return" | "human-abandon" => {
+            Some(human::action(root, task, action, spec))
+        }
+        _ => read_only_status(action, root, task),
+    }
+}
 fn read_only_status(action: &str, root: &Path, task: &str) -> Option<Result<J>> {
     match action {
+        "human-status" => Some(human::status(root, task)),
         "recovery-status" => Some(bound_status(root, task, recovery::status)),
         "publication-status" => Some(bound_status(root, task, publication::status)),
         _ => None,
@@ -170,6 +180,24 @@ mod tests {
         assert!(report.to_string().contains("isolated Owner"));
         assert!(read_only_status("other", root.path(), "ours").is_none());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        for action in [
+            "human-status",
+            "human-request",
+            "human-acquire",
+            "human-return",
+            "human-abandon",
+        ] {
+            let error = run(&[
+                action.into(),
+                "--task".into(),
+                "ours".into(),
+                "--state-dir".into(),
+                root.path().to_string_lossy().into_owned(),
+            ])
+            .unwrap_err();
+            assert!(error.message.contains("isolated Owner"));
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
         let error = run(&[
             "publication-status".into(),
             "--task".into(),

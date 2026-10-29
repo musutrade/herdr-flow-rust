@@ -3,6 +3,7 @@
 mod git;
 mod process;
 mod storage;
+pub(crate) use process::human_quiescence;
 pub(in crate::task_env) use process::registered_identity;
 
 use super::super::{instance::CreationIntent, ProcessRecord};

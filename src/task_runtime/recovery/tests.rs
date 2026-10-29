@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn human_return_is_one_recovery_incident_and_failed_verification_keeps_the_writer_fence() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    super::super::human::tests::returned_scenario(|root, context, state| {
+        let owner: Owner = serde_json::from_value(context["owner"].clone()).unwrap();
+        let permit = crate::lifecycle::write_permit(&owner).unwrap();
+        cycle(root, context, state, &permit).unwrap();
+        let mut incident = read(root, "incident.json").unwrap().unwrap();
+        assert_eq!(incident["phase"], "pending");
+        assert_eq!(incident["fault"]["kind"], "human_writer_return");
+        let coordinator = PathBuf::from(required(context, "coordinator").unwrap());
+        incident["agent"] = json!({"runtime":coordinator,"session":"recovery-session"});
+        incident["turn"] = json!("review-return");
+        incident["phase"] = json!("submitted");
+        let result = json!({"incident":incident["id"],"disposition":"needs_human","requested_action":"none",
+            "facts":"returned change needs another inspection","actions":"read only",
+            "current_state":"blocked","next_step":"reacquire and correct the change"});
+        let listener = UnixListener::bind(coordinator.join("broker.sock")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: J = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "thread/read");
+            assert_eq!(request["params"]["threadId"], "recovery-session");
+            writeln!(stream, "{}", json!({"result":{"thread":{"id":"recovery-session","turns":[{
+                "id":"review-return","status":"completed","items":[{"type":"agentMessage","text":result.to_string()}]}]}}})).unwrap();
+        });
+        agent::collect(root, context, &mut incident).unwrap();
+        server.join().unwrap();
+        assert_eq!(incident["phase"], "reported", "{incident}");
+        let state = crate::queue::load_queue(&owner.queue_root).unwrap();
+        assert_eq!(state["tasks"]["parent"]["human_writer"]["phase"], "blocked");
+        report::handoff(root, context, &mut incident, &state).unwrap();
+        assert_eq!(incident["phase"], "handled");
+        assert_eq!(incident["handoff"]["phase"], "waiting_human");
+        // No prompt, new recovery session, repeat verification or repair request.
+        cycle(root, context, &state, &permit).unwrap();
+        assert_eq!(read(root, "incident.json").unwrap().unwrap(), incident);
+    });
+}
+
+#[test]
 fn status_distinguishes_document_creation_from_unprotected_or_corrupt_state() {
     let temp = crate::util::fs::test_tempdir();
     let root = temp.path();

@@ -7,6 +7,7 @@ use std::{
     fs,
     io::{self, Read},
     os::unix::fs::MetadataExt,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -279,6 +280,136 @@ fn same_uid_process(pid: i32, path: &Path) -> Result<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Read-only writer check. Reuses the terminal path's fallible PID/marker
+/// observations, but never creates a cleanup plan or sends a signal.
+pub(crate) fn human_quiescence(
+    env: &crate::task_env::TaskEnvironment,
+    checkout: &Path,
+    allowed: &[ProcessRecord],
+) -> Result<()> {
+    let boundary = env
+        .creation
+        .as_ref()
+        .and_then(|c| c.process_boundary.as_ref())
+        .ok_or_else(|| FlowError::guard("human handoff has no process birth boundary"))?;
+    boundary.verify()?;
+    human_registered(env, allowed)?;
+    human_scan(env, checkout, allowed, boundary.start_ticks)
+}
+
+fn human_registered(
+    env: &crate::task_env::TaskEnvironment,
+    allowed: &[ProcessRecord],
+) -> Result<()> {
+    for process in &env.child_processes {
+        let record = ProcessRecord {
+            pid: process.pid,
+            start_time: process.start_time,
+        };
+        human_registered_process(&record, allowed)?;
+        for child in &process.descendants {
+            human_registered_process(child, allowed)?;
+        }
+    }
+    Ok(())
+}
+
+fn human_registered_process(record: &ProcessRecord, allowed: &[ProcessRecord]) -> Result<()> {
+    require(
+        !live(record)? || allowed.contains(record),
+        "registered task writer or descendant is still alive",
+    )
+}
+
+fn human_scan(
+    env: &crate::task_env::TaskEnvironment,
+    checkout: &Path,
+    allowed: &[ProcessRecord],
+    floor: u64,
+) -> Result<()> {
+    for (index, entry) in fs::read_dir("/proc")?.enumerate() {
+        require(index < 262144, "human process scan budget exceeded")?;
+        let entry = entry?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        human_process(env, checkout, allowed, floor, pid, &entry.path())?;
+    }
+    Ok(())
+}
+
+fn human_process(
+    env: &crate::task_env::TaskEnvironment,
+    checkout: &Path,
+    allowed: &[ProcessRecord],
+    floor: u64,
+    pid: i32,
+    path: &Path,
+) -> Result<()> {
+    if pid == std::process::id() as i32 || !same_uid_process(pid, path)? {
+        return Ok(());
+    }
+    let Some((record, _, dead)) = stat(pid)? else {
+        return Ok(());
+    };
+    // Like terminal cleanup, the birth boundary excludes pre-existing host
+    // processes. This is managed writer admission, not a same-user OS lock.
+    if dead || allowed.contains(&record) || record.start_time.is_some_and(|t| t < floor) {
+        return Ok(());
+    }
+    human_candidate(env, checkout, &record, path)
+}
+
+fn human_candidate(
+    env: &crate::task_env::TaskEnvironment,
+    checkout: &Path,
+    record: &ProcessRecord,
+    path: &Path,
+) -> Result<()> {
+    let Some(marked) = stable_marker(record, &env.instance_id)? else {
+        return Ok(());
+    };
+    require(
+        !marked,
+        "task-marked execution is still alive; no human writer transfer",
+    )?;
+    human_cwd(record.pid, checkout, path)
+}
+
+fn human_cwd(pid: i32, checkout: &Path, path: &Path) -> Result<()> {
+    let Some(cwd) = writer_cwd(pid, path)? else {
+        return Ok(());
+    };
+    require(
+        !crate::task_env::paths_overlap(&cwd, checkout),
+        "a process still uses the checkout; inspect its writer before handoff",
+    )?;
+    Ok(())
+}
+
+fn writer_cwd(pid: i32, path: &Path) -> Result<Option<PathBuf>> {
+    match fs::read_link(path.join("cwd")) {
+        Ok(cwd) => Ok(Some(cwd)),
+        Err(error) if observation::missing_proc(&error) && gone(pid)? => Ok(None),
+        Err(error) => Err(FlowError::io(format!(
+            "cannot observe writer cwd for pid {pid}: {error}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod human_tests {
+    use super::*;
+
+    #[test]
+    fn missing_cwd_for_a_live_process_cannot_prove_no_writer() {
+        let directory = util::fs::test_tempdir();
+        let pid = std::process::id() as i32;
+        let error = human_cwd(pid, directory.path(), directory.path()).unwrap_err();
+        assert!(error.message.contains(&format!("writer cwd for pid {pid}")));
+    }
 }
 
 fn stable_marker(record: &ProcessRecord, instance: &str) -> Result<Option<bool>> {

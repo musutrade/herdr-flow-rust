@@ -79,6 +79,7 @@ fn foreign_intent(task: &J, requested: &[String; 4]) -> Result<()> {
 pub(crate) fn publication(s: &J, task: &J, record: &J) -> Result<()> {
     let owner = text(task.get("task"), "publication task", 1000)?;
     let checkout = owned_directory(record, "checkout")?;
+    crate::task_runtime::human::check_workspace(s, &checkout)?;
     let requested = intent(record)?;
     foreign_tasks(s, &owner, |other| {
         foreign_writer(other, &checkout)?;
@@ -111,12 +112,14 @@ fn sending_checkout(task: &J, workspace: &Path) -> Result<()> {
 }
 
 pub(crate) fn writer_reservation(s: &J, owner: &str, workspace: &Path) -> Result<()> {
+    crate::task_runtime::human::check_workspace(s, workspace)?;
     foreign_tasks(s, owner, |other| sending_checkout(other, workspace))
 }
 
 /// Admission only: prepared intents and independent development do not acquire
 /// this slot. The caller persists sending under the same queue lock.
 pub(crate) fn publication_slot(s: &J, task: &J, record: &J) -> Result<()> {
+    crate::task_runtime::human::check_workspace(s, &owned_directory(record, "checkout")?)?;
     let owner = text(task.get("task"), "publication task", 1000)?;
     let requested = intent(record)?;
     foreign_tasks(s, &owner, |other| foreign_slot(other, &requested))

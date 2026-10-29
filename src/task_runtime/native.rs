@@ -48,6 +48,7 @@ pub fn create(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
 }
 fn create_owned(env: &TaskEnvironment, root: &Path, spec: &J) -> Result<J> {
     let runtime = super::verify(env, root)?;
+    super::human::admit_launch(env, &runtime)?;
     let queue_root = PathBuf::from(required(spec, "queue_dir")?);
     validate_queue_control(env, &queue_root)?;
     let _lock = queue::locked(&queue_root, false)?;
@@ -535,7 +536,8 @@ fn verify_snapshot(state: &J, binding: &J) -> Result<()> {
 pub fn dispatch(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
-    super::verify(env, root)?;
+    let runtime = super::verify(env, root)?;
+    super::human::admit_launch(env, &runtime)?;
     let (journal, state) = dispatch_state(root)?;
     super::verify_owner_record(env, &journal)?;
     let mut result = dispatch_record(root, &journal, &state)?;

@@ -11,6 +11,11 @@ impl Fixture {
         let directory = util::fs::test_tempdir();
         let binding = json!({"runtime":directory.path(),"directory":directory.path(),
             "instance":"owner","nonce":"attachment","session":"session"});
+        util::atomic_write_json(
+            &directory.path().join("runtime.json"),
+            &json!({"instance":"owner","cwd":directory.path()}),
+        )
+        .unwrap();
         let drain = Drain::new(binding.clone());
         Self {
             _directory: directory,

@@ -82,6 +82,16 @@ pub(super) fn notice(context: &J, text: &str) {
 }
 
 pub(super) fn handoff(root: &Path, context: &J, incident: &mut J, q: &J) -> Result<()> {
+    if incident["fault"]["kind"] == "human_writer_return"
+        && incident["result"]["disposition"] != "recovered"
+    {
+        // The result is already committed with the checkout fence. Keep the
+        // original coordinator visible without starting a new writable turn.
+        notice(context, "human return blocked; inspect human-status");
+        incident["handoff"] = json!({"phase":"waiting_human","coordinator":context["coordinator"]});
+        incident["phase"] = json!("handled");
+        return save(root, "incident.json", incident);
+    }
     if incident["handoff"]["phase"] == "sending" {
         incident["phase"] = json!("unavailable");
         incident["next_step"] = json!("Recovery result delivery is uncertain; inspect the original coordinator session before retrying.");
