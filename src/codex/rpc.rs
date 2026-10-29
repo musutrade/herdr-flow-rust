@@ -26,6 +26,10 @@ pub use frame::{apply_mask, encode_frame, encode_frame_with_limit, validate_clos
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 pub const MAX_HEADERS: usize = 16 * 1024;
 pub const MAX_JSON_DEPTH: usize = 10;
+// Native MCP catalogs contain recursive JSON schemas (observed depth 26 on
+// Codex 0.165.0). Native server traffic and explicit native function schemas
+// get this separate finite bound; other client fields keep MAX_JSON_DEPTH.
+const MAX_NATIVE_JSON_DEPTH: usize = 64;
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn rpc_error(message: impl Into<String>) -> FlowError {
@@ -45,6 +49,94 @@ pub fn decode_message(payload: &[u8]) -> Result<Value> {
 }
 
 pub fn decode_message_with_limit(payload: &[u8], limit: usize) -> Result<Value> {
+    decode_message_with_bounds(payload, limit, MAX_JSON_DEPTH)
+}
+
+pub(crate) fn decode_native_server_message_with_limit(
+    payload: &[u8],
+    limit: usize,
+) -> Result<Value> {
+    decode_message_with_bounds(payload, limit, MAX_NATIVE_JSON_DEPTH)
+}
+
+/// Native thread/start advertises function schemas, including namespace tools.
+/// Only their inputSchema subtrees may exceed the ordinary client depth bound.
+pub(crate) fn decode_native_client_message_with_limit(
+    payload: &[u8],
+    limit: usize,
+) -> Result<Value> {
+    let message = decode_message_with_bounds(payload, limit, MAX_NATIVE_JSON_DEPTH)?;
+    if message["method"] == "thread/start" {
+        check_native_fields(&message, 0, "params", check_native_params)?;
+    } else {
+        check_depth(&message, 0, MAX_JSON_DEPTH)?;
+    }
+    Ok(message)
+}
+
+fn check_native_params(value: &Value, depth: usize) -> Result<()> {
+    check_native_fields(value, depth, "dynamicTools", check_native_tools)
+}
+
+fn check_native_tools(value: &Value, depth: usize) -> Result<()> {
+    check_native_array(value, depth, check_native_tool)
+}
+
+fn check_native_tool(value: &Value, depth: usize) -> Result<()> {
+    match value["type"].as_str() {
+        Some("function") => check_native_function(value, depth),
+        Some("namespace") => check_native_fields(value, depth, "tools", check_native_namespace),
+        _ => check_depth(value, depth, MAX_JSON_DEPTH),
+    }
+}
+
+fn check_native_namespace(value: &Value, depth: usize) -> Result<()> {
+    check_native_array(value, depth, check_native_function)
+}
+
+fn check_native_function(value: &Value, depth: usize) -> Result<()> {
+    if value["type"] == "function" {
+        check_native_fields(value, depth, "inputSchema", check_native_schema)
+    } else {
+        check_depth(value, depth, MAX_JSON_DEPTH)
+    }
+}
+
+fn check_native_schema(value: &Value, depth: usize) -> Result<()> {
+    check_depth(value, depth, MAX_NATIVE_JSON_DEPTH)
+}
+
+fn check_native_fields(
+    value: &Value,
+    depth: usize,
+    field: &str,
+    check: fn(&Value, usize) -> Result<()>,
+) -> Result<()> {
+    let Some(fields) = value.as_object() else {
+        return check_depth(value, depth, MAX_JSON_DEPTH);
+    };
+    for (key, child) in fields {
+        if key == field {
+            check(child, depth + 1)?;
+        } else {
+            check_depth(child, depth + 1, MAX_JSON_DEPTH)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_native_array(
+    value: &Value,
+    depth: usize,
+    check: fn(&Value, usize) -> Result<()>,
+) -> Result<()> {
+    let Some(items) = value.as_array() else {
+        return check_depth(value, depth, MAX_JSON_DEPTH);
+    };
+    items.iter().try_for_each(|item| check(item, depth + 1))
+}
+
+fn decode_message_with_bounds(payload: &[u8], limit: usize, max_depth: usize) -> Result<Value> {
     if payload.len() > limit {
         return Err(protocol_error("message exceeds size limit"));
     }
@@ -55,23 +147,23 @@ pub fn decode_message_with_limit(payload: &[u8], limit: usize) -> Result<Value> 
     if !message.is_object() {
         return Err(protocol_error("JSON-RPC message must be an object"));
     }
-    check_depth(&message, 0)?;
+    check_depth(&message, 0, max_depth)?;
     Ok(message)
 }
 
-fn check_depth(value: &Value, depth: usize) -> Result<()> {
-    if depth > MAX_JSON_DEPTH {
+fn check_depth(value: &Value, depth: usize, max_depth: usize) -> Result<()> {
+    if depth > max_depth {
         return Err(protocol_error("message exceeds nesting limit"));
     }
     match value {
         Value::Object(map) => {
             for item in map.values() {
-                check_depth(item, depth + 1)?;
+                check_depth(item, depth + 1, max_depth)?;
             }
         }
         Value::Array(items) => {
             for item in items {
-                check_depth(item, depth + 1)?;
+                check_depth(item, depth + 1, max_depth)?;
             }
         }
         _ => {}

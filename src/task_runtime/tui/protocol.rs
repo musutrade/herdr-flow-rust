@@ -2,17 +2,18 @@
 //! the broker remains the sole responder to its dynamic queue tools.
 use super::*;
 use crate::codex::rpc::{
-    decode_message_with_limit, encode_frame, encode_frame_with_limit, FrameDecoder, MAX_HEADERS,
-    MAX_MESSAGE,
+    decode_native_client_message_with_limit, decode_native_server_message_with_limit, encode_frame,
+    encode_frame_with_limit, FrameDecoder, MAX_HEADERS, MAX_MESSAGE,
 };
 use std::{cell::RefCell, rc::Rc};
 
 // Matches Codex remote.rs REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE.
 // Real native catalog responses can exceed the broker's 16 MiB RPC limit.
-const NATIVE_MESSAGE_LIMIT: usize = 128 << 20;
+const NATIVE_MESSAGE_LIMIT: usize = crate::codex::tui::NATIVE_SERVER_MESSAGE_LIMIT;
 
 struct Direction {
     client: bool,
+    limit: usize,
     headers: Option<Vec<u8>>,
     frames: FrameDecoder,
     responses: Vec<u8>,
@@ -21,10 +22,16 @@ struct Direction {
 }
 impl Direction {
     fn new(client: bool) -> Self {
+        let limit = if client {
+            MAX_MESSAGE
+        } else {
+            NATIVE_MESSAGE_LIMIT
+        };
         Self {
             client,
+            limit,
             headers: Some(Vec::new()),
-            frames: FrameDecoder::new(client, NATIVE_MESSAGE_LIMIT),
+            frames: FrameDecoder::new(client, limit),
             responses: Vec::new(),
             selection: J::Null,
             drain: None,
@@ -57,12 +64,7 @@ impl Direction {
     fn forward_frames(&mut self, data: &[u8], session: &J) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         for (opcode, payload) in self.frames.feed(data)? {
-            if opcode == 1
-                && !self.forward_message(
-                    &decode_message_with_limit(&payload, NATIVE_MESSAGE_LIMIT)?,
-                    session,
-                )?
-            {
+            if opcode == 1 && !self.forward_message(&self.decode_message(&payload)?, session)? {
                 continue;
             }
             out.extend(encode_frame_with_limit(
@@ -70,10 +72,18 @@ impl Direction {
                 opcode,
                 self.client,
                 true,
-                NATIVE_MESSAGE_LIMIT,
+                self.limit,
             )?);
         }
         Ok(out)
+    }
+
+    fn decode_message(&self, payload: &[u8]) -> Result<J> {
+        if self.client {
+            decode_native_client_message_with_limit(payload, self.limit)
+        } else {
+            decode_native_server_message_with_limit(payload, self.limit)
+        }
     }
 
     fn forward_message(&mut self, message: &J, session: &J) -> Result<bool> {
@@ -232,7 +242,12 @@ impl Policy {
         let index = usize::from(!client);
         self.deferred[index].extend_from_slice(data);
         ensure(
-            self.deferred[index].len() <= NATIVE_MESSAGE_LIMIT + MAX_HEADERS,
+            self.deferred[index].len()
+                <= if client {
+                    MAX_MESSAGE
+                } else {
+                    NATIVE_MESSAGE_LIMIT
+                } + MAX_HEADERS,
             "native deferred input exceeds bound",
         )?;
         if self.deferred[index].is_empty() {
@@ -413,6 +428,50 @@ mod tests {
     }
 
     #[test]
+    fn recursive_native_catalog_preserves_owned_resume_and_unknown_server_requests() {
+        let catalog = super::super::catalog_fixture::catalog();
+        let payload = serde_json::to_vec(&catalog).unwrap();
+        assert!(decode_message(&payload).is_err());
+        let frame = encode_frame(&payload, 1, false, true).unwrap();
+        let mut server = Direction::new(false);
+        server.headers = None;
+        assert_eq!(server.feed(&frame, &json!("owned")).unwrap(), frame);
+        let unknown = json!({"id":92,"method":"future/request","params":{"schema":catalog}});
+        let frame = encode_frame(&serde_json::to_vec(&unknown).unwrap(), 1, false, true).unwrap();
+        assert_eq!(server.feed(&frame, &json!("owned")).unwrap(), frame);
+        let mut client = Direction::new(true);
+        client.headers = None;
+        let resume = json!({"id":93,"method":"thread/resume","params":{"threadId":"owned"}});
+        let frame = encode_frame(&serde_json::to_vec(&resume).unwrap(), 1, true, true).unwrap();
+        let forwarded = client.feed(&frame, &json!("owned")).unwrap();
+        let decoded = FrameDecoder::new(true, MAX_MESSAGE)
+            .feed(&forwarded)
+            .unwrap();
+        assert_eq!(decode_message(&decoded[0].1).unwrap(), resume);
+        let foreign = json!({"id":94,"method":"thread/resume","params":{"threadId":"foreign"}});
+        let frame = encode_frame(&serde_json::to_vec(&foreign).unwrap(), 1, true, true).unwrap();
+        assert!(client.feed(&frame, &json!("owned")).unwrap().is_empty());
+        assert!(!client.responses.is_empty());
+    }
+
+    #[test]
+    fn native_direction_depth_limits_keep_client_bound() {
+        for (client, depth, accepted) in [
+            (false, 64, true),
+            (false, 65, false),
+            (true, 10, true),
+            (true, 11, false),
+        ] {
+            let payload =
+                serde_json::to_vec(&super::super::catalog_fixture::nested_message(depth)).unwrap();
+            let frame = encode_frame(&payload, 1, client, true).unwrap();
+            let mut direction = Direction::new(client);
+            direction.headers = None;
+            assert_eq!(direction.feed(&frame, &json!("owned")).is_ok(), accepted);
+        }
+    }
+
+    #[test]
     fn native_catalog_can_exceed_broker_limit_but_remains_bounded() {
         let payload =
             serde_json::to_vec(&json!({"id":7,"result":"x".repeat(MAX_MESSAGE)})).unwrap();
@@ -427,6 +486,31 @@ mod tests {
         let mut over_limit = vec![0x81, 127];
         over_limit.extend_from_slice(&((NATIVE_MESSAGE_LIMIT + 1) as u64).to_be_bytes());
         assert!(direction.feed(&over_limit, &json!("owned")).is_err());
+    }
+
+    #[test]
+    fn native_schema_depth_does_not_authorize_task_session_creation() {
+        let request = super::super::catalog_fixture::tool_start(12, true);
+        let frame = encode_frame(&serde_json::to_vec(&request).unwrap(), 1, true, true).unwrap();
+        let mut client = Direction::new(true);
+        client.headers = None;
+        assert!(client.feed(&frame, &json!("owned")).unwrap().is_empty());
+        let reply = FrameDecoder::new(false, MAX_MESSAGE)
+            .feed(&client.responses)
+            .unwrap();
+        assert_eq!(
+            decode_message(&reply[0].1).unwrap()["error"]["code"],
+            -32600
+        );
+    }
+
+    #[test]
+    fn native_client_oversize_request_is_rejected_from_header() {
+        let mut client = Direction::new(true);
+        client.headers = None;
+        let mut frame = vec![0x81, 0xff];
+        frame.extend_from_slice(&((MAX_MESSAGE + 1) as u64).to_be_bytes());
+        assert!(client.feed(&frame, &json!("owned")).is_err());
     }
 
     #[test]
