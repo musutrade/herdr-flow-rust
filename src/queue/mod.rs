@@ -45,6 +45,7 @@ pub fn queue_error(message: impl Into<String>) -> FlowError {
 pub fn load_queue(root: &Path) -> Result<J> {
     let state = util::read_state_json(root, "queue.json")?;
     isolation::validate_layout(root, &state)?;
+    crate::task_runtime::coordinator_handoff::validate_queue(&state)?;
     Ok(state)
 }
 
@@ -66,6 +67,7 @@ pub fn save(root: &Path, s: &mut J) -> Result<()> {
         ));
     }
     isolation::validate_layout(root, s)?;
+    crate::task_runtime::coordinator_handoff::validate_queue(s)?;
     isolation::validate_save(root, s)?;
     util::ensure_private_dir(root, true)?;
     isolation::advance_version(s)?;

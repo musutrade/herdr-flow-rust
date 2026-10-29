@@ -172,6 +172,7 @@ pub fn validate_save(root: &Path, s: &J) -> Result<()> {
     }
     let current = super::load_queue(root)?;
     validate_version(&current, s)?;
+    crate::task_runtime::coordinator_handoff::validate_save(&current, s)?;
     if current["id"] != s["id"] || current["lifecycle"] != s["lifecycle"] {
         return Err(queue_error("isolated queue authority identity changed"));
     }

@@ -45,6 +45,9 @@ pub trait BridgePolicy {
         Vec::new()
     }
     fn connected(&mut self) {}
+    /// Admitted bytes have reached their peer or were discarded with the
+    /// connection. Task policies retain lifecycle admission until this point.
+    fn forwarding_drained(&mut self, _client: bool) {}
     fn explicit_cwd(&self) -> bool {
         true
     }
@@ -2573,7 +2576,13 @@ impl ProxyBridge {
         if endpoint.buffer.is_empty() {
             return Ok(());
         }
-        write_buffer(endpoint, peer)
+        write_buffer(endpoint, peer)?;
+        if endpoint.buffer.is_empty() {
+            if let Some(policy) = &mut self.policy {
+                policy.forwarding_drained(index == 1);
+            }
+        }
+        Ok(())
     }
 
     fn transfer(&mut self, index: usize, read: bool, write: bool) -> Result<()> {
@@ -2592,11 +2601,19 @@ impl ProxyBridge {
     fn disconnect(&mut self, index: usize, error: Option<&str>) -> Result<()> {
         let _ = self.endpoints[0].take();
         let _ = self.endpoints[1].take();
+        self.release_forwarding();
         let _ = index;
         if self.child_running() {
             self.marker_error(error.unwrap_or("native WebSocket connection closed"), true)?;
         }
         Ok(())
+    }
+
+    fn release_forwarding(&mut self) {
+        if let Some(policy) = &mut self.policy {
+            policy.forwarding_drained(true);
+            policy.forwarding_drained(false);
+        }
     }
 
     fn serve(&mut self) -> Result<()> {
@@ -2787,6 +2804,7 @@ impl ProxyBridge {
     pub fn cleanup(&mut self) -> Result<()> {
         self.endpoints[0] = None;
         self.endpoints[1] = None;
+        self.release_forwarding();
         self.listener = None;
         if let Some((device, inode)) = self.proxy_identity.take() {
             match fs::symlink_metadata(&self.proxy_path) {

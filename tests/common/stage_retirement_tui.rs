@@ -289,12 +289,17 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
         peer.upstream_empty(),
         "test must hold admitted bytes in bridge buffer"
     );
-    fixture.pending_tick();
-    assert!(fixture.root().join(MARKER).exists());
-    assert!(drive_owner(&fixture.owner).is_err());
+    let waiting = drive_owner(&fixture.owner).unwrap_err();
+    assert_eq!(waiting.kind, crate::ErrorKind::StateBusy);
+    assert!(
+        !fixture.root().join(MARKER).exists(),
+        "Owner EX must not pass bytes admitted but not yet written to upstream"
+    );
     assert_pane_open(&herdr);
     peer.bridge.test_transfer(1, false, true).unwrap();
     assert_eq!(peer.upstream.request(), request);
+    fixture.pending_tick();
+    assert!(fixture.root().join(MARKER).exists());
     peer.server(&json!({"id":71,"result":{"turn":{"id":"buffered-turn","status":"inProgress"}}}));
     assert_eq!(peer.frontend_message()["id"], 71);
     for (id, method) in [
@@ -345,6 +350,31 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
     );
     assert!(frontend.0.try_wait().unwrap().is_none());
     assert!(fixture.broker.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn discarded_native_buffer_releases_ex_without_erasing_unknown_requests() {
+    let active = Arc::new(AtomicBool::new(false));
+    let cwd = Arc::new(Mutex::new(J::Null));
+    let (service, incoming) = native_service(active, cwd.clone());
+    let fixture = Fixture::new(&service.path);
+    *cwd.lock().unwrap() = json!(fixture.clone_path());
+    let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
+    let frontend = Frontend::new();
+    install_presentation(&fixture, &herdr, &frontend);
+    let mut peer = NativePeer::new(&fixture, incoming);
+    install_presentation(&fixture, &herdr, &frontend);
+    peer.client(
+        &json!({"id":"unknown-buffer","method":"turn/start","params":{"threadId":WORKER}}),
+        false,
+    );
+    assert!(lifecycle::acquire(&fixture.owner, true).is_err());
+    peer.bridge.cleanup().unwrap();
+    let exclusive = lifecycle::acquire(&fixture.owner, true).unwrap();
+    let presentation = read(&fixture.root(), "presentation.json").unwrap();
+    assert!(tui::require_retirement_drained(&presentation).is_err());
+    assert_pane_open(&herdr);
+    drop(exclusive);
 }
 
 #[test]

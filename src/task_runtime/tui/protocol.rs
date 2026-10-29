@@ -215,6 +215,7 @@ pub(super) struct Policy {
     reported: bool,
     drain: Option<Rc<RefCell<drain::Drain>>>,
     deferred: [Vec<u8>; 2],
+    forwarding: [Option<crate::lifecycle::Permit>; 2],
 }
 impl Policy {
     pub fn new(binding: J, runtime: J) -> Self {
@@ -235,6 +236,7 @@ impl Policy {
             reported: false,
             drain,
             deferred: [vec![], vec![]],
+            forwarding: [None, None],
         }
     }
 
@@ -254,7 +256,7 @@ impl Policy {
             return Ok(vec![]);
         }
         let root = self.drain.as_ref().map(|d| d.borrow().root()).transpose()?;
-        let _permit = match root
+        let permit = match root
             .as_deref()
             .map(crate::lifecycle::runtime_observer_permit)
             .transpose()
@@ -263,7 +265,21 @@ impl Policy {
             Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(vec![]),
             Err(error) => return Err(error),
         };
-        self.forward_buffered(client, index)
+        let forwarded = self.forward_buffered(client, index)?;
+        self.retain_forwarding(index, permit.flatten(), &forwarded);
+        Ok(forwarded)
+    }
+
+    fn retain_forwarding(
+        &mut self,
+        index: usize,
+        permit: Option<crate::lifecycle::Permit>,
+        bytes: &[u8],
+    ) {
+        // Parsing is not transmission. Keep admission through the final write.
+        if !bytes.is_empty() && self.forwarding[index].is_none() {
+            self.forwarding[index] = permit;
+        }
     }
 
     fn forward_buffered(&mut self, client: bool, index: usize) -> Result<Vec<u8>> {
@@ -282,6 +298,9 @@ impl Policy {
     }
 }
 impl crate::codex::tui::BridgePolicy for Policy {
+    fn forwarding_drained(&mut self, client: bool) {
+        self.forwarding[usize::from(!client)] = None;
+    }
     fn message_limit(&self) -> usize {
         NATIVE_MESSAGE_LIMIT
     }
@@ -295,6 +314,7 @@ impl crate::codex::tui::BridgePolicy for Policy {
         self.client.drain = self.drain.clone();
         self.server.drain = self.drain.clone();
         self.deferred = [vec![], vec![]];
+        self.forwarding = [None, None];
         if let Some(drain) = &self.drain {
             drain.borrow_mut().connected();
         }

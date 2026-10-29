@@ -19,6 +19,7 @@ impl Fences {
 }
 
 pub(crate) fn check_workspace(state: &J, path: &Path) -> Result<()> {
+    super::super::coordinator_handoff::check_workspace(state, path)?;
     ensure(
         !fences(state).blocks(path),
         "checkout writer is transferred or draining for human handoff; inspect human-status",
@@ -79,6 +80,9 @@ pub(crate) fn admit_launch(env: &TaskEnvironment, spec: &J) -> Result<()> {
 
 pub(crate) fn admit_native(root: &Path, message: &J) -> Result<()> {
     let runtime = read(root, "runtime.json").ok().flatten().unwrap_or(J::Null);
+    if super::super::coordinator_handoff::runtime_blocked(root, &runtime).unwrap_or(true) {
+        ensure(readonly(message, &runtime), "coordinator handoff refuses new native writes; original approvals and observation remain available")?;
+    }
     if !runtime_blocked(root, &runtime).unwrap_or(true) {
         return Ok(());
     }
@@ -87,7 +91,8 @@ pub(crate) fn admit_native(root: &Path, message: &J) -> Result<()> {
 
 pub(crate) fn automatic_input_allowed(root: &Path) -> Result<bool> {
     let runtime = read(root, "runtime.json").ok().flatten().unwrap_or(J::Null);
-    Ok(!runtime_blocked(root, &runtime).unwrap_or(true))
+    Ok(!runtime_blocked(root, &runtime).unwrap_or(true)
+        && !super::super::coordinator_handoff::runtime_blocked(root, &runtime).unwrap_or(true))
 }
 
 fn runtime_blocked(root: &Path, runtime: &J) -> Result<bool> {

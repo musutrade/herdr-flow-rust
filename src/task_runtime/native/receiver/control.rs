@@ -162,6 +162,8 @@ fn response(result: Result<J>) -> J {
 
 fn execute(root: &Path, state: &J, owner: &Owner, request: &J) -> Result<J> {
     let args = validate_request(root, state, request)?;
+    let q = queue::load_queue(&owner.queue_root)?;
+    crate::task_runtime::coordinator_handoff::admit_control(&q, owner, &required(args, "action")?)?;
     if continuation::external(request) {
         return continuation::execute(root, state, owner, args);
     }
