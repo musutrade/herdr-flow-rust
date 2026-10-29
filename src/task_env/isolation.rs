@@ -102,6 +102,25 @@ pub fn restore_for_terminal(owner: &Owner, permit: &Permit) -> Result<TaskEnviro
     Ok(env)
 }
 
+/// A watcher-held active EX lease permits scoped resource retirement. It is
+/// never an in-place upgrade of an operation's shared permit.
+pub(crate) fn restore_active(owner: &Owner, permit: Arc<Permit>) -> Result<TaskEnvironment> {
+    if !permit.exclusive() || permit.owner() != owner {
+        return Err(FlowError::guard(
+            "stage cleanup requires exact exclusive Owner",
+        ));
+    }
+    permit.check(&crate::queue::load_queue(&owner.queue_root)?, false)?;
+    let env = super::instance::allocation::restore(owner, &permit)?;
+    if self::owner(&env).as_ref() != Some(owner) || env.state != super::EnvironmentState::Active {
+        return Err(FlowError::guard("stage cleanup environment changed"));
+    }
+    *env.creation_permit
+        .lock()
+        .map_err(|_| FlowError::guard("environment lease poisoned"))? = Some(permit);
+    Ok(env)
+}
+
 /// Initialize only a fresh runtime/receiver namespace for this active instance.
 pub(crate) fn runtime_namespace(env: &TaskEnvironment, root: &Path) -> Result<()> {
     let Some(owner) = owner(env) else {

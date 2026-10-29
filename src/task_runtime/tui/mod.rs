@@ -2,12 +2,37 @@
 //! and broker keep their existing identities; each attachment owns a new tab.
 use super::*;
 use std::time::{Duration, Instant};
+mod drain;
 #[cfg(test)]
 mod fixture;
 mod herdr;
 mod hooks;
+#[cfg(test)]
+#[path = "../../../tests/common/native_tui_method_fixtures.rs"]
+pub(crate) mod method_fixtures;
 mod persistence;
 mod protocol;
+
+pub(crate) fn require_retirement_drained(record: &J) -> Result<()> {
+    drain::require_drained(record)
+}
+
+#[cfg(test)]
+pub(crate) fn test_bridge(record: &J, runtime: &J) -> Result<crate::codex::tui::ProxyBridge> {
+    Ok(
+        task_bridge(Path::new(&required(record, "directory")?), record, runtime)?.with_policy(
+            Box::new(protocol::Policy::new(record.clone(), runtime.clone())),
+        ),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_drain_handshake(record: &J, runtime: &J) {
+    use crate::codex::tui::BridgePolicy;
+    let mut policy = protocol::Policy::new(record.clone(), runtime.clone());
+    let headers = b"HTTP/1.1 101 OK\r\n\r\n";
+    assert_eq!(policy.forward(false, headers).unwrap(), headers);
+}
 
 pub(super) fn configure(runtime: &mut J) -> Result<()> {
     if runtime.get("native_tui").is_none() {
@@ -135,6 +160,7 @@ fn binding(root: &Path) -> Result<Option<J>> {
 
 pub fn open(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    super::retirement::admit(root)?;
     let runtime = runtime(env, root)?;
     open_bound(root, &runtime)
 }
@@ -487,10 +513,15 @@ pub(in crate::task_runtime) fn recovery_notice(
 
 pub fn close(env: &TaskEnvironment, root: &Path) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    super::retirement::admit(root)?;
     let runtime = runtime(env, root)?;
     let _lock = presentation_lock(root)?;
+    close_bound(root, &runtime)
+}
+
+fn close_bound(root: &Path, runtime: &J) -> Result<J> {
     let record = binding(root)?.ok_or_else(|| FlowError::guard("native TUI was not opened"))?;
-    validate_binding(&runtime, &record)?;
+    validate_binding(runtime, &record)?;
     let mut record = capture_presentation(root, &record)?;
     herdr::close(&mut record)?;
     util::atomic_write_json(&root.join("presentation.json"), &record)?;
@@ -565,23 +596,52 @@ pub(crate) fn obligations(env: &TaskEnvironment) -> Result<Vec<J>> {
     let mut out = Vec::new();
     for (index, entry) in std::fs::read_dir(directory)?.enumerate() {
         ensure(index < 128, "native TUI cleanup scan exceeds bound")?;
-        if let Some(record) = entry_obligation(env, entry)? {
-            out.push(record);
-        }
+        out.extend(entry_obligations(env, entry)?);
     }
     Ok(out)
 }
 
-fn entry_obligation(
+fn entry_obligations(
     env: &TaskEnvironment,
     entry: std::io::Result<std::fs::DirEntry>,
-) -> Result<Option<J>> {
+) -> Result<Vec<J>> {
     let root = entry?.path();
-    let record = binding(&root)?;
-    if let Some(record) = &record {
-        validate_obligation(env, &root, record)?;
+    let frozen = super::retirement::presentation(env, &root)?;
+    let current = binding(&root)?;
+    let mut records = frozen_obligations(env, &root, frozen.as_ref())?;
+    if let Some(current) = current {
+        validate_obligation(env, &root, &current)?;
+        if frozen
+            .as_ref()
+            .is_none_or(|f| !same_attachment(f, &current))
+        {
+            records.push(persistence::capture(&current)?);
+        }
     }
-    record.as_ref().map(persistence::capture).transpose()
+    Ok(records)
+}
+
+fn frozen_obligations(env: &TaskEnvironment, root: &Path, frozen: Option<&J>) -> Result<Vec<J>> {
+    if let Some(frozen) = frozen {
+        validate_obligation(env, root, frozen)?;
+        return Ok(vec![frozen.clone()]);
+    }
+    Ok(vec![])
+}
+
+fn same_attachment(left: &J, right: &J) -> bool {
+    [
+        "instance",
+        "runtime",
+        "session",
+        "herdr_socket",
+        "nonce",
+        "pane",
+        "terminal",
+        "directory",
+    ]
+    .iter()
+    .all(|key| left[key] == right[key])
 }
 
 fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result<()> {
@@ -593,6 +653,63 @@ fn validate_obligation(env: &TaskEnvironment, root: &Path, record: &J) -> Result
 pub(crate) fn reclaim(record: &mut J) -> Result<()> {
     herdr::close(record)?;
     persistence::reclaim(record)
+}
+
+/// Freeze only the exact recorded presentation and frontend identities. This
+/// does not close a pane or make native calls while the queue selects resources.
+pub(crate) fn retirement_snapshot(
+    env: &TaskEnvironment,
+    root: &Path,
+) -> Result<(Option<J>, Vec<crate::task_env::ProcessRecord>)> {
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    super::verify_owner_record(env, &runtime)?;
+    let Some(record) = binding(root)? else {
+        ensure(
+            runtime.get("native_tui").is_none(),
+            "configured presentation has no settled binding",
+        )?;
+        return Ok((None, vec![]));
+    };
+    let processes = retirement_frontends(&runtime, &record)?;
+    Ok((Some(record), processes))
+}
+
+fn retirement_frontends(runtime: &J, record: &J) -> Result<Vec<crate::task_env::ProcessRecord>> {
+    validate_binding(runtime, record)?;
+    ensure(
+        matches!(record["phase"].as_str(), Some("ready" | "closed")),
+        "presentation creation is not settled",
+    )?;
+    let marker =
+        marker(record)?.ok_or_else(|| FlowError::guard("presentation process proof missing"))?;
+    verify_marker(record, runtime, &marker)?;
+    [
+        ("pid", "pid_start_ticks"),
+        ("wrapper_pid", "wrapper_start_ticks"),
+    ]
+    .iter()
+    .map(|(pid, ticks)| retirement_process(&marker[*pid], &marker[*ticks]))
+    .collect()
+}
+
+fn retirement_process(pid: &J, ticks: &J) -> Result<crate::task_env::ProcessRecord> {
+    let pid = pid
+        .as_u64()
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p > 1)
+        .ok_or_else(|| FlowError::guard("frontend PID missing"))?;
+    let start_time = ticks
+        .as_u64()
+        .or_else(|| ticks.as_str().and_then(|s| s.parse().ok()))
+        .ok_or_else(|| FlowError::guard("frontend start identity missing"))?;
+    Ok(crate::task_env::ProcessRecord {
+        pid,
+        start_time: Some(start_time),
+    })
+}
+
+pub(crate) fn capture_retirement(record: &J) -> Result<J> {
+    persistence::capture(record)
 }
 
 /// A native user turn has the same queue-tool ownership checks as a broker

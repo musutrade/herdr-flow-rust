@@ -40,8 +40,28 @@ mod isolated_review;
 mod isolated_runtime;
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 
+enum FixtureTemp {
+    Fresh(TempDir),
+    Retained(PathBuf),
+}
+
+impl FixtureTemp {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fresh(temp) => temp.path(),
+            Self::Retained(path) => path,
+        }
+    }
+
+    fn disable_cleanup(&mut self, disabled: bool) {
+        if let Self::Fresh(temp) = self {
+            temp.disable_cleanup(disabled);
+        }
+    }
+}
+
 struct Fixture {
-    temp: TempDir,
+    temp: FixtureTemp,
     queue: PathBuf,
     commit: String,
     old_root: Option<std::ffi::OsString>,
@@ -94,7 +114,7 @@ impl Fixture {
             "candidate":commit,"control":"running","writer":null,"pending":[],"operations":{}}});
         queue::save(&queue, &mut s).unwrap();
         Self {
-            temp,
+            temp: FixtureTemp::Fresh(temp),
             queue,
             commit,
             old_root,

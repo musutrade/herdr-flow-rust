@@ -1,5 +1,7 @@
 //! Bounded, read-only evidence of actual stage publication and visible roles.
 use super::*;
+#[path = "stage_live_reclamation.rs"]
+mod reclamation;
 
 pub(super) struct StageAudit {
     root: PathBuf,
@@ -14,17 +16,139 @@ pub(super) struct StageAudit {
     processes: BTreeMap<String, J>,
     stage: J,
     terminal: J,
+    early: J,
+    socket: String,
+    store: PathBuf,
 }
 
 fn read(root: &Path, name: &str) -> Option<J> {
     if !root.exists() {
         return None;
     }
-    match util::read_state_json_bounded_if_exists(root, name, 2 * 1024 * 1024) {
+    let value = match util::read_state_json_bounded_if_exists(root, name, 8 * 1024 * 1024) {
         Ok(value) => value,
         Err(_) if !root.exists() => None,
-        Err(e) => panic!("audit read {name}: {e}"),
+        Err(e) => panic!(
+            "audit op=read runtime={} document={}: {e}",
+            root.display(),
+            root.join(name).display()
+        ),
+    };
+    if name == "presentation.json" && value.is_none() && document_present(root, name) {
+        panic!("audit op=read runtime={} document={}: protected presentation has no authority payload at quiescent publication boundary",
+            root.display(), root.join(name).display());
     }
+    value
+}
+
+fn document_present(root: &Path, name: &str) -> bool {
+    match fs::symlink_metadata(root.join(name)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!(
+            "audit op=stat runtime={} document={}: {error}",
+            root.display(),
+            root.join(name).display()
+        ),
+    }
+}
+
+const WORKERS: &[&str] = &[
+    "dev-a1",
+    "stage-review-a1",
+    "final-dev-a1",
+    "final-review-a1",
+];
+
+fn coordinator_identity(coordinator: &Path, owner: &J) {
+    assert_eq!(coordinator.file_name().unwrap(), "coordinator");
+    assert_eq!(
+        read(coordinator, "lifecycle-owner.json"),
+        Some(owner.clone()),
+        "audit op=identity coordinator={} Owner changed",
+        coordinator.display()
+    );
+}
+
+pub(super) fn observation_gate(
+    coordinator: &Path,
+    owner: &J,
+    worker: &Path,
+) -> Option<util::FileLock> {
+    assert_eq!(
+        worker.parent(),
+        coordinator.parent(),
+        "audit worker escaped runtime parent"
+    );
+    if !WORKERS.contains(&worker.file_name()?.to_str()?) {
+        return None;
+    }
+    coordinator_identity(coordinator, owner);
+    let path = coordinator.join("control-service.lock");
+    let probe = || match util::probe_existing_lock(&path) {
+        Ok(probe) => Some(probe),
+        Err(_) if !coordinator.exists() => None,
+        Err(error) => panic!(
+            "audit op=probe runtime={} coordinator={} lock={}: {error}",
+            worker.display(),
+            coordinator.display(),
+            path.display()
+        ),
+    };
+    let mut state = probe()?;
+    if matches!(state, util::LockProbe::Missing) {
+        if !document_present(worker, "presentation.json") {
+            return None;
+        }
+        state = probe()?;
+    }
+    match state {
+        util::LockProbe::Acquired(lock) => Some(lock),
+        util::LockProbe::Busy => None,
+        util::LockProbe::Missing => panic!(
+            "audit op=probe runtime={} document={}: coordinator service gate missing: {}",
+            worker.display(),
+            worker.join("presentation.json").display(),
+            path.display()
+        ),
+    }
+}
+
+fn publication_view(coordinator: &Path, owner: &J, root: &Path) -> Option<J> {
+    let name = root.file_name()?.to_str()?;
+    if root != coordinator && !WORKERS.contains(&name) {
+        return None;
+    }
+    // Only ordinary five-role worker dispatch is serialized by this gate.
+    // The coordinator's initial presentation finished before the audit loop.
+    let _service = if root == coordinator {
+        coordinator_identity(coordinator, owner);
+        None
+    } else {
+        Some(observation_gate(coordinator, owner, root)?)
+    };
+    let view = read(root, "presentation.json")?;
+    if view["phase"] != "ready" {
+        return None;
+    }
+    assert_eq!(
+        read(root, "lifecycle-owner.json"),
+        Some(owner.clone()),
+        "audit op=identity runtime={} Owner changed",
+        root.display()
+    );
+    let runtime = read(root, "runtime.json").unwrap();
+    assert_eq!(runtime["lifecycle_owner"], *owner);
+    assert!(
+        runtime["recovery_role"] != true && runtime["publication_role"] != true,
+        "audit op=scope runtime={}: independent presentation is outside the ordinary five-role audit", root.display()
+    );
+    let state_root = read(root, "receiver.json")
+        .and_then(|receiver| receiver["guard_dir"].as_str().map(PathBuf::from))
+        .unwrap_or_else(|| root.to_path_buf());
+    let state = read(&state_root, "state.json").unwrap();
+    // Returning only owned JSON releases the gate before Herdr/RPC/git work.
+    Some(json!({"presentation":view,"runtime":runtime,"state":state}))
 }
 
 impl StageAudit {
@@ -35,6 +159,7 @@ impl StageAudit {
         model: &J,
         roles: &J,
         parent: &J,
+        upstream: (&str, &Path),
     ) -> Self {
         let q = f.state();
         Self {
@@ -51,6 +176,9 @@ impl StageAudit {
             processes: BTreeMap::new(),
             stage: J::Null,
             terminal: J::Null,
+            early: J::Null,
+            socket: upstream.0.into(),
+            store: upstream.1.into(),
         }
     }
 
@@ -86,6 +214,16 @@ impl StageAudit {
             self.env_file.parent().unwrap(),
             self.env_file.file_name().unwrap().to_str().unwrap(),
         ) {
+            if parent["final_outcome"].is_null() && self.views.contains_key("final-dev-a1") {
+                if self.early.is_null() {
+                    self.early = reclamation::observe(self, f, q, &env, &self.socket, &self.store);
+                } else if self.views.contains_key("final-review-a1")
+                    && self.early["retained_through_final_review"] != true
+                {
+                    reclamation::retained_review(self, &env);
+                    self.early["retained_through_final_review"] = json!(true);
+                }
+            }
             for process in env["child_processes"].as_array().unwrap() {
                 self.processes.insert(
                     format!("{}:{}", process["pid"], process["start_time"]),
@@ -142,17 +280,14 @@ impl StageAudit {
             if self.views.contains_key(name) {
                 continue;
             }
-            let Some(view) = read(&path, "presentation.json") else {
+            let Some(snapshot) =
+                publication_view(&self.root.join("coordinator"), &self.owner, &path)
+            else {
                 continue;
             };
-            if view["phase"] != "ready" {
-                continue;
-            }
-            let runtime = read(&path, "runtime.json").unwrap();
-            let state_root = read(&path, "receiver.json")
-                .and_then(|receiver| receiver["guard_dir"].as_str().map(PathBuf::from))
-                .unwrap_or_else(|| path.clone());
-            let state = read(&state_root, "state.json").unwrap();
+            let view = &snapshot["presentation"];
+            let runtime = &snapshot["runtime"];
+            let state = &snapshot["state"];
             let role = state["role"].as_str().unwrap();
             assert_eq!(
                 runtime["model"], self.models[role],
@@ -184,10 +319,15 @@ impl StageAudit {
     pub(super) fn summary(&self) -> J {
         json!({"scope":"one real answer stage then new development and independent full acceptance; local Git only",
             "owner":self.owner,"views":self.views,"verdicts":self.verdicts,"processes":self.processes,
-            "stage":self.stage,"terminal":self.terminal,"harness_business_mutations_after_start":false})
+            "stage":self.stage,"early_reclamation":self.early,"terminal":self.terminal,"harness_business_mutations_after_start":false})
     }
 
     pub(super) fn verify(&self, f: &Fixture, target: &Path, store: &Path) {
+        assert_eq!(
+            self.early["plan"]["phase"], "complete",
+            "early reclamation evidence missing"
+        );
+        assert_eq!(self.early["retained_through_final_review"], true);
         assert_eq!(self.stage["phase"], "complete");
         assert_eq!(self.terminal["final_outcome"], "success");
         assert!(self.terminal["stage"].is_null());
@@ -315,3 +455,6 @@ fn audit_reads_actual_protected_document_storage() {
     upstream_runtime::finalize_with_retry(&f);
     assert_eq!(queue::finalization::drive(&f.queue).unwrap().pending, 0);
 }
+
+#[path = "stage_live_publication_tests.rs"]
+mod publication_tests;

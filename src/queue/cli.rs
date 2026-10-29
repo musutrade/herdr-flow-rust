@@ -945,6 +945,7 @@ fn watch_tick(root: &Path, args: &Args, factory: &ReceiverFactory) -> Result<boo
     let Some(report) = cleanup_before_tick(root, args.once)? else {
         return Ok(false);
     };
+    crate::task_runtime::retirement::drive(root)?;
     match crate::task_runtime::native::receiver::control::drive(root) {
         Ok(true) => return Ok(false),
         Err(error) if error.kind == ErrorKind::StateBusy && !args.once => return Ok(false),

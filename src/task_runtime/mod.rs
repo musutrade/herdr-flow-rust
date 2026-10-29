@@ -19,6 +19,7 @@ pub use launcher::resolve as codex_namespace_launcher;
 pub mod native;
 pub mod publication;
 pub mod recovery;
+pub(crate) mod retirement;
 pub mod review;
 pub mod status;
 pub mod tui;
@@ -36,17 +37,22 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
 /// credentials. This does not establish support for an upstream login.
 pub fn prepare(env: &TaskEnvironment, assignment: &str) -> Result<PathBuf> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
-    verify_instance_owner(env)?;
-    ensure(
-        env.owns_lock() && env.state == EnvironmentState::Active,
-        "runtime requires an owned active environment",
-    )?;
+    require_preparation(env)?;
     validate_assignment(assignment)?;
     let root = env.temp_root.join("rt").join(assignment);
+    retirement::admit(&root)?;
     crate::task_env::isolation::runtime_namespace(env, &root)?;
     crate::task_env::validate_path(env, &root)?;
     prepare_runtime_dirs(&root)?;
     Ok(root)
+}
+
+fn require_preparation(env: &TaskEnvironment) -> Result<()> {
+    verify_instance_owner(env)?;
+    ensure(
+        env.owns_lock() && env.state == EnvironmentState::Active,
+        "runtime requires an owned active environment",
+    )
 }
 
 fn prepare_runtime_dirs(root: &Path) -> Result<()> {
@@ -70,6 +76,7 @@ fn validate_assignment(assignment: &str) -> Result<()> {
 }
 
 pub fn command(env: &TaskEnvironment, root: &Path, binary: &Path) -> Result<Command> {
+    retirement::admit(root)?;
     verify_instance_owner(env)?;
     ensure(
         env.owns_lock() && env.state == EnvironmentState::Active,
@@ -140,6 +147,7 @@ fn configure_environment(
 /// Real native launches require a supported upstream configuration contract.
 /// A persisted starting marker makes ambiguous launch non-replayable.
 pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child> {
+    retirement::admit(root)?;
     configuration::validate_launch(spec)?;
     let permit = crate::task_env::isolation::mutation_permit(env)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;

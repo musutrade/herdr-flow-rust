@@ -169,6 +169,15 @@ pub fn task_owner(s: &J, name: &str) -> Result<Option<Owner>> {
 
 /// Runtime/receiver journals inherit an explicit owner; no discovery by path/name.
 pub fn runtime_permit(root: &std::path::Path) -> Result<Option<Permit>> {
+    let permit = runtime_observer_permit(root)?;
+    crate::task_runtime::retirement::admit(root)?;
+    Ok(permit)
+}
+
+/// Existing brokers may drain their original connection after stage admission
+/// closes. The parent Owner, runtime identity and finalization gate still apply;
+/// this permit cannot admit a new broker, native turn or presentation.
+pub(crate) fn runtime_observer_permit(root: &std::path::Path) -> Result<Option<Permit>> {
     let marker = root.join("lifecycle-owner.json");
     match fs::symlink_metadata(&marker) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -183,17 +192,23 @@ pub fn runtime_permit(root: &std::path::Path) -> Result<Option<Permit>> {
 }
 
 fn acquire_runtime(root: &std::path::Path, marker: &std::path::Path) -> Result<Option<Permit>> {
+    let owner = runtime_owner(root, marker)?;
+    let permit = write_permit(&owner)?;
+    verify_runtime_record(root, &owner)?;
+    Ok(Some(permit))
+}
+
+fn runtime_owner(root: &std::path::Path, marker: &std::path::Path) -> Result<Owner> {
     if !util::protected::is_runtime_namespace(root)? {
         return Err(FlowError::guard("runtime authority namespace is missing"));
     }
     if !util::protected::is_document(marker)? {
         return Err(FlowError::guard("runtime owner must be isolated authority"));
     }
-    let owner: Owner =
-        serde_json::from_value(util::read_state_json(root, "lifecycle-owner.json")?)?;
-    let permit = write_permit(&owner)?;
-    verify_runtime_record(root, &owner)?;
-    Ok(Some(permit))
+    Ok(serde_json::from_value(util::read_state_json(
+        root,
+        "lifecycle-owner.json",
+    )?)?)
 }
 
 /// Stored submission identity, never reconstructed from a later queue snapshot.

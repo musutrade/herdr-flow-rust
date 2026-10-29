@@ -632,6 +632,97 @@ fn kill_targets(targets: &[ProcessRecord]) -> std::io::Result<()> {
         .try_for_each(|record| signals::signal(record, libc::SIGKILL))
 }
 
+/// Stop exactly one registered broker while retaining every environment root
+/// and process registration. Stage retirement owns the enclosing durable plan.
+/// An original process that exited or whose PID was reused is already stopped;
+/// the pidfd signal path never grants authority over the replacement process.
+pub(crate) fn stop_registered_broker(
+    env: &TaskEnvironment,
+    expected: &ProcessRecord,
+    permit: &crate::lifecycle::Permit,
+) -> Result<()> {
+    let owner = require_broker_retirement_owner(env, permit)?;
+    require_broker_identity(expected)?;
+    require_registered_broker(env, expected)?;
+    require_durable_broker(env, expected, &owner)?;
+    signals::signal(expected, libc::SIGKILL)?;
+    wait_for_targets(std::slice::from_ref(expected))
+}
+
+fn require_broker_retirement_owner(
+    env: &TaskEnvironment,
+    permit: &crate::lifecycle::Permit,
+) -> Result<crate::lifecycle::Owner> {
+    if !env.owns_lock() || env.state != EnvironmentState::Active {
+        return Err(FlowError::guard(
+            "broker retirement requires locked active environment",
+        ));
+    }
+    let owner = super::isolation::owner(env)
+        .ok_or_else(|| FlowError::guard("broker retirement requires lifecycle owner"))?;
+    if !permit.exclusive() || permit.owner() != &owner || owner.task_id != env.task_id {
+        return Err(FlowError::guard(
+            "broker retirement requires exact exclusive owner",
+        ));
+    }
+    let queue = crate::queue::load_queue(&owner.queue_root)?;
+    permit.check(&queue, false)?;
+    Ok(owner)
+}
+
+fn require_broker_identity(expected: &ProcessRecord) -> Result<()> {
+    if expected.pid <= 1
+        || expected.pid == std::process::id() as i32
+        || expected.start_time.is_none()
+    {
+        return Err(FlowError::guard("invalid broker process identity"));
+    }
+    Ok(())
+}
+
+fn require_durable_broker(
+    env: &TaskEnvironment,
+    expected: &ProcessRecord,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    let durable: TaskEnvironment = serde_json::from_value(util::read_json(env.state_file())?)?;
+    verify_broker_environment(env, &durable, owner)?;
+    require_registered_broker(&durable, expected)
+}
+
+fn verify_broker_environment(
+    env: &TaskEnvironment,
+    durable: &TaskEnvironment,
+    owner: &crate::lifecycle::Owner,
+) -> Result<()> {
+    if super::isolation::owner(durable).as_ref() != Some(owner)
+        || durable.task_id != env.task_id
+        || durable.instance_id != env.instance_id
+        || durable.state != EnvironmentState::Active
+        || durable.workspace_root != env.workspace_root
+        || durable.temp_root != env.temp_root
+        || durable.state_file() != env.state_file()
+    {
+        return Err(FlowError::guard("durable broker environment changed"));
+    }
+    Ok(())
+}
+
+fn require_registered_broker(env: &TaskEnvironment, expected: &ProcessRecord) -> Result<()> {
+    let mut matching = env.child_processes.iter().filter(|registered| {
+        registered.pid == expected.pid && registered.start_time == expected.start_time
+    });
+    let registered = matching
+        .next()
+        .ok_or_else(|| FlowError::guard("broker identity has no exact environment registration"))?;
+    if matching.next().is_some() || !registered.descendants.is_empty() {
+        return Err(FlowError::guard(
+            "broker retirement requires unique registration without descendants",
+        ));
+    }
+    Ok(())
+}
+
 fn wait_for_targets(targets: &[ProcessRecord]) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
     loop {
@@ -985,6 +1076,23 @@ fn commit_unlink(
             .unlink_committed = true;
         save_plan(state)?;
     }
+    unlink_verified_directory(parent, name, check, root_path)
+}
+
+/// Final unlink of identity-pinned environment roots. The
+/// descriptor remains the authority even if its directory entry changes.
+fn unlink_verified_directory(
+    parent: &File,
+    name: &OsStr,
+    check: &File,
+    root_path: &Path,
+) -> Result<()> {
+    ensure_entry_identity(
+        parent,
+        name,
+        RootIdentity::of(&check.metadata()?),
+        root_path,
+    )?;
     unlink_at_dir(parent, name)?;
     if check.metadata()?.nlink() != 0 {
         return Err(FlowError::progress(format!(
@@ -1185,6 +1293,244 @@ fn persist_quarantine_rename(
     parent.sync_all()?;
     ensure_entry_identity(parent, OsStr::new(&quarantine.name), expected, &root.path)?;
     Ok(quarantine)
+}
+
+#[cfg(test)]
+mod broker_retirement_tests {
+    use super::*;
+    use crate::lifecycle::{self, Owner, Permit};
+    use serde_json::json;
+    use std::io::BufRead;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Child, Command, Stdio};
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        _root: super::super::TestEnvRootGuard,
+        env: TaskEnvironment,
+        owner: Owner,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let root = super::super::test_env_root(&temp.path().join("control"));
+            let mut env = super::super::create_environment(
+                "broker-retirement",
+                &temp.path().join("workspace"),
+                vec![],
+                &temp.path().join("scratch"),
+            )
+            .unwrap();
+            let queue_root = temp.path().join("queue");
+            let mut queue = crate::queue::init_isolated(&queue_root, None, 30).unwrap();
+            let owner = Owner {
+                queue_root: queue_root.clone(),
+                queue_id: queue["id"].as_str().unwrap().to_owned(),
+                task_id: env.task_id.clone(),
+                epoch: 1,
+                instance_id: env.instance_id.clone(),
+            };
+            let mut prospective = owner.clone();
+            prospective.instance_id.clear();
+            drop(lifecycle::acquire(&prospective, true).unwrap());
+            queue["tasks"] = json!({&env.task_id: {
+                "task":env.task_id,"epoch":1,"environment": {
+                    "queue_id":owner.queue_id,"task_id":env.task_id,"epoch":1,
+                    "instance_id":env.instance_id,"phase":"active"
+                }
+            }});
+            // Synthetic authority fixtures exercise the broker permission
+            // boundary without materializing unrelated Git/agent resources.
+            util::atomic_write_json(&queue_root.join("queue.json"), &queue).unwrap();
+            env.creation = Some(serde_json::from_value(json!({
+                "binding":{"queue_id":owner.queue_id,"task_id":env.task_id,"epoch":1},
+                "lifecycle_queue":queue_root,"phase":"ready",
+                "repository":env.workspace_root,"repository_identity":env.workspace_identity,
+                "common_dir":env.workspace_root,"common_identity":env.workspace_identity,
+                "commit":"fixture","checkout":env.workspace_root,
+                "checkout_identity":env.workspace_identity,"git_identity":null,"git_admin_before":null
+            })).unwrap());
+            env.state = EnvironmentState::Active;
+            let fixture = Self {
+                _temp: temp,
+                _root: root,
+                env,
+                owner,
+            };
+            fixture.save();
+            fixture
+        }
+
+        fn save(&self) {
+            util::atomic_write_json(
+                self.env.state_file(),
+                &serde_json::to_value(&self.env).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn register(&mut self, record: &ProcessRecord) {
+            self.env.child_processes.push(RegisteredProcess {
+                pid: record.pid,
+                pgid: record.pid,
+                start_time: record.start_time,
+                descendants: vec![],
+                direct_children: vec![],
+            });
+            self.save();
+        }
+
+        fn permit(&self) -> Permit {
+            lifecycle::acquire(&self.owner, true).unwrap()
+        }
+    }
+
+    struct Broker {
+        parent: Child,
+        record: ProcessRecord,
+    }
+
+    impl Broker {
+        fn new(instance: &str) -> Self {
+            let mut parent = Command::new("sh")
+                .args([
+                    "-c",
+                    "sleep 30 & printf '%s\\n' \"$!\"; IFS= read -r finish",
+                ])
+                .env(super::super::env::MARKER_ENV, instance)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(parent.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let pid = line.trim().parse().unwrap();
+            let record = ProcessRecord {
+                pid,
+                start_time: super::super::env::process_start_time(pid),
+            };
+            assert!(record.start_time.is_some());
+            Self { parent, record }
+        }
+    }
+
+    impl Drop for Broker {
+        fn drop(&mut self) {
+            let _ = signals::signal(&self.record, libc::SIGKILL);
+            let _ = self.parent.kill();
+            let _ = self.parent.wait();
+        }
+    }
+
+    #[test]
+    fn broker_stop_preserves_parent_unrelated_process_and_all_environment_resources() {
+        let mut fixture = Fixture::new();
+        let mut broker = Broker::new(&fixture.env.instance_id);
+        let mut unrelated = Broker::new(&fixture.env.instance_id);
+        fixture.register(&broker.record);
+        fixture.register(&unrelated.record);
+        fixture.env.child_processes[0]
+            .direct_children
+            .push(unrelated.record.clone());
+        fixture.save();
+        let original = std::fs::read(fixture.env.state_file()).unwrap();
+        let permit = fixture.permit();
+        stop_registered_broker(&fixture.env, &broker.record, &permit).unwrap();
+        stop_registered_broker(&fixture.env, &broker.record, &permit).unwrap();
+        assert!(!observation::is_alive(&broker.record).unwrap());
+        assert!(broker.parent.try_wait().unwrap().is_none());
+        assert!(unrelated.parent.try_wait().unwrap().is_none());
+        assert!(observation::is_alive(&unrelated.record).unwrap());
+        assert_eq!(std::fs::read(fixture.env.state_file()).unwrap(), original);
+        assert!(fixture.env.workspace_root.is_dir());
+        assert!(fixture.env.temp_root.is_dir());
+        assert!(fixture.env.owns_lock());
+    }
+
+    #[test]
+    fn broker_stop_requires_exact_registration_and_never_signals_reused_pid_identity() {
+        let mut fixture = Fixture::new();
+        let broker = Broker::new(&fixture.env.instance_id);
+        fixture.register(&broker.record);
+        let permit = fixture.permit();
+        let stale = ProcessRecord {
+            start_time: Some(broker.record.start_time.unwrap().wrapping_add(1)),
+            ..broker.record.clone()
+        };
+        assert!(stop_registered_broker(&fixture.env, &stale, &permit).is_err());
+        assert!(observation::is_alive(&broker.record).unwrap());
+        // A persisted original identity that no longer matches the numeric PID
+        // counts as exited, while the replacement remains alive.
+        fixture.env.child_processes[0].start_time = stale.start_time;
+        fixture.save();
+        stop_registered_broker(&fixture.env, &stale, &permit).unwrap();
+        assert!(observation::is_alive(&broker.record).unwrap());
+    }
+
+    #[test]
+    fn broker_stop_rejects_descendants_and_unpersisted_registration() {
+        let mut fixture = Fixture::new();
+        let broker = Broker::new(&fixture.env.instance_id);
+        let unrelated = Broker::new(&fixture.env.instance_id);
+        fixture.register(&broker.record);
+        let permit = fixture.permit();
+        fixture.env.child_processes[0]
+            .descendants
+            .push(unrelated.record.clone());
+        fixture.save();
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        fixture.env.child_processes[0].descendants.clear();
+        // The durable descendants record still denies authority.
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        fixture.env.child_processes.clear();
+        fixture.save();
+        fixture.register(&broker.record);
+        let mut saved = serde_json::to_value(&fixture.env).unwrap();
+        saved["child_processes"] = json!([]);
+        util::atomic_write_json(fixture.env.state_file(), &saved).unwrap();
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        assert!(observation::is_alive(&broker.record).unwrap());
+        assert!(observation::is_alive(&unrelated.record).unwrap());
+    }
+
+    #[test]
+    fn broker_stop_requires_current_owner_ex_active_state_and_environment_lock() {
+        let mut fixture = Fixture::new();
+        let broker = Broker::new(&fixture.env.instance_id);
+        fixture.register(&broker.record);
+        {
+            let shared = lifecycle::acquire(&fixture.owner, false).unwrap();
+            assert!(stop_registered_broker(&fixture.env, &broker.record, &shared).is_err());
+        }
+        {
+            let mut stale_owner = fixture.owner.clone();
+            stale_owner.epoch += 1;
+            let stale = lifecycle::acquire(&stale_owner, true).unwrap();
+            assert!(stop_registered_broker(&fixture.env, &broker.record, &stale).is_err());
+        }
+        let permit = fixture.permit();
+        let mut queue = crate::queue::load_queue(&fixture.owner.queue_root).unwrap();
+        queue["tasks"][&fixture.owner.task_id]["final_outcome"] = json!("success");
+        util::atomic_write_json(&fixture.owner.queue_root.join("queue.json"), &queue).unwrap();
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        queue["tasks"][&fixture.owner.task_id]["final_outcome"] = serde_json::Value::Null;
+        util::atomic_write_json(&fixture.owner.queue_root.join("queue.json"), &queue).unwrap();
+        fixture.env.state = EnvironmentState::Destroying;
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        fixture.save();
+        fixture.env.state = EnvironmentState::Active;
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        fixture.save();
+        fixture.env.release_ownership();
+        assert!(stop_registered_broker(&fixture.env, &broker.record, &permit).is_err());
+        assert!(observation::is_alive(&broker.record).unwrap());
+    }
 }
 
 #[cfg(test)]

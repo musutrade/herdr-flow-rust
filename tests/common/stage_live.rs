@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 #[path = "stage_live_audit.rs"]
 mod audit;
+#[path = "stage_live_resume.rs"]
+mod resume;
 
 const GOAL: &str = "Create tracked answer.txt containing exactly 42 followed by one newline, and tracked explanation.txt containing exactly 6 * 7 = 42 followed by one newline.";
 
@@ -77,7 +79,7 @@ fn instruction(f: &Fixture, target: &Path) -> String {
 1. Inspect the agreement and existing authority. Start stage with lineage spec {{"kind":"stage","task":"task","state_version":CURRENT_PARENT_VERSION,"id":"answer-stage","scope":"Deliver the independently reviewed answer file; explanation remains for final acceptance","criteria":["answer"]}}.
 2. Register development activity dev with input {seed}, session_epoch 1 and result_wait {{"id":"dev","kind":"signal","task":"dev","epoch":1,"assignment":"dev-a1","owner":"developer","reason":"stage answer development","condition":"report","timeout_seconds":600}}. Run dev to create and commit answer.txt containing exactly 42 plus newline. For this first stage it MUST leave explanation.txt absent. Developer may use git -c user.name=Acceptance -c user.email=acceptance@example.test commit, per command only. No network, account or global configuration changes. You must not edit the artifact yourself.
 3. ACK the result. Apply dev with output from runtime_results, acceptance {{"answer":"evidence from the collected completed development turn"}}, release_evidence identifying that turn, and next_action {{"kind":"complete"}}; these are top-level apply fields. Select its full SHA with lineage kind candidate, task task, CURRENT_PARENT_VERSION, candidate and reason. Register independent acceptance activity stage-review, role acceptance, input that SHA, session_epoch 1, result_wait {{"id":"stage-review","kind":"signal","task":"stage-review","epoch":1,"assignment":"stage-review-a1","owner":"reviewer","reason":"independent answer-stage review","condition":"report","timeout_seconds":600}}. Run it to inspect the actual fixed tracked bytes against its supplied stage requirement and write .herdr-verdict.json using acceptance_protocol. It must use the exact supplied original source and criterion answer, make no tracked edits or commits, and reach its own conclusion. ACK and apply its immutable verdict ID; passed uses next_action {{"kind":"delivery","owner":"coordinator","reason":"stage independently passed","condition":"existing local delivery authorization"}}. Never supply independent reviewer evidence yourself.
-4. Deliver the accepted stage SHA with spec {{"adapter":"git","target":{target},"ref":"refs/heads/accepted","expected":{seed},"authorization":"deliver-local","state_version":CURRENT_PARENT_VERSION}}. Require phase confirmed. Do NOT finalize this stage. Use stage-complete with spec {{"delivery":"EXACT_CONFIRMED_INTENT_ID"}} from the actual reply or inspected parent delivery. Inspect: the same parent should be running, with no current stage, candidate or approval, and stage_delivery.phase complete. Save stage_delivery.delivery.artifact.id as STAGE_SHA. Never substitute stage completion for the final requirement.
+4. Deliver the accepted stage SHA with spec {{"adapter":"git","target":{target},"ref":"refs/heads/accepted","expected":{seed},"authorization":"deliver-local","state_version":CURRENT_PARENT_VERSION}}. Require phase confirmed. Do NOT finalize this stage. Use stage-complete with spec {{"delivery":"EXACT_CONFIRMED_INTENT_ID"}} from the actual reply or inspected parent delivery. Inspect: the same parent should be running, with no current stage, candidate or approval, and stage_delivery.phase complete. If resource_cleanup.phase is pending, STOP and await the original host stage cleanup notice. ACK that exact host notice WITHOUT task-apply, then inspect the parent and require resource_cleanup.phase complete before any next lineage activity or run. Never poll or replay stage delivery/cleanup. A retained or unknown cleanup is a blocker to report, not permission to continue. Save stage_delivery.delivery.artifact.id as STAGE_SHA. Never substitute stage completion for the final requirement.
 5. Register NEW development activity final-dev, role development, input STAGE_SHA, session_epoch 1, result_wait {{"id":"final-dev","kind":"signal","task":"final-dev","epoch":1,"assignment":"final-dev-a1","owner":"developer","reason":"complete remaining agreed requirement","condition":"report","timeout_seconds":600}}. Run it to retain answer.txt exactly 42 plus newline, add explanation.txt exactly 6 * 7 = 42 plus newline, and commit the result. ACK/apply its actual output with acceptance evidence for BOTH answer and explanation, release_evidence and next_action complete. Select the new candidate.
 6. Register NEW independent acceptance activity final-review with role acceptance, the new SHA, session_epoch 1, result_wait {{"id":"final-review","kind":"signal","task":"final-review","epoch":1,"assignment":"final-review-a1","owner":"reviewer","reason":"independent overall acceptance","condition":"report","timeout_seconds":600}}. Run it to inspect BOTH exact tracked files against the full supplied requirement, writing its own report with both criterion IDs and exact original sources. No tracked edits or commits. ACK/apply its own immutable passed verdict with the same delivery next_action shape. Do not reuse the stage approval.
 7. Deliver using adapter git, the SAME predeclared target and refs/heads/accepted, expected STAGE_SHA, authorization deliver-local and CURRENT_PARENT_VERSION. Only after confirmed non-stage delivery, inspect again and finalize task task with outcome success, current state_version and concrete reason. The existing supervisor will reclaim the task. On a real defect report it honestly through normal repair/re-review rules; on unknown external outcomes stop and report without replay. Never invent authorization, alter the agreement, finalize early or claim a failed/unknown delivery succeeded."#,
@@ -115,7 +117,11 @@ fn upstream_empty(socket: &str, cwds: &[PathBuf]) {
 #[test]
 #[ignore = "explicit existing model service and Herdr; real stage delivery, fresh overall acceptance and cleanup"]
 fn real_stage_delivery_continues_same_parent_and_reclaims_visible_roles() {
-    let socket = std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing service required");
+    // Resolve and validate before allocating any task-owned state.
+    let endpoint = resume::socket(Path::new(
+        &std::env::var("HERDR_UPSTREAM_SOCKET").expect("existing service required"),
+    ));
+    let socket = endpoint["path"].as_str().unwrap().to_owned();
     let model: J = serde_json::from_str(&std::env::var("HERDR_UPSTREAM_MODEL").unwrap()).unwrap();
     let roles: J =
         serde_json::from_str(&std::env::var("HERDR_UPSTREAM_ROLE_MODELS").unwrap()).unwrap();
@@ -125,21 +131,48 @@ fn real_stage_delivery_continues_same_parent_and_reclaims_visible_roles() {
     let config_before = fs::read(&config).unwrap();
     let parent = std::env::var("HERDR_PANE_ID").unwrap();
     let parent_before = herdr(&["agent", "get", &parent]);
-    let mut f = Fixture::new();
+    let resume_spec: Option<J> = std::env::var_os("HERDR_STAGE_RESUME").map(|value| {
+        serde_json::from_str(value.to_str().expect("resume contract must be UTF-8")).unwrap()
+    });
+    let mut f = match &resume_spec {
+        Some(spec) => resume::attach(Path::new(spec["root"].as_str().unwrap())),
+        None => Fixture::new(),
+    };
     f.temp.disable_cleanup(true); // Failed/unknown tasks retain their original state.
     eprintln!("stage live root: {}", f.temp.path().display());
     let started_at = Instant::now();
     let target = f.temp.path().join("output.git");
-    let mut env = setup(&f, &target);
+    let current = json!({"model":model,"role_models":roles,"parent":parent_before,"binary":binary,
+        "socket_identity":endpoint,"config_sha256":util::pyjson::sha256_hex(&config_before)});
+    let resumed = resume_spec
+        .as_ref()
+        .map(|spec| resume::validate(&f, spec, &current));
+    let mut env = if resumed.is_some() {
+        task_env::restore_environment("task").unwrap()
+    } else {
+        setup(&f, &target)
+    };
     let workspace = env.workspace_root.clone();
     let scratch = env.temp_root.clone();
     let coord = task_runtime::prepare(&env, "coordinator").unwrap();
-    let mut evidence = audit::StageAudit::new(&f, &env, &target, &model, &roles, &parent_before);
-    util::atomic_write_json(&f.temp.path().join("stage-baseline.json"), &json!({
+    let mut evidence = audit::StageAudit::new(
+        &f,
+        &env,
+        &target,
+        &model,
+        &roles,
+        &parent_before,
+        (&socket, &store),
+    );
+    if let Some(receipt) = resumed {
+        util::atomic_write_json(&f.temp.path().join("stage-resume.json"), &receipt).unwrap();
+    } else {
+        util::atomic_write_json(&f.temp.path().join("stage-baseline.json"), &json!({
         "owner":lifecycle::task_owner(&f.state(),"task").unwrap(),"agreement":f.state()["tasks"]["task"]["requirements"],
         "model":model,"role_models":roles,"parent":parent_before,
         "config_sha256":util::pyjson::sha256_hex(&config_before),"binary":binary,"socket":socket
     })).unwrap();
+    }
     let mut broker = task_runtime::launch(&mut env, &coord, &json!({"adapter":"codex","configuration":"upstream",
         "socket":socket,"cwd":workspace.join("checkout"),"model":model,"role_models":roles,"approval_policy":"on-request",
         "driver_binary":env!("CARGO_BIN_EXE_herdr-flow"),"native_tui":{"binary":binary,"parent_pane":parent,"session_store":store}})).unwrap();

@@ -30,7 +30,7 @@ pub fn serve(root: &Path) -> Result<()> {
     result
 }
 fn record_failure(root: &Path, error: &FlowError) -> Result<()> {
-    let _permit = crate::lifecycle::runtime_permit(root)?;
+    let _permit = crate::lifecycle::runtime_observer_permit(root)?;
     util::atomic_write_json(
         &root.join("broker-status.json"),
         &json!({"phase":"failed", "error_kind":error.kind.type_name(), "message":error.to_string()}),
@@ -81,13 +81,19 @@ fn handle(
     };
     let _permit = request_permit(root)?;
     owner.verify()?;
+    if let Err(error) = admit_request(root, &request) {
+        // Rejection belongs to this unsent frame, not to the lifetime of the
+        // connection still observing native work from the existing frontend.
+        let _ = respond(&mut stream, Err(error), None);
+        return Ok(());
+    }
     // Keep the action permit in this outer scope through execution and response.
     reply(root, &mut stream, connection, &request)
 }
 
 fn request_permit(root: &Path) -> Result<Option<crate::lifecycle::Permit>> {
     loop {
-        match crate::lifecycle::runtime_permit(root) {
+        match crate::lifecycle::runtime_observer_permit(root) {
             Err(error) if error.kind == crate::ErrorKind::StateBusy => {
                 // The complete frame has not reached execute or upstream yet.
                 // Keep that same frame; hold no queue/action permit while waiting.
@@ -95,6 +101,18 @@ fn request_permit(root: &Path) -> Result<Option<crate::lifecycle::Permit>> {
             }
             result => return result,
         }
+    }
+}
+
+fn admit_request(root: &Path, request: &J) -> Result<()> {
+    if request["method"] == "tool/respond" {
+        // tools::respond verifies the already-recorded completed result and
+        // requires the original connection; it cannot create/rejoin a thread.
+        Ok(())
+    } else {
+        // Even metadata reads can automatically resume a subscription. The
+        // existing observe loop needs no new native RPC to drain its events.
+        super::retirement::admit(root)
     }
 }
 
@@ -206,7 +224,7 @@ fn record_native(
     Ok(())
 }
 fn observe(root: &Path, client: &mut Client) -> Result<()> {
-    let _permit = match crate::lifecycle::runtime_permit(root) {
+    let _permit = match crate::lifecycle::runtime_observer_permit(root) {
         Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(()),
         result => result?,
     };
@@ -362,4 +380,4 @@ pub(super) fn turn(root: &Path, state: &J, id: &J) -> Result<Option<J>> {
 
 #[cfg(test)]
 #[path = "../../tests/common/task_runtime_broker.rs"]
-mod tests;
+pub(super) mod tests;

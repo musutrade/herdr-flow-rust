@@ -10,6 +10,7 @@
 mod boundary;
 mod cleanup;
 pub(crate) use cleanup::observation::is_alive as observe_process_alive;
+pub(crate) use cleanup::stop_registered_broker;
 pub use cleanup::terminal;
 pub mod cli;
 pub(crate) mod discovery;
