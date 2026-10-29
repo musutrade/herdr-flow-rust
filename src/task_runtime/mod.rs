@@ -13,6 +13,7 @@ use std::{
 pub mod broker;
 pub mod cli;
 pub mod configuration;
+pub(crate) mod coordinator_handoff;
 pub mod human;
 mod launcher;
 mod role_models;

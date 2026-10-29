@@ -31,6 +31,12 @@ struct NativePeer {
 
 impl NativePeer {
     fn new(fixture: &Fixture, incoming: mpsc::Receiver<rpc_server::Peer>) -> Self {
+        let mut peer = Self::before_handshake(fixture, incoming);
+        peer.handshake();
+        peer
+    }
+
+    fn before_handshake(fixture: &Fixture, incoming: mpsc::Receiver<rpc_server::Peer>) -> Self {
         let record = read(&fixture.root(), "presentation.json").unwrap();
         let runtime = read(&fixture.root(), "runtime.json").unwrap();
         let mut bridge = tui::test_bridge(&record, &runtime).unwrap();
@@ -41,14 +47,12 @@ impl NativePeer {
             .unwrap();
         bridge.accept().unwrap();
         let upstream = incoming.recv_timeout(Duration::from_secs(2)).unwrap();
-        let mut peer = Self {
+        Self {
             bridge,
             frontend,
             upstream,
             client_frames: FrameDecoder::new(false, MAX_MESSAGE),
-        };
-        peer.handshake();
-        peer
+        }
     }
 
     fn handshake(&mut self) {
@@ -289,12 +293,17 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
         peer.upstream_empty(),
         "test must hold admitted bytes in bridge buffer"
     );
-    fixture.pending_tick();
-    assert!(fixture.root().join(MARKER).exists());
-    assert!(drive_owner(&fixture.owner).is_err());
+    let waiting = drive_owner(&fixture.owner).unwrap_err();
+    assert_eq!(waiting.kind, crate::ErrorKind::StateBusy);
+    assert!(
+        !fixture.root().join(MARKER).exists(),
+        "Owner EX must not pass bytes admitted but not yet written to upstream"
+    );
     assert_pane_open(&herdr);
     peer.bridge.test_transfer(1, false, true).unwrap();
     assert_eq!(peer.upstream.request(), request);
+    fixture.pending_tick();
+    assert!(fixture.root().join(MARKER).exists());
     peer.server(&json!({"id":71,"result":{"turn":{"id":"buffered-turn","status":"inProgress"}}}));
     assert_eq!(peer.frontend_message()["id"], 71);
     for (id, method) in [
@@ -348,6 +357,31 @@ fn admitted_buffered_turn_and_human_replies_drain_on_the_original_socket() {
 }
 
 #[test]
+fn discarded_native_buffer_releases_ex_without_erasing_unknown_requests() {
+    let active = Arc::new(AtomicBool::new(false));
+    let cwd = Arc::new(Mutex::new(J::Null));
+    let (service, incoming) = native_service(active, cwd.clone());
+    let fixture = Fixture::new(&service.path);
+    *cwd.lock().unwrap() = json!(fixture.clone_path());
+    let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
+    let frontend = Frontend::new();
+    install_presentation(&fixture, &herdr, &frontend);
+    let mut peer = NativePeer::new(&fixture, incoming);
+    install_presentation(&fixture, &herdr, &frontend);
+    peer.client(
+        &json!({"id":"unknown-buffer","method":"turn/start","params":{"threadId":WORKER}}),
+        false,
+    );
+    assert!(lifecycle::acquire(&fixture.owner, true).is_err());
+    peer.bridge.cleanup().unwrap();
+    let exclusive = lifecycle::acquire(&fixture.owner, true).unwrap();
+    let presentation = read(&fixture.root(), "presentation.json").unwrap();
+    assert!(tui::require_retirement_drained(&presentation).is_err());
+    assert_pane_open(&herdr);
+    drop(exclusive);
+}
+
+#[test]
 fn async_acknowledgement_keeps_queued_native_work_and_original_pane() {
     for method in [
         "thread/compact/start",
@@ -396,3 +430,80 @@ fn async_acknowledgement_keeps_queued_native_work_and_original_pane() {
 
 #[path = "stage_retirement_native_methods.rs"]
 mod method_completion;
+
+#[test]
+fn split_native_handshake_holds_ex_until_parser_and_output_are_empty() {
+    let active = Arc::new(AtomicBool::new(false));
+    let cwd = Arc::new(Mutex::new(J::Null));
+    let (service, incoming) = native_service(active, cwd.clone());
+    let fixture = Fixture::new(&service.path);
+    *cwd.lock().unwrap() = json!(fixture.clone_path());
+    let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
+    let frontend = Frontend::new();
+    install_presentation(&fixture, &herdr, &frontend);
+    let mut peer = NativePeer::before_handshake(&fixture, incoming);
+    peer.frontend
+        .write_all(b"GET / HTTP/1.1\r\nHost: local")
+        .unwrap();
+    peer.bridge.test_transfer(0, true, false).unwrap();
+    peer.bridge.test_transfer(1, false, true).unwrap();
+    assert!(peer.upstream_empty());
+    assert_eq!(
+        lifecycle::acquire(&fixture.owner, true).unwrap_err().kind,
+        crate::ErrorKind::StateBusy
+    );
+    // Explicit connection disposal releases the partial parser too, without
+    // resending it on a different connection or manufacturing an RPC result.
+    peer.bridge.cleanup().unwrap();
+    lifecycle::acquire(&fixture.owner, true).unwrap();
+    assert_pane_open(&herdr);
+}
+
+#[test]
+fn split_and_fragmented_native_frames_survive_an_older_output_flush() {
+    for mode in ["split", "fragmented", "empty_fragment"] {
+        let active = Arc::new(AtomicBool::new(false));
+        let cwd = Arc::new(Mutex::new(J::Null));
+        let (service, incoming) = native_service(active, cwd.clone());
+        let fixture = Fixture::new(&service.path);
+        *cwd.lock().unwrap() = json!(fixture.clone_path());
+        let herdr = PresentationServer::new(&fixture.temp.path().join("herdr.sock"), None);
+        let frontend = Frontend::new();
+        install_presentation(&fixture, &herdr, &frontend);
+        let mut peer = NativePeer::new(&fixture, incoming);
+        let older = json!({"id":"older","method":"thread/read","params":{"threadId":WORKER}});
+        peer.client(&older, false);
+        let request = json!({"id":"partial","method":"turn/start","params":{"threadId":WORKER}});
+        let payload = serde_json::to_vec(&request).unwrap();
+        let (first, last) = if mode == "split" {
+            let frame = encode_frame(&payload, 1, true, true).unwrap();
+            (frame[..3].to_vec(), frame[3..].to_vec())
+        } else {
+            let split = if mode == "empty_fragment" {
+                0
+            } else {
+                payload.len() / 2
+            };
+            (
+                encode_frame(&payload[..split], 1, true, false).unwrap(),
+                encode_frame(&payload[split..], 0, true, true).unwrap(),
+            )
+        };
+        peer.frontend.write_all(&first).unwrap();
+        peer.bridge.test_transfer(0, true, false).unwrap();
+        peer.bridge.test_transfer(1, false, true).unwrap();
+        assert_eq!(peer.upstream.request(), older);
+        assert_eq!(
+            lifecycle::acquire(&fixture.owner, true).unwrap_err().kind,
+            crate::ErrorKind::StateBusy,
+            "{mode}"
+        );
+        peer.frontend.write_all(&last).unwrap();
+        peer.bridge.test_transfer(0, true, false).unwrap();
+        assert!(lifecycle::acquire(&fixture.owner, true).is_err());
+        peer.bridge.test_transfer(1, false, true).unwrap();
+        assert_eq!(peer.upstream.request(), request);
+        lifecycle::acquire(&fixture.owner, true).unwrap();
+        assert_pane_open(&herdr);
+    }
+}

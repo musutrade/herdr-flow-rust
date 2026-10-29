@@ -21,6 +21,10 @@ struct Direction {
     drain: Option<Rc<RefCell<drain::Drain>>>,
 }
 impl Direction {
+    fn buffered(&self) -> bool {
+        self.headers.as_ref().is_some_and(|h| !h.is_empty()) || self.frames.has_pending()
+    }
+
     fn new(client: bool) -> Self {
         let limit = if client {
             MAX_MESSAGE
@@ -215,6 +219,8 @@ pub(super) struct Policy {
     reported: bool,
     drain: Option<Rc<RefCell<drain::Drain>>>,
     deferred: [Vec<u8>; 2],
+    forwarding: [Option<crate::lifecycle::Permit>; 2],
+    output_pending: [bool; 2],
 }
 impl Policy {
     pub fn new(binding: J, runtime: J) -> Self {
@@ -235,6 +241,8 @@ impl Policy {
             reported: false,
             drain,
             deferred: [vec![], vec![]],
+            forwarding: [None, None],
+            output_pending: [false, false],
         }
     }
 
@@ -254,7 +262,7 @@ impl Policy {
             return Ok(vec![]);
         }
         let root = self.drain.as_ref().map(|d| d.borrow().root()).transpose()?;
-        let _permit = match root
+        let permit = match root
             .as_deref()
             .map(crate::lifecycle::runtime_observer_permit)
             .transpose()
@@ -263,7 +271,46 @@ impl Policy {
             Err(error) if error.kind == crate::ErrorKind::StateBusy => return Ok(vec![]),
             Err(error) => return Err(error),
         };
-        self.forward_buffered(client, index)
+        let forwarded = self.forward_buffered(client, index)?;
+        self.retain_forwarding(index, permit.flatten(), &forwarded);
+        Ok(forwarded)
+    }
+
+    fn retain_forwarding(
+        &mut self,
+        index: usize,
+        permit: Option<crate::lifecycle::Permit>,
+        bytes: &[u8],
+    ) {
+        // Both the parser and the endpoint can retain admitted bytes. A flush
+        // of older output cannot release a partial later frame's admission.
+        self.output_pending[index] |= !bytes.is_empty();
+        if self.forwarding[index].is_none() {
+            self.forwarding[index] = permit;
+        }
+        self.release_if_drained(index);
+    }
+
+    fn release_if_drained(&mut self, index: usize) {
+        let direction = if index == 0 {
+            &self.client
+        } else {
+            &self.server
+        };
+        if !self.output_pending[index] && !direction.buffered() {
+            self.forwarding[index] = None;
+        }
+    }
+
+    fn discard_buffers(&mut self) {
+        self.client = Direction::new(true);
+        self.client.selection = self.runtime.clone();
+        self.server = Direction::new(false);
+        self.client.drain = self.drain.clone();
+        self.server.drain = self.drain.clone();
+        self.deferred = [vec![], vec![]];
+        self.output_pending = [false, false];
+        self.forwarding = [None, None];
     }
 
     fn forward_buffered(&mut self, client: bool, index: usize) -> Result<Vec<u8>> {
@@ -282,6 +329,14 @@ impl Policy {
     }
 }
 impl crate::codex::tui::BridgePolicy for Policy {
+    fn forwarding_drained(&mut self, client: bool) {
+        let index = usize::from(!client);
+        self.output_pending[index] = false;
+        self.release_if_drained(index);
+    }
+    fn forwarding_discarded(&mut self) {
+        self.discard_buffers();
+    }
     fn message_limit(&self) -> usize {
         NATIVE_MESSAGE_LIMIT
     }
@@ -289,12 +344,7 @@ impl crate::codex::tui::BridgePolicy for Policy {
         std::mem::take(&mut self.client.responses)
     }
     fn connected(&mut self) {
-        self.client = Direction::new(true);
-        self.client.selection = self.runtime.clone();
-        self.server = Direction::new(false);
-        self.client.drain = self.drain.clone();
-        self.server.drain = self.drain.clone();
-        self.deferred = [vec![], vec![]];
+        self.discard_buffers();
         if let Some(drain) = &self.drain {
             drain.borrow_mut().connected();
         }
