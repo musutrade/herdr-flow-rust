@@ -144,17 +144,112 @@ fn retained_controls(
     add_process(runtime, "start_time", allowed)?;
     let (presentation, frontends) = tui::retirement_snapshot(env, root)?;
     allowed.extend(frontends);
-    runtime_watches(root, allowed)?;
+    runtime_watches(env, root, allowed)?;
     Ok(presentation)
 }
 
-fn runtime_watches(root: &Path, allowed: &mut Vec<ProcessRecord>) -> Result<()> {
-    if let Some(receiver) = read(root, "receiver.json")? {
-        add_watch(Path::new(&required(&receiver, "guard_dir")?), allowed)?;
+pub(super) fn runtime_watches(
+    env: &TaskEnvironment,
+    root: &Path,
+    allowed: &mut Vec<ProcessRecord>,
+) -> Result<()> {
+    let receiver = read(root, "receiver.json")?;
+    let mut registration = J::Null;
+    if let Some(receiver) = &receiver {
+        let guard = PathBuf::from(required(receiver, "guard_dir")?);
+        add_watch(&guard, allowed)?;
+        registration = read(&guard, "activation.json")?.unwrap_or(J::Null)["recovery"].clone();
     }
-    for child in [root.to_path_buf(), root.join("recovery-observer")] {
-        add_watch(&child, allowed)?;
+    add_watch(root, allowed)?;
+    observer_watch(env, root, receiver.is_some(), &registration, allowed)
+}
+
+fn observer_watch(
+    env: &TaskEnvironment,
+    root: &Path,
+    required_observer: bool,
+    registration: &J,
+    allowed: &mut Vec<ProcessRecord>,
+) -> Result<()> {
+    let observer = root.join("recovery-observer");
+    if !observer_present(&observer, required_observer || !registration.is_null())? {
+        return Ok(());
     }
+    observer_binding(env, root, &observer)?;
+    let watch = read(&observer, "watch.json")?;
+    observer_registration(&observer, registration, watch.as_ref())?;
+    if let Some(watch) = watch {
+        registered_observer(env, &watch, allowed)?;
+    }
+    Ok(())
+}
+
+fn observer_present(observer: &Path, required_observer: bool) -> Result<bool> {
+    match std::fs::symlink_metadata(observer) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required_observer => {
+            Ok(false)
+        }
+        Err(error) => Err(FlowError::io(format!(
+            "cannot inspect recovery observer {}: {error}",
+            observer.display()
+        ))),
+        Ok(metadata) => {
+            ensure(
+                metadata.is_dir(),
+                "recovery observer must be a real directory",
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+fn observer_registration(observer: &Path, registration: &J, watch: Option<&J>) -> Result<()> {
+    if registration.is_null() {
+        return Ok(());
+    }
+    ensure(
+        registration["phase"] == "watching"
+            && registration["state_dir"] == json!(observer)
+            && registration["pid"].is_u64()
+            && watch.is_some_and(|w| w["pid"] == registration["pid"]),
+        "registered recovery observer identity is missing or changed",
+    )
+}
+
+fn observer_binding(env: &TaskEnvironment, root: &Path, observer: &Path) -> Result<()> {
+    ensure(
+        util::protected::is_runtime_namespace(observer)?,
+        "recovery observer namespace is missing",
+    )?;
+    let owner = json!(crate::task_env::isolation::owner(env));
+    ensure(
+        util::read_state_json(observer, "lifecycle-owner.json")? == owner,
+        "recovery observer namespace Owner changed",
+    )?;
+    let context = util::read_state_json(observer, "observer.json")?;
+    ensure(
+        context["owner"] == owner
+            && context["coordinator"] == json!(root)
+            && context["observer"] == json!(observer),
+        "recovery observer registration changed",
+    )
+}
+
+fn registered_observer(
+    env: &TaskEnvironment,
+    watch: &J,
+    allowed: &mut Vec<ProcessRecord>,
+) -> Result<()> {
+    let mut identities = Vec::new();
+    add_process(watch, "start_ticks", &mut identities)?;
+    let identity = &identities[0];
+    ensure(
+        env.child_processes
+            .iter()
+            .any(|p| p.pid == identity.pid && p.start_time == identity.start_time),
+        "recovery observer process is not registered to this task",
+    )?;
+    allowed.extend(identities);
     Ok(())
 }
 
