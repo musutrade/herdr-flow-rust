@@ -1,6 +1,6 @@
 # 显式协调会话换班：最小实现契约
 
-状态：2026-10-29 设计候选，尚未实现或实跑。依据
+状态：2026-10-29 修订设计，尚未实现或实跑。依据
 [#112](https://github.com/musutrade/herdr-flow-rust/issues/112) 与
 [#130](https://github.com/musutrade/herdr-flow-rust/issues/130) 的当前范围，以及
 [有效范围对账](../end-to-end-readiness.md#current-execution-order-2026-10-29)。
@@ -15,7 +15,7 @@
 阶段回收和已发送通知均已结算。无法观察或未知操作保持原记录，不以等待超时代替结算。
 
 这不是自动上下文阈值换班，也不接管旧格式任务、任意共享接收队列、活跃业务 turn
-或未经登记的会话。`context_telemetry` 仍为 false；显式换班的能力与触发方式单列，
+或未经登记的会话。`safe_rotation` 和 `context_telemetry` 仍为 false；显式换班的能力与触发方式单列，
 不让调用者据 `safe_rotation` 推断已经支持自动阈值或活跃 turn 迁移。
 保留当前 Codex/provider/model/effort/权限与已有服务、父 Herdr workspace。
 不复制登录、不新建服务、不改变代理或全局配置。
@@ -27,50 +27,153 @@
 | `guard::scope` / `queue::ensure_receiver_scope` | task-owned scope 包含精确 session/runtime/instance/model。换班是经过核验的显式 scope 事务，不能放宽相等检查。 |
 | `queue::ensure_delivery_session` / `ensure_ack_receiver` | 已发送通知只能由原 session ACK。必须先完成旧通知；历史 delivery 的收件人不改写，新换班通知绑定新 session。 |
 | `receiver::recovery` | 当前 rebind 只允许 broker PID/start 改变并保留原会话；继续保持原契约，不借此偷偷替换 session。 |
-| `receiver::control::bound_permit` | 工具调用须来自当前 scope 和 Owner；旧协调者在交接后不能通过旧 broker、直接 CLI 或 TUI 再派工。 |
+| `receiver::control::bound_permit` | 只隔离 control scope；还须新增 launch/native/broker/TUI 准入 fence，不能声称该函数已经阻止所有原生写入。 |
 | `retirement::selection::original_result` | 旧 collection receipt 包含原协调 runtime 路径。不能改写旧回执来适配新路径；须用同 Owner 下实际提交的前任/后继关系证明其来源。 |
 | `recovery::observer_context` / `report::receiver_state` | Recovery 仍是原已配置角色；接收目的地改变须明确登记与核验，不能让旧 observer 持续向旧协调者回传或误诊计划内退出。 |
 | `human::observe` 与 terminal finalizer | 旧 runtime 证据、仍在使用的 Recovery observer 和已退役执行者须区分；新旧会话、展示、进程均保持精确归属与最终回收义务。 |
 
 ## 记录与控制流程
 
-只扩展既有受保护队列、runtime journals 和普通 queue watcher。父需求保存一份
-当前 `receiver_handoff` 意图，包含请求 ID、原因、完整 Owner、旧 receiver/guard/
-runtime/session 身份、冻结配置、交接内容摘要、新 runtime 预约、阶段与未决义务。
-同请求 ID、同输入重复调用只返回原状态；改变输入或新 ID 不能绕开未决换班。
-运行时目录和内容摘要是操作引用，不是独立授权。
+下述新增字段、入口和规则都是实现要求，不是现有能力声明。父任务新增严格验证
+的 `receiver_handoff`；根字段固定为 `version: 1`、完整 `owner`、`next_generation`、
+`active_generation`（整数或 null）、按代号排序的 `records`。每个 Owner 最多
+**8 代、8 条前任边**，取消也占一代；不截断旧记录。`next_generation` 必须等于
+records 长度加一，取值 1..9；最多一个非终态请求。第 9 次请求在预约/创建前拒绝，
+同 ID/同输入返回原事实，改变输入或新 ID 不能绕过未决请求或容量。
 
-新 runtime 使用同任务临时根内的独占子目录。原 runtime/control/collection
-记录留在原位置。需要保留的前任关系记录于既有任务状态中，具有受控容量、精确
-Owner 与实际绑定事务证明；不是任意路径白名单。容量满时在产生新副作用前明确
-拒绝，不无限积累会话或借新 task ID 绕过。
+每代固定字段如下；尚未产生的值为 null，不能靠缺省推断成功：
+
+| 字段 | 类型与约束 |
+| --- | --- |
+| `generation`, `request_id`, `input_digest`, `reason`, `phase` | 连续代号、唯一 ID、规范化请求 SHA-256、1..1024 字节原因、下表阶段。 |
+| `from`, `to` | 各含 runtime/guard/session/scope；from 为完整旧 guard scope；to.runtime/guard 创建前唯一预约，session/scope 仅由原创建 journal 补齐。路径限定同 Owner 临时根 rt 下的独占子目录。 |
+| `configuration` | 冻结并验证 provider/model/effort/approval/sandbox/cwd/上游 endpoint/角色模型/driver；运行态 PID 和 session 单列，不接受请求扩权。 |
+| `snapshot` | path/sha256/bytes；受保护交接正文最多 16 KiB，引用原需求和未决义务，不复制父历史，不作为路径授权。 |
+| `fence` | generation/owner/old_runtime/new_runtime；runtime 侧 receiver-handoff.json 为镜像，父记录为权威。 |
+| `binding` | null 或 transaction_id/from_scope/to_scope/committed_at；只随同一队列事务的 receiver/guard_dir 更新成立。 |
+| `notices` | accept/ready 各含 wait/event/delivery/turn/phase，绑定同代和控制种类；未知发送不清空。 |
+| `recovery` | 原来未配置则 null，否则 observer/origin_coordinator/from_target/to_target/phase；目标含 generation/runtime/scope/transaction_id。 |
+| `retirement` | 同 Owner 专用计划的 path/sha256/phase；使用下文协调者 selector，不复用 development/acceptance selector。 |
+
+整个字段最多 256 KiB，单代最多 32 KiB；大的精确资源清单置于同 Owner 受保护
+journal（每份最多 1 MiB、128 个资源），以路径/摘要引用。独立验证器在 queue
+load、任务更新、恢复入口、准入缓存加载和 ACK 前执行，拒绝未知字段/版本、越界、
+重复 ID、Owner 不符、非法阶段及循环/断裂前任关系。提交比较原记录，禁止阶段倒退
+和改写冻结身份；operations 的现有上限不能代替此验证。终态历史按保留 Owner 与
+cleanup obligation 验证，不因活动环境映射消失而赋予新权。原 journals 留在原位。
 
 | 阶段 | 必须成立的事实与动作 | 中断后处理 |
 | --- | --- | --- |
 | `requested` | 在 Owner EX 许可下核对原 scope，并持久化禁止新业务派发/新模型写入的 fence。已存在的审批响应、观察及原命令排空仍走原入口。 | 原请求继续观察；重复 request 不产生第二个意图。 |
 | `draining` | 核对原 turn、tool/control journals、checkpoint、TUI 请求账本、后台命令、Git 锁、逻辑 writer、活动结果 ACK/apply，以及当前 delivery/Recovery/human/stage 状态。 | 未知保持在原请求；不强制打断或重放。允许在尚无新建/发送副作用时显式取消并按同身份解除 fence。 |
-| `creating` | 冻结有界交接内容，预约新 runtime 并复用 launch/bootstrap 的先记意图后创建。会话必须匹配配置；任何创建结果不明均保留原预约。 | 查询原创建记录和已知精确身份；无法确定时报告阻塞，不重复 thread/start 或换路径创建。 |
+| `creating` | 冻结交接和配置，预约新 runtime 并复用 launch/bootstrap 的先记意图后创建；不调用会发送业务 turn 的 receiver-start。任何创建结果不明均保留原预约。 | 查询原创建记录和已知精确身份；无法确定时报告阻塞，不重复 thread/start 或换路径创建。 |
 | `prepared` | 新会话、broker 和 receiver watcher 身份已证实且健康，还未运行业务。再次核验原静止证明及队列版本；旧业务仍受 fence 约束。 | 已知准备阶段只完成未提交的内部绑定；原始创建 journal 不重置。 |
-| `bound` | 一次短队列事务提交新 guard/scope、精确前任关系及唯一换班通知；保持所有需求/成果/验收/交付字段和旧通知原文。新会话只允许 inspect/ACK 交接，业务准入仍关闭。 | 只能依据已保存事务完成 guard/observer 对齐。各读写入口在跨文件部分提交时拒绝不匹配，不推断成功。 |
-| `accepted` | 通过原 queue delivery 协议收到新 session 对该换班通知的精确 ACK。记录已接手，业务准入继续保持关闭直至旧执行资源回收完成。 | 发送/ACK 不确定沿用原 delivery 的观察与恢复，不重发模型输入；重复 ACK 不重复应用换班。 |
-| `retiring` / `complete` | 复用精确进程/TUI/原生会话退出与删除能力，回收旧协调执行者；仍被引用的记录和原 Recovery observer 保留到其归属终态。新业务只在要求的回收义务完成后接续。 | 清理错误保留原换班/回收义务；不撤销事实、不产生另一后继。父任务终态优先并吸收全部新旧资源义务。 |
+| `bound` | 短队列事务提交 receiver/guard_dir、本代 binding 和唯一 accept 控制事件；新 guard 已 monitoring，独立业务 fence 仍关闭。需求/成果/验收/交付和旧通知不变。 | 依据队列 binding 完成 guard/observer 对齐；跨文件不一致不发送、不取得写权。 |
+| `accepted` | 原 queue 协议收到新 session 对本代 accept delivery 的精确 ACK；还须核实接手 turn 已结束、工具响应结算和 checkpoint ready。 | ACK 已保存但 turn 未静止则保留；发送未知不重发，重复 ACK 不推动另一代。 |
+| `retiring` | Recovery 已对齐且无未决 incident，按专用计划回收旧执行者，新业务仍关闭。 | 保留原义务，按原精确对象接续；父任务终态优先并吸收全部新旧资源。 |
+| `complete` | 所需旧执行资源回收完成，Recovery 指向新 scope；保存完成事实和唯一 ready 控制事件。 | 只解除新 receiver 的业务 fence；旧 runtime 永久拒绝新工作。 |
 
-所有外部创建、发送、关闭和删除均在队列锁外执行；先保存原意图，后按精确对象
-观察结果。Owner EX 与原生/工具准入共用生命周期协议，不能在已有 SH 上升级锁。
-普通 queue watcher 驱动有界步骤，不再添加轮询 Agent 或另一个常驻调度器。
+阶段只按表前进；draining 可在尚无创建/发送/关闭副作用、原 scope 未变时转为
+cancelled，解除本代 fence 但保留代号。cancelled/complete 不能重新活动。
 
-`requested` 到 `complete` 期间，受影响接收端暂存普通业务事件；只有精确绑定的
-换班及回收完成通知走原通知通道。接手 turn 使用只读沙箱，只允许 inspect/ACK，
-完成通知后才恢复原配置允许的业务 turn，不借握手开放任意新写入。不重复投递，
-不调用 `queue stop`。其他独立 Owner 的执行不得因持有全队列长锁而
-停止，但首版不承诺可替换还承担其他未完成 Owner 的共享接收端。
+## Owner EX 与两层准入
 
-Recovery 的原模型会话、未决事实和去重记录不复制或清空。只有不存在进行中或
-发送结果不明的 incident，才允许在其既有锁下将 observer 的当前接收目标从旧
-runtime 改为已提交的后继。observer 的原路径、Owner、会话和进程身份保留；
-新 receiver 的 status/human/finalizer 通过已核验的登记关系找到它。接收端绑定与
-observer 对齐不是跨文件原子写，持久意图必须支持准确完成中断前缀。期间暂停
-对计划内退出的误报，真实未知状态仍保留；不得另建恢复角色来消除不匹配。
+显式 CLI 为 receiver-handoff-request/status/cancel。request/cancel 在
+task_runtime::cli::owned_action 分流：用 runtime_observer_permit 解析 Owner 并
+释放其 SH，再直接 `lifecycle::acquire(&owner, true)`。只对获取 EX 的 StateBusy
+每 20 ms 重试，最多 2 秒；到期可见地返回 StateBusy/同请求重试提示，不提交、不
+降级 SH。普通 watcher 每 tick 非阻塞尝试一次。获取 EX 前不得持 queue/guard/
+observer/environment 锁；获得后按 environment、guard/observer、短 queue 事务
+顺序获取，碰忙释放本步锁。不能在现有 SH 上升级，也不能用 mutation_permit
+（实际是 SH）冒充 EX。EX 不跨模型等待或子进程启动；外部步骤先记意图，在 queue
+锁外执行，再获取 EX 核对原操作并提交。启动子进程前释放 EX，内部创建准入只接受
+该代预约路径/配置，不是公开 CLI bypass。被准入的原生写请求持 SH 到送入原连接。
+
+新增 fence 检查接入 launch/native create/dispatch/新 TUI、broker/TUI drain 的
+每条原生请求，以及 control 业务动作；`bound_permit` 继续验证原 scope，不能单独
+承担隔离。父记录与 runtime 镜像不符/半提交一律拒绝新业务。旧、新 receiver 都
+禁止普通 turn/start、改线程配置和派工/发布；旧审批响应、interrupt、只读查询
+及原操作 collect 走单列观察/排空入口，用 runtime_observer_permit 并核对原请求。
+status、receiver watcher、Recovery 观察也使用观察许可，不能套禁止全部 RPC 的
+stage marker 阻断排空，也不能因观察豁免开放新工作。新 TUI 仅展示/读取，旧 TUI
+核实排空后关闭。普通 watcher 驱动有界步骤，不加常驻调度器，不调用 queue stop。
+
+## 控制事件、投递与只读握手
+
+复用 stage cleanup 的 host signal-wait/event 基础，新增控制种类
+receiver_handoff_accept 和 receiver_handoff_ready。wait/event 的 control 字段
+固定为 kind/owner/generation/transaction_id/target_scope，无业务结果 binding；
+ID 由 Owner instance、generation、kind 确定。专用 host observation 核对 EX 与
+父记录后创建；普通 signal/register、native result 和 task-apply 不得伪造/应用
+此类事件，同名冲突不覆盖。消息明确“读取交接并 ACK，无需 task-apply，不扩权”，
+不能使用默认业务结果模板。
+
+queue::dispatch 先处理原 active delivery，再筛选 pending：requested..prepared
+不发新事件，bound 只选本代 accept，accepted/retiring 只观察原 accept，complete
+优先 ready 再恢复普通事件。每个控制 delivery 只含一个事件，普通事件原样暂存。
+新 guard 为 monitoring 加独立业务 fence，不能用 non-monitoring 屏蔽整个通道；
+receiver_can_deliver/adapter readiness 须接受经验证的控制目的。delivery 保留
+events/session/phase，追加 control 身份；session 必须等于 target_scope.session。
+ACK 检查原 delivery.session、当前完整 scope、Owner、代号、wait/event 和 binding
+事务后记录事实；原收件人、旧 ACK 和旧通知不改写，重复 ACK 不推进另一代。
+
+新增内部 prompt_handoff(delivery)，不能将自由文本交普通 Adapter.prompt 后
+假定它只读。accept 唯一 turn/start 显式使用 sandboxPolicy={type:readOnly,
+networkAccess:false} 和 approvalPolicy=never；model/effort/服务保持原配置。
+发送前保存精确输入摘要、session、代号、delivery、参数的 journal；broker 只准入
+匹配该已登记意图的一次握手请求，TUI/普通 dispatch 无此授权，sending 未知不重发。
+接手 turn 的动态工具仅允许 inspect 和本代 ACK，所有业务动作拒绝。
+
+runtime 原权限不改写；只读为该 turn 的覆盖且由 broker 核验。必须先证实 accept
+turn 已结束，complete 后 ready 才用原配置业务 turn；ready 自身仍只 ACK、不
+task-apply。不能在仍活动的只读 turn 中途放开业务工具，也不能靠提示词保持只读。
+
+## Recovery 接续与共同解析器
+
+当前 watch 循环外缓存 context、activate 总是 start，必须实际修改。context 移到
+每 tick 的 Owner SH + 原 observer 锁内重读，校验固定 owner/observer/origin_coordinator，
+再读取新增 receiver_target（generation/coordinator/scope/transaction_id）。同 tick
+不得混用目标。原 context.runtime 角色配置和 Recovery agent/session/journals 保留；
+observe/repair/report 中的 coordinator 引用均使用该 tick 已验证的 target。
+
+bound 后在 EX + 原 observer 锁下确认无进行中或发送未知 incident，再把 target
+从本代 from_target 改为匹配 binding 的 to_target。部分提交时报告 handoff_pending，
+暂停目标诊断/发送，不把计划内旧 watcher 退出误判事故；真实未知事实不清空。
+每 tick 重读使原 observer 无需停止/重建，不制造 watcher_unavailable。
+
+新 receiver activate 增加内部 RecoveryBinding::Existing，核对父记录中原 observer/
+Owner/session/进程后登记引用，不调用 recovery::start；原来未配置则保持未配置。
+普通 recovery-start 也先经 resolver，已有角色时拒绝创建第二份；原 observer
+不健康不能用新建角色掩盖。resolver 由当前 Owner 的已提交前任链解析原 observer，
+核对 origin、target、scope，不按路径扫描猜测。recovery-status、report::receiver_state、
+human::observe/return、stage 回收检查和 terminal finalizer 全部用它；历史 root
+只读 status 使用 observer permit。finalizer 按 observer/session/PID 精确去重并
+最终回收，早期退役不删除仍使用的原 observer。
+
+## 旧协调者退役与历史回执
+
+新增 coordinator retirement plan/selector，只从本代实际 binding.from 选择；
+不放宽 stage selector 对 receiver.json 的拒绝。计划固定 Owner/代号/binding 事务、
+旧 runtime/guard 快照、broker/receiver watcher PID/start、TUI/前端精确身份、
+upstream session journal 和保留清单。receiver-retirement.json 标记只约束同代
+旧执行者，不用 stage marker 或递归删除旧 runtime 代替。
+
+顺序：复核原请求/TUI 账本与 session idle → 捕获/关闭旧 TUI 并核实前端退出 →
+在 Recovery target 已对齐后按 PID/start 停旧 receiver watcher → 停旧 broker →
+按原 upstream journal 删除旧 coordinator session 及精确存储关联 → 保存完成。
+每步先保存义务、操作后观察，重复只针对原对象。保留旧 runtime/control/creation/
+collection 证据、前任链、原 recovery-observer 目录及其全部进程/session、其他角色、
+checkout 和共享服务。归属或删除结果未知则保留 retiring，不按名称/目录猜测。
+terminal finalizer 合并本计划与 upstream/stage/TUI 义务、按身份去重，并覆盖预约
+未绑定资源；只有终态才删除仍引用的历史目录和 observer。
+
+retirement::selection::original_result 调用 predecessor resolver：先原样验证
+receipt Owner/runtime/wait/binding；receipt.coordinator 等于当前 runtime 时沿用
+原校验，否则从当前完整 queue scope 沿已提交且 complete 的记录逆行最多 8 步。
+每边同 Owner，to.scope 等于当前节点，from/to 身份与 binding 一致，代号递减且
+无循环；命中 receipt.coordinator 后仍验证原协调身份、原结果 ACK/applied 和 child
+binding。取消/未提交/未 complete 的边不提供历史来源证明，断链/跨 Owner/镜像
+缺失不得变成路径白名单。不改写 collection-receipt.json 或替换旧 coordinator 路径。
 
 ## 最小完成证据
 
@@ -86,6 +189,12 @@ observer 对齐不是跨文件原子写，持久意图必须支持准确完成�
    原需求、不可变验收、已确认交付和用户共享资产保持。失败/清理受阻分别记录。
 5. 本地针对性回归、现行完整质量检查、固定 head 独立评审和 CI 分别留存。
    真实模型/Herdr 验收须使用新私有任务与冻结二进制，和协议夹具分开报告。
+6. 控制事件不能伪造/混批/作为业务结果应用；accept 在原生参数与动态工具两层
+   只读；直接 broker/CLI/TUI 写入拒绝而原审批与观察可用。EX 两秒有界返回，等待
+   不持 queue 锁，其他 Owner 仍可进展。第 9 次请求无副作用拒绝。
+7. 同一 Recovery agent/session/observer PID 经 retarget 后继续工作；在 binding/
+   observer 半提交、ACK 但 turn 未结束、旧 watcher 停止等边界不误开业务或重复
+   创建 Recovery。合法前任回执可回收，字节不变；伪造/断链/跨 Owner 均拒绝。
 
 这份设计不以一次通过证明自动阈值换班、活跃业务迁移、任意累计次数或全部故障。
 父需求历史跨容量接续、发布积压集成证据及 #146 仍按原独立范围推进。
