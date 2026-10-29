@@ -148,3 +148,29 @@ fn another_live_owner_or_terminal_transition_prevents_commit() {
     assert!(commit(&permit, &state, &initial(&owner)).is_err());
     assert!(queue::load_queue(&owner.queue_root).unwrap()["tasks"]["parent"][KEY].is_null());
 }
+
+#[test]
+fn checkpoint_rejects_completed_or_later_history_before_mirror_reconciliation() {
+    let mut history = initial(&fixture::owner());
+    for phase in [
+        "creating", "prepared", "bound", "accepted", "retiring", "complete",
+    ] {
+        history["records"][0]["phase"] = json!(phase);
+        history["records"][0]["notices"]["ready"]["phase"] = json!("acknowledged");
+        assert!(checkpoint_history(&history)
+            .unwrap_err()
+            .message
+            .contains("cannot continue"));
+        let mut cancelled_after = history.clone();
+        cancelled_after["records"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"phase":"cancelled"}));
+        assert!(checkpoint_history(&cancelled_after).is_err());
+    }
+    for phase in ["requested", "draining", "cancelled"] {
+        history["records"][0]["phase"] = json!(phase);
+        checkpoint_history(&history).unwrap();
+    }
+    checkpoint_history(&J::Null).unwrap();
+}

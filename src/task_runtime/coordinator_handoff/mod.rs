@@ -5,6 +5,7 @@ use crate::lifecycle::Owner;
 mod anchor;
 mod configuration;
 mod gate;
+mod inventory;
 mod mirror;
 mod record;
 mod recovery;

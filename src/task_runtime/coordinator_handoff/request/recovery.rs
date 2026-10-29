@@ -16,11 +16,7 @@ pub(super) fn reference(
         absent_observer(&observer)?;
         return Ok(J::Null);
     }
-    let context =
-        util::read_state_json_bounded_if_exists(&observer, "observer.json", RECORD_BYTES)?;
-    let context =
-        context.ok_or_else(|| FlowError::guard("configured original recovery observer missing"))?;
-    context_identity(&context, &observer, &origin, owner)?;
+    let context = super::super::recovery::original_context(&origin, owner)?;
     let from_target = current_target(&context, from, before)?;
     Ok(
         json!({"observer":observer,"origin_coordinator":origin,"phase":"pending","from_target":from_target,
@@ -29,19 +25,7 @@ pub(super) fn reference(
 }
 
 fn absent_observer(observer: &Path) -> Result<()> {
-    ensure(
-        !observer.try_exists()?,
-        "unconfigured recovery observer cannot be silently adopted",
-    )
-}
-
-fn context_identity(context: &J, observer: &Path, origin: &Path, owner: &Owner) -> Result<()> {
-    ensure(
-        context["owner"] == json!(owner)
-            && context["coordinator"] == json!(origin)
-            && context["observer"] == json!(observer),
-        "original recovery observer binding changed",
-    )
+    native::receiver::ensure_absent(observer)
 }
 
 fn origin(root: &Path, before: &J) -> Result<PathBuf> {

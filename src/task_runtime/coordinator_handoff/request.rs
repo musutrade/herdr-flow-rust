@@ -1,6 +1,7 @@
 //! Operator requests install a queue fence before any external side effect.
 //! Only EX acquisition is retried; a failed transaction is never replayed here.
 use super::*;
+mod executable;
 mod recovery;
 use crate::{lifecycle::Permit, queue};
 use std::{
@@ -84,12 +85,18 @@ fn transact(
     permit.check(&state, false)?;
     let from = coordinator(env, root, guard, receiver, &state)?;
     let before = &state["tasks"][&owner.task_id][KEY];
+    prerequisites(env, &state, owner)?;
     let next = match action {
         "receiver-handoff-request" => request(env, &state, &from, before, owner, spec)?,
         "receiver-handoff-cancel" => cancel(before, spec)?,
         _ => return Err(FlowError::usage("unknown coordinator handoff action")),
     };
     finish_request(root, permit, &state, next, action, spec)
+}
+
+fn prerequisites(env: &TaskEnvironment, state: &J, owner: &Owner) -> Result<()> {
+    checkpoint_history(&state["tasks"][&owner.task_id][KEY])?;
+    executable::admit(env, state, owner)
 }
 
 fn finish_request(
@@ -228,13 +235,22 @@ fn new_request_ready(state: &J, before: &J, owner: &Owner) -> Result<()> {
         )?;
         let previous = records.last().unwrap();
         ensure(
-            previous["phase"] == "cancelled"
-                || (previous["phase"] == "complete"
-                    && previous["notices"]["ready"]["phase"] == "acknowledged"),
+            previous["phase"] == "cancelled",
             "finish the original coordinator handoff first",
         )?;
     }
     single_owner(state, owner)
+}
+
+fn checkpoint_history(before: &J) -> Result<()> {
+    if let Some(records) = before["records"].as_array() {
+        ensure(
+            records.iter().all(|record| matches!(record["phase"].as_str(),
+                Some("requested" | "draining" | "cancelled"))),
+            "request/cancel checkpoint cannot continue creation or completed replacement history; inspect with status",
+        )?;
+    }
+    Ok(())
 }
 
 fn single_owner(state: &J, owner: &Owner) -> Result<()> {

@@ -301,13 +301,37 @@ request_id/reason，cancel 仅含 request_id。请求在精确 Owner EX 下分�
 requested 与 draining，冻结配置并预约唯一后继路径；同 ID 改输入拒绝，同 ID
 同输入返回已有历史。EX 每 20 ms 重试、最多两秒，guard 锁借用已持 EX，不再
 隐式申请 SH。原 scope/父状态变化、其他未结束 Owner、创建路径已经存在等情况
-拒绝推进。取消保留代号，第九代无新资源副作用地拒绝。
+拒绝推进。取消保留代号，第九次预约无新资源副作用地拒绝。此检查点只接受全历史
+为 requested/draining/cancelled，只有上次 cancelled 才能预约下一代；任何 creating
+及后续阶段（包括 complete、complete 后 cancelled）均在镜像对齐前明确拒绝
+request/cancel，status 仍可读取。成功换班后的后继镜像与接续入口尚未实现。
+
+每次请求/取消在 EX 内检查实际 Linux `/proc/<pid>/exe`，以打开文件的 dev/ino
+与调用者 `/proc/self/exe` 比较，并在读取前后验证 PID/start；runtime 的受管
+driver_binary 启动路径也必须是同一冻结可执行文件。仅路径、版本字段或镜像均
+不能证明运行代码具备 fence。范围包括任务 runtime broker、接收端/Recovery/
+队列 watcher 和 TUI Flow 包装进程；原生 TUI 子进程另须匹配绑定的原生二进制，
+且活着的子进程须保有已验证的包装进程。相同内容的另一个 inode 也保守拒绝，
+不自动升级、重启、结束或采用旧进程。所有 runtime 的受保护 Owner 都要一致。
+随后复用既有注册进程/后代、task marker 与 checkout 进程观察，遗漏或未知的
+任务执行不获豁免；活动外部命令须先自行结束。此处证明受管宿主入口的代码身份，
+不证明原生会话已静止，也不抵御同一用户绕过协议手工运行旧程序/改写受保护状态。
+两秒上限只约束 EX 获取；后续检查有既有 128 runtime 和进程盘点数量上限，
+不在等待 EX 时持 queue/guard 锁。
+
+每代请求都重新核实原 Recovery observer 的受保护命名空间与 lifecycle-owner。
+context.runtime 是原 runtime 配置对象，root/instance/Owner、模型、端点、权限及
+角色配置必须与原 runtime 一致；origin/observer/runtime_parent 同时核实。
+未配置 Recovery 时任何 observer 条目（包括悬空链接）均拒绝，不能按不存在采用。
 
 请求/取消会在同一 Owner EX 下对齐原 runtime 的 receiver-handoff.json 镜像，
 不创建预约中的后继目录。父记录为权威；镜像须匹配其精确有界前缀才能接续。
 父记录已取消而镜像缺失/落后时仍拒绝新业务，同 ID 请求/取消可补齐这类部分
 提交；未知身份/摘要/字段保留并报错。inspect/ACK 和独立 checkout 不受该镜像
-阻塞。镜像没有独立授权能力，也不能替代后续静止证明或权限恢复日志。
+阻塞。native 准入核对调用 runtime 自己的镜像；未参与记录的 runtime 必须无镜像，
+已取消的后继预约不能取得写权。共享 checkout 在取消后逐一核对同 Owner 的有界
+runtime 清单，其他旧 runtime 的孤儿/foreign/悬空镜像也阻塞准入。
+镜像没有独立授权能力，也不能替代后续静止证明或权限恢复日志。
 
 这个检查点只完成请求和取消，目前停在 draining，不自动创建后继。独立观察、
 后继镜像、控制通知、权限恢复、Recovery retarget 和协调者退役仍待实现。

@@ -40,12 +40,37 @@ pub(super) fn cancelled(task: &J) -> Result<()> {
         .and_then(|r| r.last())
         .ok_or_else(|| FlowError::guard("cancelled handoff history missing"))?;
     let root = path(&record["from"], "runtime")?;
-    protected(&root, &state["owner"])?;
+    runtime(&root, task)
+}
+
+/// Cancellation only releases the exact original runtime. A different runtime
+/// cannot borrow that mirror; reserved successors still have no authority.
+pub(super) fn runtime(root: &Path, task: &J) -> Result<()> {
+    let state = &task[KEY];
+    let Some(records) = state["records"].as_array() else {
+        return unregistered(root);
+    };
     ensure(
-        util::read_state_json_bounded_if_exists(&root, FILE, RECORD_BYTES)?
+        !records.iter().any(|r| r["to"]["runtime"] == json!(root)),
+        "cancelled successor reservation cannot admit work",
+    )?;
+    if !records.iter().any(|r| r["from"]["runtime"] == json!(root)) {
+        return unregistered(root);
+    }
+    protected(root, &state["owner"])?;
+    ensure(
+        util::read_state_json_bounded_if_exists(root, FILE, RECORD_BYTES)?
             == Some(expected(state)?),
         "handoff cancellation mirror is pending; retry the original request/cancel before new work",
     )
+}
+
+pub(super) fn workspace(task: &J) -> Result<()> {
+    let owner: Owner = serde_json::from_value(task[KEY]["owner"].clone())?;
+    for (root, _) in super::inventory::runtimes(task, &owner)? {
+        runtime(&root, task)?;
+    }
+    Ok(())
 }
 
 pub(super) fn reconcile(root: &Path, permit: &crate::lifecycle::Permit, state: &J) -> Result<()> {

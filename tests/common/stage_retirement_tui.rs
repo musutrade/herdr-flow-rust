@@ -18,7 +18,11 @@ struct NativeServer {
 impl Drop for NativeServer {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
-        self.thread.take().unwrap().join().unwrap();
+        if let Err(error) = self.thread.take().unwrap().join() {
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(error);
+            }
+        }
     }
 }
 
@@ -121,15 +125,18 @@ fn native_service(
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let thread = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // Fixture::new waits for the shared environment lock. That wait is not
+        // protocol work; start the peer budget at its first actual connection.
+        let mut deadline = None;
         while !stop.load(Ordering::SeqCst) {
             assert!(
-                Instant::now() < deadline,
+                deadline.is_none_or(|deadline| Instant::now() < deadline),
                 "native protocol fixture exceeded deadline"
             );
             let Some(mut peer) = accept_peer(&listener) else {
                 continue;
             };
+            deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(20));
             if let Some(sender) = handoff.take() {
                 sender.send(peer).unwrap();
                 continue;

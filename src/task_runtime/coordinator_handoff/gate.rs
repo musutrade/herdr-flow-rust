@@ -32,6 +32,7 @@ pub(crate) fn check_workspace(state: &J, path: &Path) -> Result<()> {
                 !blocked(task)?,
                 "coordinator handoff requires verified continuation; new checkout work is fenced",
             )?;
+            super::mirror::workspace(task)?;
         }
     }
     Ok(())
@@ -72,10 +73,11 @@ pub(crate) fn runtime_blocked(root: &Path, runtime: &J) -> Result<bool> {
         "coordinator handoff runtime Owner changed",
     )?;
     let task = &state["tasks"][&owner.task_id];
-    if task[KEY].is_null() {
-        super::mirror::unregistered(root)?;
+    if blocked(task)? {
+        return Ok(true);
     }
-    blocked(task)
+    super::mirror::runtime(root, task)?;
+    Ok(false)
 }
 
 pub(crate) fn admit_control(state: &J, owner: &Owner, action: &str) -> Result<()> {
