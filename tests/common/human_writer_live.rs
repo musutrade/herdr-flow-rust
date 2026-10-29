@@ -5,6 +5,8 @@ use super::*;
 mod cleanup;
 #[path = "human_writer_live_audit.rs"]
 mod evidence;
+#[path = "human_writer_live_readiness.rs"]
+mod readiness;
 
 const NOTE: &str =
     "Scripted operator exercised formal human writer ownership; this is not a human UI session.\n";
@@ -100,17 +102,70 @@ fn real_human_writer_return_reaccepts_delivers_and_reclaims() {
         .unwrap();
         assert_eq!(activated["recovery"]["agent"]["phase"], "ready");
         bind(&f, &guard_root);
-        let started = task_runtime::native::receiver::start(
-            &env,
-            &coordinator,
-            &json!({"instruction":instruction(&f,&target)}),
+        let receiver_process = serde_json::to_value(
+            env.child_processes
+                .iter()
+                .find(|process| json!(process.pid) == activated["pid"])
+                .expect("activated receiver has no original process registration"),
         )
         .unwrap();
-        assert_eq!(started["presentation"]["phase"], "ready");
-        audit.start = started;
-        // Release the existing environment lock before model tool operations.
+        // The queue watcher must initialize without contending with this env's
+        // exclusive file lock. Both watchers must be ready before the first turn.
         drop(env);
         let mut supervisor = watch(&f);
+        let preflight = readiness::PreDispatch::new(
+            &f,
+            &coordinator,
+            &receiver_process,
+            &supervisor,
+            &config.expected_session,
+        );
+        let readiness_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let observed = preflight.observe(&mut supervisor);
+            if preflight.verify(&observed).is_ok() {
+                break;
+            }
+            util::atomic_write_json(
+                &f.temp.path().join("human-pre-dispatch-pending.json"),
+                &observed,
+            )
+            .unwrap();
+            assert!(
+                observed["queue_child_running"] == true && Instant::now() < readiness_deadline,
+                "pre-dispatch readiness observation bound; zero coordinator sends: {observed}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let env = loop {
+            match task_env::restore_environment("task") {
+                Ok(env) => break env,
+                Err(error)
+                    if error.kind == herdr_flow::ErrorKind::StateBusy
+                        && Instant::now() < readiness_deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Err(error) => panic!("restore original pre-dispatch environment: {error}"),
+            }
+        };
+        assert_eq!(json!(env.instance_id), audit.owner["instance_id"]);
+        let observed = preflight.observe(&mut supervisor);
+        let started = preflight
+            .dispatch(observed, |proof| {
+                audit.pre_dispatch = proof;
+                audit.persist(&f); // Durable evidence precedes the only start call.
+                task_runtime::native::receiver::start(
+                    &env,
+                    &coordinator,
+                    &json!({"instruction":instruction(&f,&target)}),
+                )
+            })
+            .expect("watchers/configuration lost readiness; zero coordinator sends")
+            .unwrap();
+        drop(env);
+        assert_eq!(started["presentation"]["phase"], "ready");
+        audit.start = started;
         let deadline = Instant::now() + Duration::from_secs(1200);
         loop {
             audit.observe(&f, &config);

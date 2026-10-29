@@ -7,6 +7,7 @@ pub(super) struct Configuration {
     endpoint: J,
     pub model: J,
     pub roles: J,
+    pub expected_session: J,
     pub binary: PathBuf,
     pub store: PathBuf,
     config: PathBuf,
@@ -26,6 +27,20 @@ impl Configuration {
         let roles: J = serde_json::from_str(&required("HERDR_UPSTREAM_ROLE_MODELS")).unwrap();
         for role in ["developer", "reviewer", "recovery"] {
             assert!(roles[role].is_object(), "explicit {role} required");
+        }
+        let expected_session: J =
+            serde_json::from_str(&required("HERDR_HUMAN_EXPECTED_SESSION_CONFIGURATION")).unwrap();
+        assert_eq!(expected_session.as_object().unwrap().len(), 3);
+        assert!(expected_session["sandbox"].is_object());
+        assert!(
+            expected_session["approvalPolicy"].is_string()
+                && expected_session["approvalsReviewer"].is_string()
+        );
+        for key in ["approvalPolicy", "approvalsReviewer", "sandbox"] {
+            assert!(
+                !expected_session[key].is_null(),
+                "explicit initial {key} required"
+            );
         }
         let binary = fs::canonicalize(required("HERDR_NATIVE_BINARY")).unwrap();
         let store = fs::canonicalize(required("HERDR_SESSION_STORE")).unwrap();
@@ -51,6 +66,7 @@ impl Configuration {
             endpoint,
             model,
             roles,
+            expected_session,
             binary,
             store,
             config_bytes: fs::read(&config).unwrap(),
@@ -89,6 +105,7 @@ pub(super) struct Audit {
     environment: PathBuf,
     agreement: J,
     pub start: J,
+    pub pre_dispatch: J,
     pub acquire: J,
     pub returned: J,
     pub human_sha: J,
@@ -119,6 +136,7 @@ impl Audit {
             environment: env.state_file().into(),
             agreement: q["tasks"]["task"]["requirements"].clone(),
             start: J::Null,
+            pre_dispatch: J::Null,
             acquire: J::Null,
             returned: J::Null,
             human_sha: J::Null,
@@ -143,12 +161,12 @@ impl Audit {
                 "socket":config.endpoint,"parent":config.parent_before,"config":config.config,
                 "config_sha256":util::pyjson::sha256_hex(&config.config_bytes),"native_binary":config.binary,
                 "operator":"scripted CLI operator, not a human UI session",
-                "audit_databases":config.databases,"native_data_root":config.native_data}),
+                "audit_databases":config.databases,"native_data_root":config.native_data,"initial_session_configuration_expected":config.expected_session}),
         }
     }
     pub fn persist(&self, f: &Fixture) {
         util::atomic_write_json(&f.temp.path().join("human-live-audit.json"), &json!({
-            "owner":self.owner,"agreement":self.agreement,"baseline":self.baseline,"start":self.start,"process_start_cutoff":self.process_start,
+            "owner":self.owner,"agreement":self.agreement,"baseline":self.baseline,"start":self.start,"pre_dispatch":self.pre_dispatch,"process_start_cutoff":self.process_start,
             "original":self.original,"acquire":self.acquire,"human_sha":self.human_sha,"returned":self.returned,
             "invalidated":self.invalidated,"recovery":self.recovery,"terminal":self.terminal,"delivery":self.delivery,"views":self.views,
             "processes":self.processes,"protocol":self.protocol,"native_sessions":self.sessions,"native_inventories":self.inventories,"cleanup":self.cleanup,"cleanup_plans":self.cleanup_plans})).unwrap();

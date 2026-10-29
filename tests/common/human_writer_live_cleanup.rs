@@ -8,6 +8,12 @@ pub(super) fn verify(
     config: &evidence::Configuration,
     target: &Path,
 ) {
+    assert_eq!(a.pre_dispatch["verified_before_first_turn"], true);
+    assert_eq!(a.pre_dispatch["expected"]["owner"], a.owner);
+    assert_eq!(
+        a.pre_dispatch["observed"]["upstream_session"],
+        a.start["session"]
+    );
     assert!(
         !a.invalidated.is_null(),
         "no observed post-return invalidation checkpoint"

@@ -10,6 +10,44 @@ exact PID/start-time process audit. Recovery runs through the existing observer,
 read-only Recovery Agent, host verification and original coordinator handoff. It
 does not introduce another controller or write model verdicts, ACKs or applies.
 
+## Before the first asynchronous dispatch
+
+Activation and queue binding happen before any coordinator turn. The harness then
+releases the task environment file lock, starts the original ordinary queue
+watcher and waits for both receiver and queue watcher health. It pins the queue
+child's PID/start and the receiver's original registered PID/start; it checks
+running status, heartbeat/lock health, current live identities, unchanged Owner,
+notify enabled, queue not stopped and matching queue/guard/receiver/session
+bindings. No existing `receiver-start`/`receiver-turn` intent is accepted.
+
+Only after that readiness boundary does it restore the same Owner's environment,
+repeat the complete check, persist `pre_dispatch` in `human-live-audit.json`, call
+the one `receiver::start`, and immediately release the environment. Pending
+observations remain in `human-pre-dispatch-pending.json`; the 30-second bound is
+an observation limit and never resends a turn or restarts a watcher. This order
+also prevents holding the environment file lock while the queue watcher initializes.
+
+`HERDR_HUMAN_EXPECTED_SESSION_CONFIGURATION` is a required private test input
+containing exactly `approvalPolicy`, `approvalsReviewer` and the full initial
+`sandbox` object. The audit retains only selected non-sensitive fields from the
+coordinator's actual `upstream-session.json.session_configuration`; policy,
+reviewer and sandbox must equal that explicit expectation. As in the production
+subscription comparison, the implicit cwd is removed from sandbox writableRoots;
+all additional roots and other sandbox fields remain exact. No shared config is
+changed to make the comparison pass.
+
+This is the configuration **before the first turn**. A later host `turn_sandbox`
+may narrow it; an initial `networkAccess=true` is not a claim about that turn's
+network permission. Recovery retains its separate read-only / approval-never
+contract. Its policy is not changed to match the coordinator.
+
+The zero-send regression instruments the same guarded first-dispatch closure and
+rejects unready, wrong PID/start, exited and misbound watcher observations and
+mismatched initial permissions. It supplies no model result or business ACK. A
+separate regression starts the real ordinary queue watcher only after releasing
+the environment lock, checks its exact healthy identity and confirms no initial
+turn intent exists.
+
 ## Single success scenario
 
 The newly created private task declares all three criteria before any runtime:
@@ -73,6 +111,8 @@ Provide the existing stage/recovery live settings:
 Additional read-only evidence inputs are required before fixture allocation:
 
 - `HERDR_UPSTREAM_PID`: the original shared service PID; start ticks are pinned.
+- `HERDR_HUMAN_EXPECTED_SESSION_CONFIGURATION`: the explicit initial coordinator
+  policy/reviewer/full-sandbox expectation described above, supplied privately.
 - `HERDR_NATIVE_DATA_ROOT`: canonical shared native data directory containing
   `sessions`, `archived_sessions` and `shell_snapshots` when they exist.
 - `HERDR_HUMAN_AUDIT_DATABASES`: JSON array of **all actual native and Herdr
