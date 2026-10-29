@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|human-status|human-request|human-acquire|human-return|human-abandon|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Human writer transfer requires an explicit request, successful acquisition and recovery verification on return. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|receiver-handoff-request|receiver-handoff-status|receiver-handoff-cancel|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|human-status|human-request|human-acquire|human-return|human-abandon|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Human writer transfer requires an explicit request, successful acquisition and recovery verification on return. Coordinator handoff request accepts request_id/reason and installs a draining fence; this implementation stops there until explicit cancel with request_id. It does not yet create a successor. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -29,6 +29,9 @@ fn run(args: &[String]) -> Result<J> {
 
 fn owned_action(action: &str, root: &Path, task: &str, spec: &J) -> Option<Result<J>> {
     match action {
+        "receiver-handoff-request" | "receiver-handoff-cancel" => {
+            Some(coordinator_handoff::action(root, task, action, spec))
+        }
         "human-request" | "human-acquire" | "human-return" | "human-abandon" => {
             Some(human::action(root, task, action, spec))
         }
@@ -37,6 +40,7 @@ fn owned_action(action: &str, root: &Path, task: &str, spec: &J) -> Option<Resul
 }
 fn read_only_status(action: &str, root: &Path, task: &str) -> Option<Result<J>> {
     match action {
+        "receiver-handoff-status" => Some(coordinator_handoff::status(root, task)),
         "human-status" => Some(human::status(root, task)),
         "recovery-status" => Some(bound_status(root, task, recovery::status)),
         "publication-status" => Some(bound_status(root, task, publication::status)),

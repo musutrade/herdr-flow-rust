@@ -1,6 +1,6 @@
 use super::*;
 
-fn owner() -> Owner {
+pub(super) fn owner() -> Owner {
     Owner {
         queue_root: "/queue".into(),
         queue_id: "queue".into(),
@@ -31,7 +31,7 @@ fn notice(generation: usize, kind: &str) -> J {
     json!({"wait":format!("handoff-{generation}-{kind}"),"event":null,"delivery":null,"turn":null,"phase":"pending"})
 }
 
-fn record(n: usize) -> J {
+pub(super) fn record(n: usize) -> J {
     let from = target(n - 1, true);
     let to = target(n, false);
     let policy = json!({"type":"workspaceWrite","writableRoots":["/workspace/checkout"],"networkAccess":false});
@@ -43,7 +43,7 @@ fn record(n: usize) -> J {
         "notices":{"accept":notice(n,"accept"),"ready":notice(n,"ready")},"recovery":null,"retirement":null})
 }
 
-fn queue() -> J {
+pub(super) fn queue() -> J {
     json!({"id":"queue","lifecycle":{"queue_root":"/queue"},"tasks":{"parent":{"task":"parent","epoch":1,"schema_version":2,"requirements":{},
         "environment":{"queue_id":"queue","task_id":"parent","epoch":1,"instance_id":"instance","checkout":"/workspace/checkout","creation_seed":{"temp_root":"/scratch"}},
         KEY:{"version":1,"owner":owner(),"next_generation":2,"active_generation":1,"records":[record(1)]}}}})

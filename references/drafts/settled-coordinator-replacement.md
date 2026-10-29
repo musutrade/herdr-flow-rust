@@ -254,10 +254,24 @@ binding。取消/未提交/未 complete 的边不提供历史来源证明，断�
 当前实现先提供父记录的可选扩展校验、容量/前任链/单调更新约束，以及现有 native、
 control 和 checkout 准入中的保守隔离。仅有换班意图、complete 阶段文字或 ready
 ACK 均不授予新输入权限；在完整配置恢复驱动具备证据前只保留原请求排空和观察。
-新换班 CLI、后继创建、控制通知、Recovery retarget、配置恢复及协调者退役驱动
-仍是后续实现，safe_rotation/context_telemetry 保持 false。
+首个基础切片未包含新换班 CLI、后继创建、控制通知、Recovery retarget、配置恢复
+及协调者退役驱动；safe_rotation/context_telemetry 保持 false。
 
 原生 TUI 的生命周期 SH 许可现在覆盖代理中已准入但尚未写完的缓冲字节；全部
 送出或连接清理丢弃后才释放。连接丢弃不会清除原请求账本中的未知结果，因此
 获得 EX 不等于原生执行已结束，回收仍需原账本和静止观察。协议夹具覆盖这些
 边界；本切片不包含新的真实模型/Herdr 换班验收。
+
+## 请求入口开发检查点
+
+后续开发已加入 receiver-handoff-request/status/cancel。request 的 spec 仅含
+request_id/reason，cancel 仅含 request_id。请求在精确 Owner EX 下分别保存
+requested 与 draining，冻结配置并预约唯一后继路径；同 ID 改输入拒绝，同 ID
+同输入返回已有历史。EX 每 20 ms 重试、最多两秒，guard 锁借用已持 EX，不再
+隐式申请 SH。原 scope/父状态变化、其他未结束 Owner、创建路径已经存在等情况
+拒绝推进。取消保留代号，第九代无新资源副作用地拒绝。
+
+这个检查点只完成请求和取消，目前停在 draining，不自动创建后继。独立观察、
+fence 镜像对齐、控制通知、权限恢复、Recovery retarget 和协调者退役仍待实现。
+状态与 CLI 帮助明确此边界。真实隔离队列/Git 工作区及本地 Unix 端点夹具验证
+请求幂等、取消、容量和 EX/CAS；它们没有执行原生模型 turn，也不是完整换班验收。
