@@ -41,13 +41,23 @@
 records 长度加一，取值 1..9；最多一个非终态请求。第 9 次请求在预约/创建前拒绝，
 同 ID/同输入返回原事实，改变输入或新 ID 不能绕过未决请求或容量。
 
+这是父任务的**可选扩展**。queue load 对缺少该字段或值为 null 的任务直接跳过
+本扩展验证，包括未请求换班的父任务、activity、legacy 和 terminal 记录，不要求
+升级或补空对象。非 null 时必须满足现有 progress::lineage::is_parent 判据：
+schema_version 为整数 2 且存在 requirements 字段；再验证 requirements 是有效的
+父需求对象及本扩展的 Owner/结构。activity/legacy 上的非 null 记录拒绝。已有
+记录不能通过删除/改 null 绕过 fence；save 的前后比较须阻止这种退化。终态父任务
+已有记录继续作历史结构验证，不要求原 runtime/observer 仍存活，也不触发新动作。
+既有终态 finalizer 在 EX 下完成精确 cleanup obligation 后整体退役父任务的路径
+仍允许；这与活动任务单独删除 receiver_handoff 字段区分，不能堵住最终回收。
+
 每代固定字段如下；尚未产生的值为 null，不能靠缺省推断成功：
 
 | 字段 | 类型与约束 |
 | --- | --- |
 | `generation`, `request_id`, `input_digest`, `reason`, `phase` | 连续代号、唯一 ID、规范化请求 SHA-256、1..1024 字节原因、下表阶段。 |
 | `from`, `to` | 各含 runtime/guard/session/scope；from 为完整旧 guard scope；to.runtime/guard 创建前唯一预约，session/scope 仅由原创建 journal 补齐。路径限定同 Owner 临时根 rt 下的独占子目录。 |
-| `configuration` | 冻结并验证 provider/model/effort/approval/sandbox/cwd/上游 endpoint/角色模型/driver；运行态 PID 和 session 单列，不接受请求扩权。 |
+| `configuration` | 冻结并验证 provider/model/effort/approval/sandbox/cwd/上游 endpoint/角色模型/driver，以及原业务配置快照 business_session_configuration；新 session 创建后须核对目标配置。它与当前 session_configuration 分开，不能用握手后的 never/readOnly 反推业务权限。 |
 | `snapshot` | path/sha256/bytes；受保护交接正文最多 16 KiB，引用原需求和未决义务，不复制父历史，不作为路径授权。 |
 | `fence` | generation/owner/old_runtime/new_runtime；runtime 侧 receiver-handoff.json 为镜像，父记录为权威。 |
 | `binding` | null 或 transaction_id/from_scope/to_scope/committed_at；只随同一队列事务的 receiver/guard_dir 更新成立。 |
@@ -71,7 +81,7 @@ cleanup obligation 验证，不因活动环境映射消失而赋予新权。原 
 | `bound` | 短队列事务提交 receiver/guard_dir、本代 binding 和唯一 accept 控制事件；新 guard 已 monitoring，独立业务 fence 仍关闭。需求/成果/验收/交付和旧通知不变。 | 依据队列 binding 完成 guard/observer 对齐；跨文件不一致不发送、不取得写权。 |
 | `accepted` | 原 queue 协议收到新 session 对本代 accept delivery 的精确 ACK；还须核实接手 turn 已结束、工具响应结算和 checkpoint ready。 | ACK 已保存但 turn 未静止则保留；发送未知不重发，重复 ACK 不推动另一代。 |
 | `retiring` | Recovery 已对齐且无未决 incident，按专用计划回收旧执行者，新业务仍关闭。 | 保留原义务，按原精确对象接续；父任务终态优先并吸收全部新旧资源。 |
-| `complete` | 所需旧执行资源回收完成，Recovery 指向新 scope；保存完成事实和唯一 ready 控制事件。 | 只解除新 receiver 的业务 fence；旧 runtime 永久拒绝新工作。 |
+| `complete` | 所需旧执行资源回收完成，Recovery 指向新 scope；保存完成事实和唯一 ready 控制事件。只准入已登记的 ready 恢复输入，普通新输入等其配置恢复日志证实后才开放。 | ready 发送/恢复未知则保留 fence，不重发；旧 runtime 永久拒绝新工作。 |
 
 阶段只按表前进；draining 可在尚无创建/发送/关闭副作用、原 scope 未变时转为
 cancelled，解除本代 fence 但保留代号。cancelled/complete 不能重新活动。
@@ -113,6 +123,15 @@ ID 由 Owner instance、generation、kind 确定。专用 host observation 核�
 此类事件，同名冲突不覆盖。消息明确“读取交接并 ACK，无需 task-apply，不扩权”，
 不能使用默认业务结果模板。
 
+control 是**附加对象**，不替换现有 wait/event 字段。wait 必须包含已有必填
+id/task/epoch/owner/reason/condition/kind/timeout_seconds，其中 task=Owner.task_id
+（父需求）、epoch=Owner.epoch、owner="coordinator"（现有文本角色）、kind="signal"、
+timeout_seconds=604800；control.owner 才是完整 Owner 对象。event 仍由既有
+observation_event/attach_observation 产生 id/wait/task/epoch/owner/outcome/summary/
+evidence/observed_at/acknowledged 和 lifecycle_owner，再附加已验证 control；
+task/epoch 必须继承同一父 wait，不能省略而被 isolation::closed 过滤。wait ID
+按队列既有字符/长度限制编码，event ID/去重仍沿用原 observation 规则。
+
 queue::dispatch 先处理原 active delivery，再筛选 pending：requested..prepared
 不发新事件，bound 只选本代 accept，accepted/retiring 只观察原 accept，complete
 优先 ready 再恢复普通事件。每个控制 delivery 只含一个事件，普通事件原样暂存。
@@ -130,9 +149,30 @@ networkAccess:false} 和 approvalPolicy=never；model/effort/服务保持原配�
 匹配该已登记意图的一次握手请求，TUI/普通 dispatch 无此授权，sending 未知不重发。
 接手 turn 的动态工具仅允许 inspect 和本代 ACK，所有业务动作拒绝。
 
-runtime 原权限不改写；只读为该 turn 的覆盖且由 broker 核验。必须先证实 accept
-turn 已结束，complete 后 ready 才用原配置业务 turn；ready 自身仍只 ACK、不
-task-apply。不能在仍活动的只读 turn 中途放开业务工具，也不能靠提示词保持只读。
+runtime 原权限与冻结的 business_session_configuration 不改写；但不能假设握手
+覆盖不会改变原生 session 默认值。握手必须走现有 broker::execute_native →
+record_native → subscription::completed/turn_configuration，不另走遗漏日志的
+direct RPC，也不把已成功覆盖从 session_configuration 中隐藏。后者准确记录当前
+已证实的 never/readOnly；独立的受保护 handoff 配置 journal 保存 generation/
+delivery/session、before/expected 配置、精确 params 摘要、turn 和 sending/applied。
+每次转换只更改登记的 approval/sandbox 字段，其余配置仍精确核对。
+
+新连接的 subscription::prepare/rejoin 仍只做无覆盖 thread/resume：握手已 applied
+时按当前只读 session_configuration 核验，不能与冻结的业务配置错比；恢复已
+applied 后按原业务配置核验。配置 journal 与 session_configuration 部分提交时
+只依据原成功回复/turn 记录完成对齐；不接受“原配置或临时配置任选一个”的宽松
+比较。回复缺失、恢复状态未知或实际配置不符时，仅保留无需 resume 的查询与
+诊断，阻止自动 resume、新 turn 和重放；不能用一次观察猜测发送成功。
+
+accept turn 已结束且旧资源回收完成后，唯一 ready turn 通过同一 broker 管线，
+**显式携带冻结的 approvalPolicy 和 sandboxPolicy**，以及原 model/effort；
+不能依赖省略字段继承，因为当前默认值可能还是 never/readOnly。发送前保存
+ready 配置恢复意图；成功回复由 subscription::completed 写回准确的
+session_configuration 并将匹配本代/该 turn 的恢复 journal 标为 applied，随后
+才开放普通新输入/TUI 写入。恢复回复未知保持原意图与 fence，不新建恢复 turn。
+receiver::active::Adapter.prompt 与 native::dispatch_codex 对后续业务 turn 都
+须显式使用原 approvalPolicy/sandboxPolicy，不继续沿用握手覆盖。ready 自身只
+ACK、不 task-apply，接续行为仍限原授权；不得在旧只读 turn 中途放开业务工具。
 
 ## Recovery 接续与共同解析器
 
@@ -201,6 +241,10 @@ binding。取消/未提交/未 complete 的边不提供历史来源证明，断�
 7. 同一 Recovery agent/session/observer PID 经 retarget 后继续工作；在 binding/
    observer 半提交、ACK 但 turn 未结束、旧 watcher 停止等边界不误开业务或重复
    创建 Recovery。合法前任回执可回收，字节不变；伪造/断链/跨 Owner 均拒绝。
+8. 覆盖握手后断开 broker → 按临时只读配置 resume → ready 显式恢复原 approval/
+   sandbox → 再次断开/resume → 业务 turn 的回归；配置变更、恢复未知或 journal
+   半提交均不放宽校验/重放。控制 wait/event 完整保留父 task；无该可选字段的
+   parent/activity/legacy/terminal 队列照常加载，非法非 null 及删除原 fence 拒绝。
 
 这份设计不以一次通过证明自动阈值换班、活跃业务迁移、任意累计次数或全部故障。
 父需求历史跨容量接续、发布积压集成证据及 #146 仍按原独立范围推进。
