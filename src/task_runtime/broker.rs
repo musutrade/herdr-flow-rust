@@ -105,6 +105,7 @@ fn request_permit(root: &Path) -> Result<Option<crate::lifecycle::Permit>> {
 }
 
 fn admit_request(root: &Path, request: &J) -> Result<()> {
+    super::human::admit_native(root, request)?;
     if request["method"] == "tool/respond" {
         // tools::respond verifies the already-recorded completed result and
         // requires the original connection; it cannot create/rejoin a thread.

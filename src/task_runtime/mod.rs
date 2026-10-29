@@ -13,6 +13,7 @@ use std::{
 pub mod broker;
 pub mod cli;
 pub mod configuration;
+pub mod human;
 mod launcher;
 mod role_models;
 pub use launcher::resolve as codex_namespace_launcher;
@@ -150,6 +151,7 @@ pub fn launch(env: &mut TaskEnvironment, root: &Path, spec: &J) -> Result<Child>
     retirement::admit(root)?;
     configuration::validate_launch(spec)?;
     let permit = crate::task_env::isolation::mutation_permit(env)?;
+    human::admit_launch(env, spec)?;
     let _runtime_permit = crate::lifecycle::runtime_permit(root)?;
     let _lock = util::FileLock::acquire(&root.join("runtime.lock"), false)?
         .ok_or_else(|| FlowError::guard("runtime is busy"))?;

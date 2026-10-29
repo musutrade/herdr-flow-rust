@@ -255,6 +255,16 @@ fn replace_candidate(t: &mut J, id: J) {
     t["acceptance_round"] = json!(model::int(t, "acceptance_round").unwrap_or(0) + 1);
 }
 
+pub(crate) fn invalidate_human_candidate(task: &mut J) -> Result<()> {
+    ensure(
+        is_parent(task),
+        "human return requires the original versioned requirement",
+    )?;
+    replace_candidate(task, J::Null);
+    task["phase"] = json!("coordinating");
+    Ok(())
+}
+
 fn activity(s: &mut J, spec: &J, now: f64, adapter: &dyn ArtifactAdapter) -> Result<J> {
     let parent = load_parent(s, spec)?;
     let name = field(spec, "activity")?;

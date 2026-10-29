@@ -233,9 +233,12 @@ fn drive_tick(fixture: &Fixture) -> FlowError {
 
 fn prepared_checkpoint(fixture: &Fixture) -> util::FileLock {
     let root = fixture.root();
-    let lock = util::FileLock::acquire(&root.join("control-service.lock"), false)
-        .unwrap()
-        .unwrap();
+    let mut lock = None;
+    wait_until(|| {
+        lock = util::FileLock::acquire(&root.join("control-service.lock"), false).unwrap();
+        lock.is_some()
+    });
+    let lock = lock.unwrap();
     let old = json!({"phase":"complete","result":{"success":true,"contentItems":[]}});
     let proof = util::pyjson::sha256_hex(old.to_string().as_bytes());
     util::atomic_write_json(&root.join("control-tools.json"), &json!({"old":old})).unwrap();

@@ -46,6 +46,14 @@ fn repeated(t: &J, owner: &Owner, outcome: &str, reason: &str) -> Result<()> {
 
 fn validate_new(t: &J, spec: &J, env: &TaskEnvironment, outcome: &str) -> Result<()> {
     ensure(
+        t["human_writer"].is_null()
+            || matches!(
+                t["human_writer"]["phase"].as_str(),
+                Some("draining" | "released")
+            ),
+        "return and verify the human writer before finalization; retain its checkout",
+    )?;
+    ensure(
         t["state_version"] == spec["state_version"] && spec["state_version"].as_u64().is_some(),
         "task state version changed; inspect before terminal submission",
     )?;

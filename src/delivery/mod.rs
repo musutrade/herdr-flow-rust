@@ -77,6 +77,7 @@ fn stage_intent(
     spec: &J,
     executor: &dyn Executor,
 ) -> Result<()> {
+    crate::task_runtime::human::admit_workspace(env, &env.workspace_root.join("checkout"))?;
     if !env.delivery.is_null() {
         ensure(
             env.delivery["request"] == *spec && env.delivery["queue"] == json!(queue),
@@ -256,6 +257,7 @@ fn validate_frozen_parent(state: &J, parent: &J, intent: &J) -> Result<()> {
 /// unknown/failed/absent phase; inspect the returned journal.
 pub fn execute(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    crate::task_runtime::human::admit_workspace(env, &env.workspace_root.join("checkout"))?;
     validate_execution(env)?;
     executor.preflight(&env.delivery)?;
     reserve_execution(env)?;
@@ -353,6 +355,7 @@ fn record_problem(env: &mut TaskEnvironment, phase: &str, reason: String) {
 /// retry. Concurrent endpoint changes remain the trusted adapter's responsibility.
 pub fn retry(env: &mut TaskEnvironment, executor: &dyn Executor) -> Result<J> {
     let _permit = crate::task_env::isolation::mutation_permit(env)?;
+    crate::task_runtime::human::admit_workspace(env, &env.workspace_root.join("checkout"))?;
     ensure_owned(env)?;
     ensure(
         env.delivery["phase"] == "absent",

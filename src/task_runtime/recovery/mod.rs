@@ -166,8 +166,14 @@ fn tick(root: &Path, context: &J) -> Result<bool> {
     let Some(_lock) = lock_state(root)? else {
         return Ok(false);
     };
-    record_cycle(root, context, &q, &permit)?;
+    observe_current(root, context, &permit)?;
     Ok(false)
+}
+
+fn observe_current(root: &Path, context: &J, permit: &crate::lifecycle::Permit) -> Result<()> {
+    // A human request may have committed between the first read and SH.
+    let q = crate::queue::load_queue(&permit.owner().queue_root)?;
+    record_cycle(root, context, &q, permit)
 }
 
 fn record_cycle(root: &Path, context: &J, q: &J, permit: &crate::lifecycle::Permit) -> Result<()> {
@@ -194,6 +200,16 @@ fn cycle(root: &Path, context: &J, q: &J, permit: &crate::lifecycle::Permit) -> 
     let incident = read(root, "incident.json")?;
     if let Some(mut incident) = incident.filter(|i| i["phase"] != "handled") {
         return advance(root, context, &mut incident, q);
+    }
+    scan_idle(root, context, q)
+}
+
+fn scan_idle(root: &Path, context: &J, q: &J) -> Result<()> {
+    if let Some(fault) = super::human::verification_fault(context, q)? {
+        return record_fault(root, context, fault);
+    }
+    if super::human::pending(context, q)? {
+        return Ok(());
     }
     match observe::scan(context, q)? {
         Some(fault) => record_fault(root, context, fault),
