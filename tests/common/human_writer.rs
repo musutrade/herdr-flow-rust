@@ -484,7 +484,8 @@ fn registered_descendant_retains_writer_even_after_leaving_the_checkout() {
         .as_str()
         .unwrap()
         .contains("descendant"));
-    assert_eq!(f.acquire()["phase"], "human");
+    let acquired = f.acquire();
+    assert_eq!(acquired["phase"], "human", "{acquired}");
     service.finish();
 }
 

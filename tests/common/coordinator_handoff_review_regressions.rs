@@ -280,3 +280,39 @@ fn first_save_checks_protected_original_runtime_and_session_not_just_scope_json(
     // Loading the already anchored history does not depend on old live files.
     validate_queue(&after).unwrap();
 }
+
+#[test]
+fn first_save_checks_the_original_recovery_namespace_and_context_authority() {
+    let (_temp, before, mut after) = protected_admission();
+    let record = entry(&mut after);
+    let from = record["from"].clone();
+    let root = PathBuf::from(from["runtime"].as_str().unwrap());
+    let observer = root.join("recovery-observer");
+    record["configuration"]["role_models"]["recovery"] = model();
+    record["recovery"] = json!({"observer":observer,"origin_coordinator":root,"phase":"pending",
+        "from_target":{"generation":0,"runtime":root,"scope":from["scope"],"transaction_id":null},
+        "to_target":{"generation":1,"runtime":record["to"]["runtime"],
+        "scope":record["to"]["scope"],"transaction_id":null}});
+    let mut runtime = util::read_state_json(&root, "runtime.json").unwrap();
+    runtime["role_models"] = record["configuration"]["role_models"].clone();
+    util::atomic_write_json(&root.join("runtime.json"), &runtime).unwrap();
+    validate_queue(&after).unwrap();
+    assert!(validate_save(&before, &after).is_err());
+    util::protected::runtime_namespace(&observer).unwrap();
+    util::atomic_write_json(&observer.join("lifecycle-owner.json"), &json!(owner())).unwrap();
+    let context = json!({"owner":owner(),"observer":observer,"coordinator":root});
+    util::atomic_write_json(&observer.join("observer.json"), &context).unwrap();
+    validate_save(&before, &after).unwrap();
+    for (field, value) in [
+        ("owner", json!({"instance_id":"foreign"})),
+        ("observer", json!(root.join("other-observer"))),
+        ("coordinator", json!(root.join("other-runtime"))),
+    ] {
+        let mut foreign = context.clone();
+        foreign[field] = value;
+        util::atomic_write_json(&observer.join("observer.json"), &foreign).unwrap();
+        assert!(validate_save(&before, &after).is_err(), "{field}");
+    }
+    // The persisted history remains readable without trusting a live observer.
+    validate_queue(&after).unwrap();
+}
