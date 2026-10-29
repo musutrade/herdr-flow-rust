@@ -41,6 +41,33 @@ pub(super) fn observe(
     })
 }
 
+/// Complete ordinary and attached inventories for an exact private cwd.
+/// Also used before terminal cleanup to retain Guardian/native child identities.
+pub(super) fn snapshot(socket: &str, cwd: &Path, parents: &[String]) -> J {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut client = herdr_flow::codex::rpc::Client::new(socket);
+    let mut pages = Vec::new();
+    let mut call = |method: &str, params: &J| {
+        client.timeout = remaining(deadline);
+        client.connect()?;
+        client.timeout = remaining(deadline);
+        client.call(method, params)
+    };
+    for parent in std::iter::once(None).chain(parents.iter().map(Some)) {
+        for archived in [false, true] {
+            inventory(
+                &[cwd.to_path_buf()],
+                &BTreeMap::new(),
+                archived,
+                parent,
+                &mut call,
+                &mut pages,
+            );
+        }
+    }
+    json!(pages)
+}
+
 fn remaining(deadline: Instant) -> f64 {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
@@ -168,7 +195,7 @@ fn inventory(
                 cwd.display()
             );
             assert!(!expected.contains_key(id), "audit thread/list archived={archived} cursor={cursor}: original session persists: {id}");
-            ids.push(json!({"id":id,"cwd":cwd}));
+            ids.push(row.clone());
         }
         let next = reply.get("nextCursor").unwrap_or_else(|| {
             panic!("audit op=thread/list params={params}: next cursor is unknown")

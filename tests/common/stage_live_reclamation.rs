@@ -267,3 +267,15 @@ pub(super) fn retained_review(audit: &StageAudit, env: &J) {
 #[cfg(test)]
 #[path = "stage_live_reclamation_tests.rs"]
 mod tests;
+
+pub(super) fn native_snapshot(socket: &str, cwd: &Path, parents: &[String]) -> J {
+    deletion::snapshot(socket, cwd, parents)
+}
+pub(super) fn native_absence(
+    socket: &str,
+    scope: &[PathBuf],
+    expected: &BTreeMap<String, PathBuf>,
+    parents: &[String],
+) -> J {
+    deletion::observe(socket, scope, expected, parents)
+}

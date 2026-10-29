@@ -21,7 +21,7 @@ pub(super) struct StageAudit {
     store: PathBuf,
 }
 
-fn read(root: &Path, name: &str) -> Option<J> {
+pub(super) fn read(root: &Path, name: &str) -> Option<J> {
     if !root.exists() {
         return None;
     }
@@ -409,7 +409,7 @@ impl StageAudit {
     }
 }
 
-fn bytes(target: &Path, sha: &str, name: &str, expected: &[u8]) {
+pub(super) fn bytes(target: &Path, sha: &str, name: &str, expected: &[u8]) {
     let out = Command::new("git")
         .arg("-C")
         .arg(target)
@@ -458,3 +458,20 @@ fn audit_reads_actual_protected_document_storage() {
 
 #[path = "stage_live_publication_tests.rs"]
 mod publication_tests;
+
+// Shared by the explicitly selected human handoff acceptance. Reuse the complete
+// pagination/attachment proof rather than treating unloaded memory as deletion.
+pub(super) fn native_snapshot(socket: &str, cwd: &Path, parents: &[String]) -> J {
+    reclamation::native_snapshot(socket, cwd, parents)
+}
+pub(super) fn native_absence(
+    socket: &str,
+    cwd: &Path,
+    expected: &BTreeMap<String, PathBuf>,
+    parents: &[String],
+) -> J {
+    reclamation::native_absence(socket, &[cwd.to_path_buf()], expected, parents)
+}
+pub(super) fn exact_process_alive(process: &J) -> bool {
+    reclamation::process_alive(process)
+}
