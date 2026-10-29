@@ -88,6 +88,11 @@ observer/environment 锁；获得后按 environment、guard/observer、短 queue
 （实际是 SH）冒充 EX。EX 不跨模型等待或子进程启动；外部步骤先记意图，在 queue
 锁外执行，再获取 EX 核对原操作并提交。启动子进程前释放 EX，内部创建准入只接受
 该代预约路径/配置，不是公开 CLI bypass。被准入的原生写请求持 SH 到送入原连接。
+EX 内的 guard/observer 锁和保存须新增接收已持 Permit 的内部入口，验证精确 Owner
+后复用该许可；不能调用当前会隐式再取 SH 的 guard::locked/locked_existing/save，
+也不能把失败降级为无锁写入。TUI bridge 若先解析再发送缓冲字节，许可必须覆盖
+最终 socket 写入，不能仅覆盖 protocol::forward_permitted 的解析阶段；EX 等待
+需核对这些已准入缓冲，不能在解析函数返回时误认为旧输入已经排空。
 
 新增 fence 检查接入 launch/native create/dispatch/新 TUI、broker/TUI drain 的
 每条原生请求，以及 control 业务动作；`bound_permit` 继续验证原 scope，不能单独
@@ -113,7 +118,8 @@ queue::dispatch 先处理原 active delivery，再筛选 pending：requested..pr
 优先 ready 再恢复普通事件。每个控制 delivery 只含一个事件，普通事件原样暂存。
 新 guard 为 monitoring 加独立业务 fence，不能用 non-monitoring 屏蔽整个通道；
 receiver_can_deliver/adapter readiness 须接受经验证的控制目的。delivery 保留
-events/session/phase，追加 control 身份；session 必须等于 target_scope.session。
+events/session/phase，追加 control 身份；session 必须等于
+target_scope.codex_runtime.session（guard::scope 的实际嵌套结构）。
 ACK 检查原 delivery.session、当前完整 scope、Owner、代号、wait/event 和 binding
 事务后记录事实；原收件人、旧 ACK 和旧通知不改写，重复 ACK 不推进另一代。
 
