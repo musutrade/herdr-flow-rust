@@ -10,8 +10,7 @@ pub(super) fn quiescent(env: &TaskEnvironment, record: &J, state: &J) -> Result<
     queue_operations(state, record)?;
     git_locks(&checkout)?;
     let mut observation = Observation::default();
-    let coordinator = PathBuf::from(required(record, "coordinator")?);
-    runtimes(env, &checkout, &coordinator, &mut observation)?;
+    runtimes(env, &checkout, record, &mut observation)?;
     let owner: Owner = serde_json::from_value(record["owner"].clone())?;
     add_watch(
         &queue::artifacts(&owner.queue_root)?,
@@ -48,12 +47,13 @@ fn checkout_binding(env: &TaskEnvironment, record: &J) -> Result<PathBuf> {
 fn runtimes(
     env: &TaskEnvironment,
     checkout: &Path,
-    coordinator: &Path,
+    record: &J,
     observation: &mut Observation,
 ) -> Result<()> {
+    let coordinator = PathBuf::from(required(record, "coordinator")?);
     for (index, entry) in std::fs::read_dir(env.temp_root.join("rt"))?.enumerate() {
         ensure(index < 128, "human runtime inventory exceeds bound")?;
-        runtime(env, &entry?.path(), checkout, coordinator, observation)?;
+        runtime(env, &entry?.path(), checkout, &coordinator, observation)?;
     }
     Ok(())
 }
