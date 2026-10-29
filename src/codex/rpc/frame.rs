@@ -112,6 +112,12 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
+    /// Includes an unfinished fragmented message even when its first fragment
+    /// is empty. Its admission must survive until completion or disconnection.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.buffer.is_empty() || self.fragment_opcode.is_some()
+    }
+
     pub fn new(masked: bool, max_message: usize) -> Self {
         Self {
             masked,

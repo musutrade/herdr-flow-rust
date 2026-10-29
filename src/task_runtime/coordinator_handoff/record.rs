@@ -22,7 +22,8 @@ fn validate_parent(queue: &J, name: &str, task: &J) -> Result<()> {
     let state = &task[KEY];
     let owner = state_owner(queue, name, state)?;
     let records = state_records(state)?;
-    validate_records(task, state, records, &owner)
+    validate_records(task, state, records, &owner)?;
+    super::anchor::current(queue, task, records.last().unwrap())
 }
 
 fn state_owner(queue: &J, name: &str, state: &J) -> Result<Owner> {
@@ -71,14 +72,15 @@ fn validate_records(task: &J, state: &J, records: &[J], owner: &Owner) -> Result
     ensure(
         state["active_generation"] == chain.active,
         "coordinator handoff active generation changed",
-    )
+    )?;
+    super::recovery::validate(records)
 }
 
 struct Chain<'a> {
     ids: BTreeSet<String>,
     runtimes: BTreeSet<String>,
     sessions: BTreeSet<String>,
-    current_scope: &'a J,
+    current_target: &'a J,
     active: J,
 }
 
@@ -88,7 +90,7 @@ impl<'a> Chain<'a> {
             ids: BTreeSet::new(),
             runtimes: BTreeSet::from([required(&first["from"], "runtime")?]),
             sessions: BTreeSet::from([required(&first["from"], "session")?]),
-            current_scope: &first["from"]["scope"],
+            current_target: &first["from"],
             active: J::Null,
         })
     }
@@ -114,7 +116,7 @@ impl<'a> Chain<'a> {
     fn advance(&mut self, record: &'a J, last: bool) -> Result<()> {
         self.unique(record)?;
         ensure(
-            self.current_scope == &record["from"]["scope"],
+            self.current_target == &record["from"],
             "coordinator predecessor chain is disconnected",
         )?;
         if !settled(record) {
@@ -124,10 +126,10 @@ impl<'a> Chain<'a> {
             )?;
             self.active = record["generation"].clone();
         }
-        self.current_scope = if record["phase"] == "complete" {
-            &record["to"]["scope"]
+        self.current_target = if record["phase"] == "complete" {
+            &record["to"]
         } else {
-            &record["from"]["scope"]
+            &record["from"]
         };
         Ok(())
     }
@@ -168,12 +170,11 @@ fn record_identity(record: &J, generation: usize) -> Result<()> {
 fn validate_record(task: &J, record: &J, owner: &Owner, generation: usize) -> Result<()> {
     record_identity(record, generation)?;
     targets(task, record, owner)?;
-    frozen_configuration(record, owner)?;
+    super::configuration::validate(record, owner)?;
     fence(record, owner)?;
     binding(record)?;
     snapshot(record)?;
     notices(record)?;
-    recovery(record, owner)?;
     retirement(record)
 }
 
@@ -265,7 +266,28 @@ fn target_scope(target: &J, owner: &Owner) -> Result<()> {
         scope["task"] == owner.task_id && scope["role"] == "coordinator",
         "coordinator role or task changed",
     )?;
+    presentation(scope)?;
     native_scope(native, target, owner)
+}
+
+fn presentation(scope: &J) -> Result<()> {
+    // Native task receivers have no Herdr pane in their guard scope. The
+    // optional TUI has its own independently verified presentation record.
+    if ["pane", "terminal", "socket"]
+        .iter()
+        .all(|k| scope[*k].is_null())
+    {
+        return Ok(());
+    }
+    for key in ["pane", "terminal"] {
+        let id = text(scope, key, 256)?;
+        ensure(
+            id.bytes().all(|b| b.is_ascii_graphic()),
+            "invalid presentation identity",
+        )?;
+    }
+    path(scope, "socket")?;
+    Ok(())
 }
 
 fn native_scope(native: &J, target: &J, owner: &Owner) -> Result<()> {
@@ -277,68 +299,6 @@ fn native_scope(native: &J, target: &J, owner: &Owner) -> Result<()> {
             && native["cwd"] == target["scope"]["cwd"],
         "coordinator handoff scope identity changed",
     )
-}
-
-fn configuration_identity(config: &J) -> Result<()> {
-    fields(
-        config,
-        &[
-            "provider",
-            "model",
-            "effort",
-            "approval",
-            "sandbox",
-            "cwd",
-            "upstream_endpoint",
-            "role_models",
-            "driver",
-            "business_session_configuration",
-        ],
-    )?;
-    super::super::role_models::validate_model(&config["model"])?;
-    path(config, "cwd")?;
-    path(config, "driver")?;
-    ensure(
-        config["provider"] == config["model"]["providerID"],
-        "coordinator provider changed",
-    )?;
-    ensure(
-        config["effort"] == config["model"]["reasoning_effort"],
-        "coordinator effort changed",
-    )?;
-    Ok(())
-}
-
-fn frozen_configuration(record: &J, owner: &Owner) -> Result<()> {
-    let config = &record["configuration"];
-    configuration_identity(config)?;
-    business_configuration(config)?;
-    for name in ["from", "to"] {
-        let scope = &record[name]["scope"]["codex_runtime"];
-        if !scope.is_null() {
-            ensure(
-                scope["cwd"] == config["cwd"]
-                    && scope["model"] == config["model"]
-                    && scope["instance"] == owner.instance_id,
-                "coordinator target changed the frozen configuration",
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn business_configuration(config: &J) -> Result<()> {
-    let original = &config["business_session_configuration"];
-    ensure(
-        original.is_object()
-            && original["approvalPolicy"] == config["approval"]
-            && original["sandbox"] == config["sandbox"]
-            && original["cwd"] == config["cwd"]
-            && original["model"] == config["model"]["id"]
-            && original["modelProvider"] == config["provider"],
-        "coordinator original business configuration changed",
-    )?;
-    Ok(())
 }
 
 fn fence(record: &J, owner: &Owner) -> Result<()> {
@@ -429,13 +389,11 @@ fn notice_stages(record: &J) -> Result<()> {
         (accept > 0) == bound,
         "coordinator acceptance notice is not bound to its scope transaction",
     )?;
-    if record["phase"] != "complete" {
-        ensure(
-            record["notices"]["ready"]["phase"] == "pending",
-            "coordinator ready notice precedes retirement completion",
-        )?;
-    }
-    Ok(())
+    let ready = notice_phase(&record["notices"]["ready"])?;
+    ensure(
+        (ready > 0) == (record["phase"] == "complete"),
+        "coordinator completion must atomically register its ready notice",
+    )
 }
 
 fn notice_identity(notice: &J) -> Result<()> {
@@ -486,52 +444,6 @@ pub(super) fn notice_phase(notice: &J) -> Result<usize> {
     .iter()
     .position(|phase| notice["phase"] == *phase)
     .ok_or_else(|| FlowError::guard("invalid coordinator notice phase"))
-}
-
-fn recovery(record: &J, owner: &Owner) -> Result<()> {
-    let recovery = &record["recovery"];
-    if recovery.is_null() {
-        return Ok(());
-    }
-    fields(
-        recovery,
-        &[
-            "observer",
-            "origin_coordinator",
-            "from_target",
-            "to_target",
-            "phase",
-        ],
-    )?;
-    ensure(
-        path(recovery, "observer")?
-            == path(recovery, "origin_coordinator")?.join("recovery-observer"),
-        "original recovery observer location changed",
-    )?;
-    recovery_target(&recovery["from_target"], &record["from"], owner)?;
-    recovery_target(&recovery["to_target"], &record["to"], owner)?;
-    ensure(
-        matches!(recovery["phase"].as_str(), Some("pending" | "bound")),
-        "invalid recovery binding phase",
-    )
-}
-
-fn recovery_target(target: &J, receiver: &J, owner: &Owner) -> Result<()> {
-    fields(
-        target,
-        &["generation", "runtime", "scope", "transaction_id"],
-    )?;
-    ensure(
-        target["runtime"] == receiver["runtime"] && target["scope"] == receiver["scope"],
-        "recovery target changed",
-    )?;
-    if !target["scope"].is_null() {
-        ensure(
-            target["scope"]["codex_runtime"]["instance"] == owner.instance_id,
-            "recovery target Owner changed",
-        )?;
-    }
-    Ok(())
 }
 
 fn retirement(record: &J) -> Result<()> {

@@ -2,8 +2,11 @@
 //! authoritative; journals never grant an independent permission to act.
 use super::*;
 use crate::lifecycle::Owner;
+mod anchor;
+mod configuration;
 mod gate;
 mod record;
+mod recovery;
 mod request;
 mod transition;
 

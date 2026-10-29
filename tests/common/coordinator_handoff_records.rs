@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "coordinator_handoff_review_regressions.rs"]
+mod review_regressions;
+
 pub(super) fn owner() -> Owner {
     Owner {
         queue_root: "/queue".into(),
@@ -37,16 +40,33 @@ pub(super) fn record(n: usize) -> J {
     let policy = json!({"type":"workspaceWrite","writableRoots":["/workspace/checkout"],"networkAccess":false});
     json!({"generation":n,"request_id":format!("request-{n}"),"input_digest":"a".repeat(64),"reason":"explicit settled replacement","phase":"requested",
         "from":from,"to":to,"configuration":{"provider":"openai","model":model(),"effort":"high","approval":"on-request","sandbox":policy,
-            "cwd":"/workspace/checkout","upstream_endpoint":{"path":"/upstream.sock","dev":1,"ino":2,"uid":1000},"role_models":{},"driver":"/driver",
-            "business_session_configuration":{"model":"fixture","modelProvider":"openai","cwd":"/workspace/checkout","approvalPolicy":"on-request","sandbox":policy}},
+            "cwd":"/workspace/checkout","upstream_endpoint":{"path":"/upstream.sock","dev":1,"ino":2,"uid":1000},"role_models":{"developer":model(),"reviewer":model()},"driver":"/driver",
+            "business_session_configuration":{"model":"fixture","modelProvider":"openai","cwd":"/workspace/checkout","approvalPolicy":"on-request","sandbox":policy,"reasoningEffort":"high"}},
         "snapshot":null,"fence":{"generation":n,"owner":owner(),"old_runtime":from["runtime"],"new_runtime":to["runtime"]},"binding":null,
         "notices":{"accept":notice(n,"accept"),"ready":notice(n,"ready")},"recovery":null,"retirement":null})
 }
 
 pub(super) fn queue() -> J {
-    json!({"id":"queue","lifecycle":{"queue_root":"/queue"},"tasks":{"parent":{"task":"parent","epoch":1,"schema_version":2,"requirements":{},
-        "environment":{"queue_id":"queue","task_id":"parent","epoch":1,"instance_id":"instance","checkout":"/workspace/checkout","creation_seed":{"temp_root":"/scratch"}},
+    json!({"guard_dir":target(0,true)["guard"],"receiver":target(0,true)["scope"],"id":"queue","lifecycle":{"queue_root":"/queue"},"tasks":{"parent":{"task":"parent","epoch":1,"schema_version":2,"requirements":{},
+        "environment":{"phase":"active","queue_id":"queue","task_id":"parent","epoch":1,"instance_id":"instance","checkout":"/workspace/checkout","creation_seed":{"temp_root":"/scratch"}},
         KEY:{"version":1,"owner":owner(),"next_generation":2,"active_generation":1,"records":[record(1)]}}}})
+}
+
+fn align_receiver(q: &mut J) {
+    let record = q["tasks"]["parent"][KEY]["records"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    let target = if record["binding"].is_null() {
+        &record["from"]
+    } else {
+        &record["to"]
+    };
+    let guard = target["guard"].clone();
+    let scope = target["scope"].clone();
+    q["guard_dir"] = guard;
+    q["receiver"] = scope;
 }
 
 fn entry(queue: &mut J) -> &mut J {
@@ -128,6 +148,7 @@ fn successor_paths_sessions_and_configuration_cannot_escape_owner() {
     let mut q = queue();
     *entry(&mut q) = complete(record(1));
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut q);
     let next = entry(&mut q);
     // A textual alias must not evade ancestor de-duplication while selecting
     // exactly the predecessor's physical runtime directory.
@@ -146,6 +167,7 @@ fn eight_completed_generations_are_bounded_and_cycles_are_rejected() {
         json!((1..=8).map(|n| complete(record(n))).collect::<Vec<_>>());
     q["tasks"]["parent"][KEY]["next_generation"] = json!(9);
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut q);
     validate_queue(&q).unwrap();
     let good = q.clone();
     q["tasks"]["parent"][KEY]["records"]
@@ -207,6 +229,7 @@ fn another_generation_requires_original_ready_ack_and_preserves_frozen_prefix() 
     let mut before = queue();
     *entry(&mut before) = complete(record(1));
     before["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut before);
     let mut after = before.clone();
     after["tasks"]["parent"][KEY]["records"]
         .as_array_mut()
@@ -236,6 +259,7 @@ fn another_generation_requires_original_ready_ack_and_preserves_frozen_prefix() 
 fn recovery_binding_remains_the_original_role_and_target() {
     let mut before = queue();
     let entry = entry(&mut before);
+    entry["configuration"]["role_models"]["recovery"] = model();
     entry["recovery"] = json!({"observer":"/scratch/rt/coordinator-0/recovery-observer",
         "origin_coordinator":"/scratch/rt/coordinator-0","phase":"pending",
         "from_target":{"generation":0,"runtime":entry["from"]["runtime"],"scope":entry["from"]["scope"],"transaction_id":null},
@@ -264,6 +288,7 @@ fn phase_requires_recorded_creation_ack_and_retirement_evidence() {
     let mut q = queue();
     *entry(&mut q) = complete(record(1));
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut q);
     for (path, value) in [
         ("/snapshot", J::Null),
         ("/snapshot/bytes", json!(16385)),
@@ -299,6 +324,8 @@ fn queue_load_and_save_enforce_the_extension_before_writing() {
     fixture["tasks"]["parent"]["environment"]["queue_id"] = json!(binding.queue_id);
     entry(&mut fixture)["fence"]["owner"] = json!(binding);
     original["tasks"] = fixture["tasks"].clone();
+    original["guard_dir"] = fixture["guard_dir"].clone();
+    original["receiver"] = fixture["receiver"].clone();
     // Seed a protected authority snapshot; no runtime or environment is created.
     util::atomic_write_json(&root.join("queue.json"), &original).unwrap();
     crate::queue::load_queue(&root).unwrap();
@@ -333,6 +360,7 @@ fn intention_or_complete_label_cannot_grant_new_work_before_restore_driver() {
     let mut finished = q.clone();
     *entry(&mut finished) = complete(record(1));
     finished["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut finished);
     assert!(check_workspace(&finished, Path::new("/workspace/checkout")).is_err());
     assert!(admit_control(&finished, &owner(), "apply").is_err());
     let mut cancelled = q;
@@ -356,6 +384,8 @@ fn native_admission_keeps_reads_and_original_replies_but_refuses_new_turns() {
     fixture["tasks"]["parent"]["environment"]["queue_id"] = json!(owner.queue_id);
     entry(&mut fixture)["fence"]["owner"] = json!(owner);
     q["tasks"] = fixture["tasks"].clone();
+    q["guard_dir"] = fixture["guard_dir"].clone();
+    q["receiver"] = fixture["receiver"].clone();
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
     let runtime = temp.path().join("runtime");
     util::ensure_private_dir(&runtime, true).unwrap();
@@ -373,6 +403,7 @@ fn native_admission_keeps_reads_and_original_replies_but_refuses_new_turns() {
     assert!(!crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
     entry(&mut q)["phase"] = json!("cancelled");
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
+    align_receiver(&mut q);
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
     crate::task_runtime::human::admit_native(&runtime, &turn).unwrap();
     assert!(crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
