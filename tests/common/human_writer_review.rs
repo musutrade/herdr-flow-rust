@@ -338,3 +338,6 @@ fn worker_without_observer_namespace_keeps_full_human_quiescence_available() {
 
 #[path = "human_optional_observers.rs"]
 mod optional_observers;
+
+#[path = "human_prepared_recovery.rs"]
+mod prepared_recovery;

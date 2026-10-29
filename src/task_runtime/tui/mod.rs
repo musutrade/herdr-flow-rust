@@ -14,6 +14,7 @@ mod hooks;
 #[path = "../../../tests/common/native_tui_method_fixtures.rs"]
 pub(crate) mod method_fixtures;
 mod persistence;
+mod prepared;
 mod protocol;
 
 pub(crate) fn require_retirement_drained(record: &J) -> Result<()> {
@@ -209,6 +210,7 @@ fn verify_recovery_runtime(
 
 fn open_bound(root: &Path, runtime: &J) -> Result<J> {
     let _lock = presentation_lock(root)?;
+    prepared::request(root, runtime)?;
     if let Some(previous) = existing_attachment(root, runtime)? {
         // Reconcile an existing attempt, never issue a second pane/run.
         return await_ready(root, runtime, previous);
@@ -321,6 +323,10 @@ fn bind_created_tab(record: &mut J, created: &J) -> Result<()> {
 }
 
 fn launch_frontend(runtime: &J, record: &J) -> Result<()> {
+    herdr::run(record, frontend_command(runtime, record)?)
+}
+
+fn frontend_command(runtime: &J, record: &J) -> Result<String> {
     let executable = runtime
         .get("driver_binary")
         .cloned()
@@ -338,7 +344,9 @@ fn launch_frontend(runtime: &J, record: &J) -> Result<()> {
         "--state-dir".into(),
         required(record, "directory")?,
     ];
-    herdr::run(record, util::process::shell_join(&argv))
+    // This command runs only in the new dedicated tab. Replace its shell so
+    // there is no unregistered waiting process in the task checkout.
+    Ok(format!("exec {}", util::process::shell_join(&argv)))
 }
 
 fn await_materialized(root: &Path, session: &str) -> Result<()> {
@@ -675,6 +683,22 @@ pub(crate) fn retirement_snapshot(
     };
     let processes = retirement_frontends(&runtime, &record)?;
     Ok((Some(record), processes))
+}
+
+/// Human acquisition alone can recognize a positively recorded fresh Recovery
+/// whose presentation has never been requested. Generic retirement stays strict.
+pub(crate) fn human_snapshot(
+    env: &TaskEnvironment,
+    root: &Path,
+    coordinator: &Path,
+) -> Result<(Option<J>, Vec<crate::task_env::ProcessRecord>)> {
+    let runtime = util::read_state_json(root, "runtime.json")?;
+    super::verify_owner_record(env, &runtime)?;
+    if runtime.get("native_tui").is_none() || binding(root)?.is_some() {
+        return retirement_snapshot(env, root);
+    }
+    prepared::human_proof(env, root, coordinator, &runtime)?;
+    Ok((None, vec![]))
 }
 
 fn retirement_frontends(runtime: &J, record: &J) -> Result<Vec<crate::task_env::ProcessRecord>> {

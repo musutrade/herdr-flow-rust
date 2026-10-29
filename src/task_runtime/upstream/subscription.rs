@@ -122,6 +122,7 @@ pub(in crate::task_runtime) fn completed(
 }
 
 fn turn_configuration(root: &Path, params: &J, result: &J) -> Result<()> {
+    let _journal = super::session_lock(root)?;
     let turn = required(&result["turn"], "id")?;
     let mut journal = util::read_state_json(root, "upstream-session.json")?;
     let mut overrides = serde_json::Map::new();
@@ -163,4 +164,50 @@ fn validate(runtime: &J, journal: &J, result: &J) -> Result<()> {
             && comparable(&configuration(result)) == comparable(&journal["session_configuration"]),
         "resumed thread permissions or configuration changed",
     )
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    #[test]
+    fn configuration_writer_reads_after_shared_lock_and_preserves_requested_intent() {
+        let temp = util::fs::test_tempdir();
+        let root = temp.path();
+        let mut journal = json!({"session_configuration":{}, "presentation_intent":{"version":1,"phase":"not_requested"}});
+        util::atomic_write_json(&root.join("upstream-session.json"), &journal).unwrap();
+        let lock = super::super::session_lock(root).unwrap();
+        let owned = root.to_path_buf();
+        let (sent, received) = std::sync::mpsc::channel();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            sent.send(()).unwrap();
+            turn_configuration(
+                &owned,
+                &json!({"model":"fixture"}),
+                &json!({"turn":{"id":"turn"}}),
+            )
+            .unwrap();
+            finished.send(()).unwrap();
+        });
+        received.recv().unwrap();
+        assert!(
+            matches!(
+                completion.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "configuration writer must wait for presentation's journal lock"
+        );
+        journal["presentation_intent"]["phase"] = json!("requested");
+        util::atomic_write_json(&root.join("upstream-session.json"), &journal).unwrap();
+        drop(lock);
+        completion
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        writer.join().unwrap();
+        let result = util::read_state_json(root, "upstream-session.json").unwrap();
+        assert_eq!(result["presentation_intent"]["phase"], "requested");
+        assert_eq!(result["configuration_transition"]["phase"], "applied");
+        assert_eq!(result["session_configuration"]["model"], "fixture");
+    }
 }

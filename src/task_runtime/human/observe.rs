@@ -10,7 +10,8 @@ pub(super) fn quiescent(env: &TaskEnvironment, record: &J, state: &J) -> Result<
     queue_operations(state, record)?;
     git_locks(&checkout)?;
     let mut observation = Observation::default();
-    runtimes(env, &checkout, &mut observation)?;
+    let coordinator = PathBuf::from(required(record, "coordinator")?);
+    runtimes(env, &checkout, &coordinator, &mut observation)?;
     let owner: Owner = serde_json::from_value(record["owner"].clone())?;
     add_watch(
         &queue::artifacts(&owner.queue_root)?,
@@ -44,10 +45,15 @@ fn checkout_binding(env: &TaskEnvironment, record: &J) -> Result<PathBuf> {
     Ok(checkout)
 }
 
-fn runtimes(env: &TaskEnvironment, checkout: &Path, observation: &mut Observation) -> Result<()> {
+fn runtimes(
+    env: &TaskEnvironment,
+    checkout: &Path,
+    coordinator: &Path,
+    observation: &mut Observation,
+) -> Result<()> {
     for (index, entry) in std::fs::read_dir(env.temp_root.join("rt"))?.enumerate() {
         ensure(index < 128, "human runtime inventory exceeds bound")?;
-        runtime(env, &entry?.path(), checkout, observation)?;
+        runtime(env, &entry?.path(), checkout, coordinator, observation)?;
     }
     Ok(())
 }
@@ -114,12 +120,14 @@ fn runtime(
     env: &TaskEnvironment,
     root: &Path,
     checkout: &Path,
+    coordinator: &Path,
     observation: &mut Observation,
 ) -> Result<()> {
     let Some(runtime) = read(root, "runtime.json")? else {
         return Ok(());
     };
-    let presentation = retained_controls(env, root, &runtime, &mut observation.allowed)?;
+    let presentation =
+        retained_controls(env, root, &runtime, coordinator, &mut observation.allowed)?;
     if !crate::task_env::paths_overlap(Path::new(&required(&runtime, "cwd")?), checkout) {
         return Ok(());
     }
@@ -134,6 +142,7 @@ fn retained_controls(
     env: &TaskEnvironment,
     root: &Path,
     runtime: &J,
+    coordinator: &Path,
     allowed: &mut Vec<ProcessRecord>,
 ) -> Result<Option<J>> {
     ensure(
@@ -142,7 +151,7 @@ fn retained_controls(
         "human runtime ownership changed",
     )?;
     add_process(runtime, "start_time", allowed)?;
-    let (presentation, frontends) = tui::retirement_snapshot(env, root)?;
+    let (presentation, frontends) = tui::human_snapshot(env, root, coordinator)?;
     allowed.extend(frontends);
     runtime_watches(env, root, allowed)?;
     Ok(presentation)
