@@ -64,6 +64,32 @@ fn invalid_permissions_remain_invalid_when_the_business_snapshot_agrees() {
 }
 
 #[test]
+fn unspecified_effort_must_also_match_the_frozen_business_snapshot() {
+    let mut q = queue();
+    let record = entry(&mut q);
+    record["configuration"]["model"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reasoning_effort");
+    record["configuration"]["effort"] = J::Null;
+    record["from"]["scope"]["codex_runtime"]["model"] = record["configuration"]["model"].clone();
+    align_receiver(&mut q);
+    // An unspecified model must not silently replace the original explicit
+    // live effort, even if the self-declared model/effort agree with each other.
+    assert!(validate_queue(&q)
+        .unwrap_err()
+        .message
+        .contains("original effort changed"));
+    entry(&mut q)["configuration"]["business_session_configuration"]["reasoningEffort"] = J::Null;
+    validate_queue(&q).unwrap();
+    entry(&mut q)["configuration"]["business_session_configuration"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reasoningEffort");
+    validate_queue(&q).unwrap();
+}
+
+#[test]
 fn endpoint_role_and_presentation_fields_have_real_types() {
     for (field, value) in [
         ("path", json!("relative.sock")),

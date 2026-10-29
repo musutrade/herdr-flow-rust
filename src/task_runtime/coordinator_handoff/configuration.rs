@@ -136,11 +136,8 @@ fn business_configuration(config: &J) -> Result<()> {
             && original["modelProvider"] == config["provider"],
         "coordinator original business configuration changed",
     )?;
-    if !config["effort"].is_null() {
-        ensure(
-            original["reasoningEffort"] == config["effort"],
-            "coordinator original effort changed",
-        )?;
-    }
-    Ok(())
+    ensure(
+        original["reasoningEffort"] == config["effort"],
+        "coordinator original effort changed",
+    )
 }
