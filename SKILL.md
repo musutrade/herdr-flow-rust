@@ -22,15 +22,19 @@ Reopening a presentation keeps the same agent session and uses a new tab after
 the old presentation's saved records have been reclaimed. See [native TUI](references/native-tui.md).
 
 Follow the current tops of #32/#130/#112/#38 and the
-[current execution order](references/end-to-end-readiness.md#current-execution-order-2026-10-28).
+[current execution order](references/end-to-end-readiness.md#current-execution-order-2026-10-29).
 The user-confirmed 2026-10-27 scope supersedes the old continuous-20-task and
 exhaustive-fault-matrix gates. Preserve their historical failures without turning
 them into new universal prerequisites. PR #156 adds the independent publisher on
 main `6e01da0`; do not reimplement it from an older Issue or skill snapshot.
 Keep actual role/PR/CI acceptance distinct from protocol fixtures and merged code.
 The current product workflow requires visible Herdr role tabs while herdr-flow
-owns the lifecycle. Stage resource reclamation and human writer handoff remain
-separate follow-ups; partial evidence does not close the umbrella issues.
+owns the lifecycle. #162 and #165 record bounded stage execution-resource
+reclamation and scripted-operator human return; preserve their evidence limits
+instead of repeating those completed slices. Managed coordinator replacement and
+parent-history continuation remain unsupported; publication backlog/independent
+development integration needs targeted evidence reconciliation. Follow the linked
+ledger's remaining sequence; partial evidence does not close the umbrella issues.
 Preserve the fresh format-3 / initialized protected queue / per-transfer same-mount
 boundary; do not migrate legacy objects. Read [task creation](references/task-instance.md)
 and [task lifecycle](references/task-lifecycle.md).
