@@ -1,6 +1,8 @@
 # herdr-issue-flow（纯 Rust）
 
-> **独立发布切片（2026-10-28，当前实现）：** 发布使用显式 `role_models.publisher` 和冻结的 GitHub 目标／CI 策略。独立只读模型分两轮请求 `publish`、`merge`，宿主执行固定候选的推送、PR、CI 观察和实际落地确认；真实回执直接完成发布，无需最后一轮模型报告。阶段仍需 ACK／apply 原发布结果，再 `stage-complete` 接续同一父需求，最终交付才回收。当前实现与本地夹具验证尚不构成真实远端角色闭环验收，也不代表本切片已通过全套测试或远端 CI。[配置、状态与边界](references/upstream-configuration.md#independent-publisher-slice-2026-10-28-current)。
+> **同一父需求两次远端交付（2026-10-28）：** 在 main `6e01da0` 上完成阶段 [#159](https://github.com/musutrade/herdr-flow-rust/pull/159) → 原结果 ACK／应用 → 新开发与独立总体验收 → 最终 [#160](https://github.com/musutrade/herdr-flow-rust/pull/160) → 回收。两条 PR 各自三项 CI 通过；七个真实角色可见，九个已知原生会话的六库十八类关联与任务资源均完成核查。首次启动前锁争用和同一任务接续如实保留；不记为首次驱动无中断通过。[完整范围、实际 SHA 与失败记录](references/remote-stage-live-acceptance.md)。下一步是阶段资源提前回收，再推进人工写入权交接。
+
+> **独立发布切片（2026-10-28）：** [#156](https://github.com/musutrade/herdr-flow-rust/pull/156) 已合入 main `6e01da0`，三项 push CI 通过。发布使用显式 `role_models.publisher` 和冻结的 GitHub 目标／CI 策略；独立模型请求 `publish`、`merge`，宿主核验固定候选、CI 和实际落地。此前提交 `f29c0be` 的四角色真实验收通过 [#158](https://github.com/musutrade/herdr-flow-rust/pull/158) 完成一次非阶段最终交付与回收；最终 hooks/fsmonitor 修复另有实际 Git 回归及精确提交 CI，两个证据范围分开。[配置、实测范围与边界](references/upstream-configuration.md#independent-publisher-slice-2026-10-28-current)。
 
 > **真实阶段交付验收（2026-10-28）：** 同一父需求的阶段交付 → 新开发 → 新的整体验收 → 最终交付与回收已通过真实模型 / Herdr 验收，**1 条通过，323.87 秒**。协调与开发使用显式 `gpt-6.1-sol/high`，两轮独立评审使用 `gpt-6-astra/high`，复用现有 Codex 0.165.0 服务；五个角色在同工作区独立 tab 中可见。实际本地 Git 交付、范围版本及旧批准失效、任务和共享会话回收均已核查。首次驱动器失败与原任务接续单独保留，不补记首次通过。该次实测未覆盖独立发布角色或远端 PR/CI。详见[实测结果、失败与回收记录](references/stage-live-acceptance.md)。
 

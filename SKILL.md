@@ -21,16 +21,19 @@ pane's workspace. Label the tab with its role/task and preserve the user's focus
 Reopening a presentation keeps the same agent session and uses a new tab after
 the old presentation's saved records have been reclaimed. See [native TUI](references/native-tui.md).
 
-PR #131–#136 deliver the lifecycle slices on main `5645b695`. Preserve their fresh
-format-3 / initialized protected queue / per-transfer same-mount boundary; do not
-migrate legacy or old isolated objects. Read [task creation](references/task-instance.md)
-and [task lifecycle](references/task-lifecycle.md). Follow the ordered remaining
-work in [readiness](references/end-to-end-readiness.md#current-execution-order-2026-10-26):
-documentation, adapter version fix, actual-role no-model channels and all-writer
-installation checks, one real task, failure/recovery/parallel cases, then at least
-20 consecutive tasks with no residue. A docs update is not implementation; a green
-CI or process fixture is not real-role or power-loss acceptance. Do not redo the
-merged slices or close #130/#112/#38/#32 on partial evidence.
+Follow the current tops of #32/#130/#112/#38 and the
+[current execution order](references/end-to-end-readiness.md#current-execution-order-2026-10-28).
+The user-confirmed 2026-10-27 scope supersedes the old continuous-20-task and
+exhaustive-fault-matrix gates. Preserve their historical failures without turning
+them into new universal prerequisites. PR #156 adds the independent publisher on
+main `6e01da0`; do not reimplement it from an older Issue or skill snapshot.
+Keep actual role/PR/CI acceptance distinct from protocol fixtures and merged code.
+The current product workflow requires visible Herdr role tabs while herdr-flow
+owns the lifecycle. Stage resource reclamation and human writer handoff remain
+separate follow-ups; partial evidence does not close the umbrella issues.
+Preserve the fresh format-3 / initialized protected queue / per-transfer same-mount
+boundary; do not migrate legacy objects. Read [task creation](references/task-instance.md)
+and [task lifecycle](references/task-lifecycle.md).
 
 Fresh upstream Codex coordinators use bounded queue-tool-v2 continuations; existing
 v1 receivers remain inspect/ACK/apply only. Snapshot the resolved coordinator model

@@ -1,5 +1,16 @@
 # Herdr 工作流边界与最小验收
 
+> **当前流程（2026-10-28，优先于下方历史拓扑）：** 按 #32/#112 在
+> 2026-10-27 确认的要求，当前产品流程中的角色应在 Herdr 原生 TUI
+> 的同工作区独立 tab 可见；核心任务和资源生命周期仍由 herdr-flow 管理。
+> #156 已接入独立发布角色，并有一条真实远端 PR/CI 最终交付记录。
+> [同父需求远端阶段接续](remote-stage-live-acceptance.md) 已完成 #159/#160
+> 的七角色实测与最终回收；启动前恢复单独记录。后续按
+> [当前验收顺序](end-to-end-readiness.md#current-execution-order-2026-10-28)
+> 推进阶段资源回收和人工写入权交接。
+> 旧的 inactive receiver、配置尚未解耦或连续 20 条等说明保留为历史，
+> 不重设为当前流程的前置，也不将历史失败改记为通过。
+
 > **Current support decision (2026-10-26): only Codex is supported.** OpenCode adapters, CLI, native session/HTTP integration and mixed live harnesses have been removed. OpenCode examples and acceptance records below are historical and must not be used as current instructions. Existing user installations, accounts, files and services are not migrated or cleaned.
 
 
