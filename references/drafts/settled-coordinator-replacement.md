@@ -50,6 +50,11 @@ schema_version 为整数 2 且存在 requirements 字段；再验证 requirement
 已有记录继续作历史结构验证，不要求原 runtime/observer 仍存活，也不触发新动作。
 既有终态 finalizer 在 EX 下完成精确 cleanup obligation 后整体退役父任务的路径
 仍允许；这与活动任务单独删除 receiver_handoff 字段区分，不能堵住最终回收。
+新记录的 save 还核对更新前后父任务均未终结，首代 from 等于原队列的
+guard_dir/receiver，并读取同 Owner 受保护 runtime、guard、receiver 和原 session
+配置记录核验。load 不读取历史 runtime：活动父任务核对本代当前接收端与队列
+相等，终态只检查保留历史。后代 from 必须等于最近已完成代的完整 to（包括
+guard），取消不改变前任；不能将首代历史 from 与已经换班后的当前接收端混比。
 
 每代固定字段如下；尚未产生的值为 null，不能靠缺省推断成功：
 
@@ -64,6 +69,20 @@ schema_version 为整数 2 且存在 requirements 字段；再验证 requirement
 | `notices` | accept/ready 各含 wait/event/delivery/turn/phase，绑定同代和控制种类；未知发送不清空。 |
 | `recovery` | 原来未配置则 null，否则 observer/origin_coordinator/from_target/to_target/phase；目标含 generation/runtime/scope/transaction_id。 |
 | `retirement` | 同 Owner 专用计划的 path/sha256/phase；使用下文协调者 selector，不复用 development/acceptance selector。 |
+
+原业务 approval 只接受现有 untrusted/on-request；sandbox 为原 workspaceWrite
+策略，networkAccess=false，writableRoots 仅空数组（cwd 隐含）或原 checkout；
+可选 tmp 排除字段须为布尔值。endpoint 的 path/dev/ino/uid 和显式角色模型分别
+验证；后续执行还须复核实际 endpoint inode。retirement 的 path/sha256 从首次
+登记即不可更改，阶段进展写独立执行记录，不把可变执行日志当成固定计划摘要。
+Recovery origin 固定为首代 from.runtime，其 observer 保留在原路径；from_target
+引用最近已完成代的 generation/transaction（首代为 0/null），取消不推进它。
+to_target 必须使用本代 generation 和已提交 binding 的 transaction，complete
+要求 Recovery 已对齐，并在同一队列事务登记 ready 事件。
+
+task-owned guard 的 pane/terminal/socket 可以全部为 null：原生接收端本身不代表
+Herdr 展示。若提供则三个字段都须有合法的非空标识/绝对 socket 路径。实际 TUI
+回收仍核验独立 presentation 记录，不能用 guard 的 null scope 推断展示已回收。
 
 整个字段最多 256 KiB，单代最多 32 KiB；大的精确资源清单置于同 Owner 受保护
 journal（每份最多 1 MiB、128 个资源），以路径/摘要引用。独立验证器在 queue
@@ -112,6 +131,13 @@ EX 内的 guard/observer 锁和保存须新增接收已持 Permit 的内部入�
 status、receiver watcher、Recovery 观察也使用观察许可，不能套禁止全部 RPC 的
 stage marker 阻断排空，也不能因观察豁免开放新工作。新 TUI 仅展示/读取，旧 TUI
 核实排空后关闭。普通 watcher 驱动有界步骤，不加常驻调度器，不调用 queue stop。
+
+“原工作排空”限于已准入命令、原审批/工具响应、观察，以及 requested/draining
+中的原结果 ACK/apply；它不授权新的 checkout claim，即使 claim 使用同一 Owner。
+creating 的前置条件包括所有原活动结果已收集、ACK、apply，且不再需要任何新的
+writer claim。若后来出现与静止证明矛盾的迟到结果，保留其原记录并阻塞，不在
+creating 之后额外放行 apply 或重新申请 writer。基础切片仅提供这一保守准入；
+后续驱动必须实现并检验静止证明，不能单凭 phase 标签认定此前提成立。
 
 ## 控制事件、投递与只读握手
 
@@ -258,6 +284,12 @@ ACK 均不授予新输入权限；在完整配置恢复驱动具备证据前只�
 仍是后续实现，safe_rotation/context_telemetry 保持 false。
 
 原生 TUI 的生命周期 SH 许可现在覆盖代理中已准入但尚未写完的缓冲字节；全部
-送出或连接清理丢弃后才释放。连接丢弃不会清除原请求账本中的未知结果，因此
+送出且 HTTP/WebSocket 解析器无残留后，或连接清理同时丢弃解析/输出缓冲后才
+释放。半个握手、半帧和未完成碎片消息均持有许可。连接丢弃不会清除原请求账本中的未知结果，因此
 获得 EX 不等于原生执行已结束，回收仍需原账本和静止观察。协议夹具覆盖这些
 边界；本切片不包含新的真实模型/Herdr 换班验收。
+
+输入保留没有时间上限：若 peer 不再读取，或一直不补齐分段消息，SH 会继续保持；
+申请换班的 EX 在两秒上限后报告 StateBusy。此处选择保留原输入，不设自动丢弃
+计时器。操作者可按原精确 presentation 关闭该 TUI 连接来丢弃缓冲；这只释放
+传输许可，原已登记请求的未知执行结果仍须核实，不能以关闭或超时代替完成证明。

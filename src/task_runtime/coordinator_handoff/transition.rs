@@ -11,6 +11,10 @@ pub(crate) fn validate_save(before: &J, after: &J) -> Result<()> {
         if next.is_null() {
             removed(task)?;
         } else {
+            if task[KEY] != next[KEY] {
+                super::anchor::open(task)?;
+                super::anchor::open(next)?;
+            }
             state(&task[KEY], &next[KEY])?;
         }
     }
@@ -28,6 +32,7 @@ fn initial_records(before: &J, after: &J) -> Result<()> {
                 records.len() == 1 && records[0]["phase"] == "requested",
                 "new handoff must begin at its original request",
             )?;
+            super::anchor::initial(before, after, name, &records[0])?;
         }
     }
     Ok(())
@@ -191,6 +196,7 @@ fn retirement(before: &J, after: &J) -> Result<()> {
         return Ok(());
     }
     once(&before["path"], &after["path"])?;
+    once(&before["sha256"], &after["sha256"])?;
     if before["phase"] == "complete" {
         once(before, after)?;
     }

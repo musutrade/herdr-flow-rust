@@ -45,9 +45,12 @@ pub trait BridgePolicy {
         Vec::new()
     }
     fn connected(&mut self) {}
-    /// Admitted bytes have reached their peer or were discarded with the
-    /// connection. Task policies retain lifecycle admission until this point.
+    /// The endpoint output buffer drained. A task parser can still retain
+    /// incomplete input, and must keep its admission in that case.
     fn forwarding_drained(&mut self, _client: bool) {}
+    /// All connection output was discarded. Also discard parser/deferred input
+    /// before releasing admission, without declaring native requests complete.
+    fn forwarding_discarded(&mut self) {}
     fn explicit_cwd(&self) -> bool {
         true
     }
@@ -2611,8 +2614,7 @@ impl ProxyBridge {
 
     fn release_forwarding(&mut self) {
         if let Some(policy) = &mut self.policy {
-            policy.forwarding_drained(true);
-            policy.forwarding_drained(false);
+            policy.forwarding_discarded();
         }
     }
 
