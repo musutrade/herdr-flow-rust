@@ -1,8 +1,54 @@
 # Opt-in real human writer transfer acceptance
 
-This is a prepared acceptance harness, **not a completed live acceptance**. Ordinary
-CI ignores the real-service test. A model/service/native bridge startup failure is
-a failed original attempt, not authorization to bypass admission or replace it.
+This opt-in harness completed one real-service scenario on 2026-10-29, with the
+scope and retained failures below. Ordinary CI ignores the real-service test.
+A model/service/native bridge startup failure remains a failed original attempt,
+not authorization to bypass admission or replace it.
+
+## Completed scenario (2026-10-29)
+
+[PR #165](https://github.com/musutrade/herdr-flow-rust/pull/165) records the fixed
+candidate `9801f62c70c56ca7e417496d2e4fee34500f0012`, merged as
+`147ab3b1c54f8720d4b1ff9631c6f9610372788e`. The fourth fresh private task exited
+0 in **487.454 seconds**. It completed formal acquire, the predeclared scripted
+operator commit, return, actual Recovery and separate host verification, old
+candidate/approval invalidation, continuation by the same original coordinator,
+fresh full independent acceptance, confirmed local Git delivery and terminal
+success with reclamation. The accepted ref was
+`e095c91d923383231e73ce3d42b742008c7edfaa`; all three agreed files had exact bytes.
+
+Independent final acceptance and reclamation review passed, report SHA-256
+`bbd6b985a38f94daa8bfd98af501a8ef15bab5dbe55c95a8612de971bdca363a`.
+The check covered five role sessions plus one observed Guardian, nineteen exact
+PID/start identities, five presentations, eighteen typed associations across six
+native databases and forty-nine current Herdr saved files. Owned task roots,
+review clones, worktree, queue and registration were reclaimed; shared assets
+were preserved. The outer acceptance directory retained its seed repository,
+formal Git output and test evidence; this is not a claim that the outer directory
+was deleted or that test evidence is an additional permanent product deliverable.
+
+The frozen candidate's three PR checks passed. The merge's
+[Rust](https://github.com/musutrade/herdr-flow-rust/actions/runs/40849084037),
+[CRAP](https://github.com/musutrade/herdr-flow-rust/actions/runs/40849084068) and
+[dependency audit](https://github.com/musutrade/herdr-flow-rust/actions/runs/40849084028)
+push workflows and required jobs passed on attempt 1. CI and live evidence remain
+separate checks.
+
+The operator was a script invoking the formal CLI, not a human UI participant.
+Recovery disclosed its inability to inspect host PIDs from its namespace; the
+host independently checked quiescence and the returned fingerprint. The last
+captured coordinator snapshot was still running: the actual delivery receipt,
+terminal state and independent cleanup establish the outcome, not an invented
+final model message. This is a single local Git scenario, without coordinator
+session replacement or a claim about all parallel/failure paths.
+
+The first three live attempts failed respectively on the initial sandbox
+expectation, an absent optional recovery observer, and the unopened Recovery
+presentation/dedicated shell boundary. Their original outcomes and independently
+verified failure cleanup remain in the related Issues. A later successful run
+does not reclassify them. Earlier CI/build failures also remain failures.
+
+## Harness design
 
 The driver reuses the stage live fixture, queue watcher, upstream socket identity,
 protected-document readers, complete native pagination/attachment inventory and

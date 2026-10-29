@@ -1,8 +1,129 @@
 # End-to-end acceptance readiness (#38)
 
+## Current execution order (2026-10-29)
+
+This reconciliation follows the current tops and the 2026-10-27 effective
+requirements of [#130](https://github.com/musutrade/herdr-flow-rust/issues/130),
+[#112](https://github.com/musutrade/herdr-flow-rust/issues/112),
+[#38](https://github.com/musutrade/herdr-flow-rust/issues/38) and
+[#32](https://github.com/musutrade/herdr-flow-rust/issues/32). It supersedes the
+next-work instructions below. The inspected source baseline is main
+`147ab3b1c54f8720d4b1ff9631c6f9610372788e`; #163–#165 are merged and #165's
+merge-main Rust, CRAP and dependency audit checks passed. This documentation
+slice adds no new implementation, model run or deployment.
+
+The table is the single implementation ledger for #130. **Covered** means the
+stated bounded requirement has implementation and matching evidence; **limited**
+means the evidence establishes only part of the requirement; **unsupported** is a
+verified implementation boundary; **unproven** is missing evidence, not a newly
+demonstrated product defect. Historical unchecked boxes do not override newer
+evidence, and none of these labels establishes universal reliability.
+
+### Fixed implementation and evidence references
+
+| ID | Merged implementation | Evidence and limit |
+| --- | --- | --- |
+| E1 | [#147](https://github.com/musutrade/herdr-flow-rust/pull/147), merge `5ae45a1`; [#151](https://github.com/musutrade/herdr-flow-rust/pull/151), merge `28f9d3a` | [Recovery diagnosis and repair](recovery-agent.md): real `needs_human` and watcher-repair/`recovered` routes, visible result, original-coordinator handoff and failure finalization/cleanup. A watcher restart preserves the original model session. |
+| E2 | [#152](https://github.com/musutrade/herdr-flow-rust/pull/152), head `4454480`, merge `5c46297` | [Record continuation](record-continuation.md): 71 turns/75 tool requests through the same protocol broker/watcher and 100-turn/200-call unit coverage. Protocol evidence; parent business-history limits are separate. |
+| E3 | [#153](https://github.com/musutrade/herdr-flow-rust/pull/153), head `272d744`, merge `5ef19e7` | Recovery lock contention and real local Git receive-hook contention regressions. Queue updates continue during external execution; the synchronous adapter caller still waits. |
+| E4 | [#154](https://github.com/musutrade/herdr-flow-rust/pull/154), merge `35aab09`; [#155](https://github.com/musutrade/herdr-flow-rust/pull/155), merge `9166fb7`; [#156](https://github.com/musutrade/herdr-flow-rust/pull/156), merge `6e01da0` | [Local stage acceptance](stage-live-acceptance.md) and [remote #159/#160 sequence](remote-stage-live-acceptance.md): separate reviewers/publishers, exact-head CI, actual receipts, original ACK/apply and final cleanup. The remote run used an isolated acceptance branch; startup recovery remains separate. |
+| E5 | [#162](https://github.com/musutrade/herdr-flow-rust/pull/162), head `afa3cdc`, merge `d2d6390` | [Early stage reclamation](stage-resource-reclamation.md#completed-live-slice-2026-10-29): passed five-role contract, with extra `final-dev-cleanup` session/configuration binding still ambiguous. Review clones remain until parent finalization. |
+| E6 | [#163](https://github.com/musutrade/herdr-flow-rust/pull/163), merge `c2569f1`; [#164](https://github.com/musutrade/herdr-flow-rust/pull/164), merge `a109d57`; [#165](https://github.com/musutrade/herdr-flow-rust/pull/165), head `9801f62`, merge `147ab3b` | [Human return acceptance](human-writer-live-acceptance.md#completed-scenario-2026-10-29): 487.454-second successful scripted-operator loop, new full review, local Git delivery and independent cleanup review. Three earlier live failures stay failed. |
+
+### #130 effective requirements
+
+| ID / requirement | Classification at the baseline | Remaining work and owner |
+| --- | --- | --- |
+| R1 Independent Recovery role | Covered for the selected Codex roles, configured models and visible diagnosis/repair path (E1, E6) | #112 retains the actual-role boundaries; cross-product agents remain #146. |
+| R2 Observation, incident registration and independent trigger | Covered for stopped private watcher detection, deduplicated incidents and the independent observer (E1); limited for unavailable shared services | #38 must keep unavailable-state protocol evidence distinct from a real shared-service outage. No requirement to disable a shared service for this reconciliation. |
+| R3 Explicit result and next action | Covered for `needs_human`, `recovered`, host verification and original-coordinator handoff (E1, E6); limited for unavailable/insufficient-evidence branches | `recovery-agent.md` and recovery regressions document retained state and no recursive recovery. #38 records which conclusions are protocol-only. |
+| R4 No arbitrary business timeout | Covered for removal of the fixed `now + 600` worker deadline and preservation of running/unknown observations (E1) | This is a semantic check, not hours-long stress evidence. Communication/observation budgets still apply. |
+| R5 Bounded cumulative records with continuation | Limited: E2 checkpoints consumed tools/turns; full parent-history continuation remains unsupported | #130: `src/progress/lineage.rs` `revise` still rejects revision >128 and `insert_artifact` rejects a 257th artifact. Existing entries stay in the parent; no same-parent reclamation path for those histories was found. Completed human-handoff archives also retain their documented 64-entry/1 MiB bound. Freeze a referenced-history retention contract before implementing compaction; do not remove caps or change task IDs to mask this gap. |
+| R6 Requirement, stage and delivery separation | Covered for one stage followed by overall acceptance and local/remote delivery (E4); limited early reclamation (E5) | Review clones and referenced runtime/result records deliberately stay until parent terminal cleanup. Extra-role audit ambiguity remains; no arbitrary-stage-count claim. |
+| R7 Recovery and human return use actual operation state | Covered for formal writer transfer, unknown-operation fences, real Recovery plus host verification and fresh acceptance (E6) | Scripted CLI operator only. Returning to the original coordinator does not establish replacement of that session. |
+| R8 External execution does not hold the queue for its duration | Covered for short reservation plus unlocked adapter execution and concurrent queue updates (E3) | `src/delivery/mod.rs::execute` and `tests/common/delivery_contention.rs` establish the queue-lock boundary. Caller waiting is not evidence of a queue-wide stall; no claim of fully asynchronous adapters. |
+| R9 New roles/stages share terminal cleanup | Covered for the known owned resources in E1/E4/E6; limited for E5's extra-role identity evidence | #38 preserves exact session/PID/typed-association scope, protected shared assets, retained obligations and the distinction between disposable task roots and outer test evidence. |
+
+### #112 integration and #38 acceptance mapping
+
+| Effective #112 item | Ledger/evidence | Disposition |
+| --- | --- | --- |
+| All roles and model settings | R1, E4–E6 | Covered across separate scenarios: real coordinator/developer/reviewer/publisher/Recovery roles. E6 itself has no publisher. |
+| Visible fault handling | R2–R3, E1 | Covered bounded diagnosis/repair; unavailable shared service remains limited evidence. |
+| Human intervention and return | R7, E6 | Covered scripted operator; not human UI acceptance. |
+| Independent publication and backlog pressure | E4; `tests/pr_batch/target_slot.rs`, `tests/lineage.rs` and `tests/common/publication_runtime.rs` | Limited: target occupation/release, disjoint workspaces and pending-CI behavior have protocol regressions. Their combination with independent real developers and a saturated publisher remains unproven. |
+| Multiple PRs and long sessions | R5–R6, E2/E4 | Same-parent remote stage continuation is covered. Full parent-history continuation and managed coordinator session replacement remain unsupported. |
+| Isolated integration | E1/E4–E6 | Covered for new private queues/frozen binaries. Global entrypoints, old writers/queues and shared services were not migrated. |
+
+The target-slot regression allows preparation/development while another target
+owner publishes and serializes begin on the same target; different targets can
+proceed independently. The lineage regression admits disjoint workspaces and
+retains overlapping writer reservations. These are useful component proofs,
+not proof that current real-role publication backlog admission is complete. The
+older parallel campaign's one success/one timeout remains a failed group.
+
+| Effective #38 item | Evidence and remaining limit |
+| --- | --- |
+| Anomaly through actionable result | R1–R3 / E1; actual visible diagnosis, bounded repair and original handoff covered. |
+| Recovery unavailable remains visible | R2–R3; implemented retained `unavailable` state and protocol regressions, without a new real shared-service outage claim. |
+| Long work and stage continuation | R4–R6; tool windows and stages covered within their scope, parent-history limits still open. |
+| Actual roles and Herdr integration | E1/E4–E6; separate scenario identities retained, E5 extra activity remains ambiguous. |
+| Human return | R7 / E6; formal CLI transfer covered, same original coordinator retained. |
+| Actual cleanup and protected assets | R9 / E1/E4–E6; final success and explicit final failure have scoped evidence, early reclamation retains reference sources. |
+| Task associations in shared storage | E1/E4–E6; exact known IDs and installed typed schemas checked. Freeform external mentions and unknown future schemas are not deletion authority. |
+| Necessary regressions and consistent documentation | Each fixed PR retains its own checks and failures; this reconciliation updates stale current instructions without upgrading fixtures to live proof. |
+
+### Concrete remaining sequence
+
+1. Root completes this ledger and entry-document correction; Hermes independently
+   checks the fixed candidate against the linked source, PRs and retained review
+   evidence. Claude owns the one reviewed documentation PR, exact-head CI and
+   merge. Update the four Issue tops with the reviewed classification; keep the
+   historical records and all four Issues open.
+2. #130/#112 own an explicit **settled coordinator replacement** contract. The
+   current activation and recovery paths in
+   `src/task_runtime/native/receiver/active.rs` and `recovery.rs` still return
+   `safe_rotation=false` and `context_telemetry=false`. Reuse existing guard,
+   handoff, queue and runtime authority. Before implementation, review the
+   following minimum acceptance boundary against those APIs:
+   - Preserve the original Owner, parent requirement, authorization, candidate,
+     immutable verdicts, delivery facts and result deduplication state.
+   - Verify old turn/tool/send/Git/publication operations and fence old writers;
+     uncertain work keeps its original operation and blocks replacement.
+   - Bind exactly one new configured coordinator and visible Herdr tab, persist
+     takeover before new work, and prove notification ACK/application comes from
+     that receiver. Restarting a watcher or reopening a tab is not replacement.
+   - Reclaim only the proven obsolete session/presentation/process resources;
+     preserve referenced records and recover interrupted transitions without
+     duplicate creation, dispatch, publication or result application.
+   - Validate one settled replacement and the relevant unknown-operation and
+     interruption regressions. Automatic context thresholds/telemetry are not
+     established by that explicit operation and must remain reported accurately.
+3. #130 owns the separate R5 retention design: identify current, referenced,
+   immutable and deduplication records; define safe same-parent checkpoints and
+   visible capacity refusal for still-referenced data. Verify crossing the current
+   revision/artifact boundaries without lost acceptance or replay protection.
+   A broker checkpoint alone cannot satisfy this acceptance condition.
+4. #112/#38 reconcile publisher admission/queue capacity with the existing
+   target-slot, workspace and CI regressions, then select only the uncovered
+   integration path. Observe that publication saturation preserves unknown
+   operations, applies actual backlog pressure and permits independent admitted
+   development. Missing integration evidence does not authorize a new scheduler
+   or establish a defect by itself.
+
+#32 tracks these remaining owners and completion evidence. Fixed twenty-task
+campaigns, exhaustive fault matrices, OpenCode, global migration and #146's
+cross-agent extension are not current closure prerequisites. Neither a new
+documentation PR nor a single successful live scenario finishes the umbrella.
+Raw temporary handoffs/review material stay outside the repository and are not
+new formal deliverables. Remove this batch's review/development worktrees after
+their owners release them and the publication result is verified; unrelated old
+worktrees are not implicitly owned by this batch.
+
 ## Current execution order (2026-10-28)
 
-This section supersedes the dated sequence and current-status statements below.
+Historical sequence, superseded by the 2026-10-29 reconciliation above. At that
+time this section superseded the older sequence and current-status statements below.
 The user-confirmed 2026-10-27 scope in
 [#32](https://github.com/musutrade/herdr-flow-rust/issues/32),
 [#130](https://github.com/musutrade/herdr-flow-rust/issues/130),

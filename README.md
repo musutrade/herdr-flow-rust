@@ -1,8 +1,8 @@
 # herdr-issue-flow（纯 Rust）
 
-> **人工写入权交接（2026-10-29，开发切片）：** 在已通过 CI 的 main `d2d6390`（含 #161、#162）上增加登记开发 checkout 的显式申请、静止核查、人工接管和交还；原 Recovery Agent 复核与宿主再次核查均通过后，才交回原协调者并要求新候选重新独立验收。未知执行继续阻塞，原需求、操作和验收历史保留。本条是代码与本地协议验证范围，尚不代表新增真实模型／Herdr 验收；全局入口、旧 watcher 和旧队列未切换。[操作、边界与验证范围](references/human-writer-handoff.md)。
+> **当前进度（2026-10-29）：** #163–#165 已合并，main `147ab3b` 的三项 CI 通过。人工写权 acquire → 脚本操作者修改并 return → 真实 Recovery／宿主复核 → 原协调者接续 → 新独立验收 → 本地 Git 交付及回收，已完成一次限定范围的真实验收。阶段执行资源提前回收已有 #162 的独立记录；审核克隆仍保留到父任务终态。见[当前范围与证据对账](references/end-to-end-readiness.md#current-execution-order-2026-10-29)和[人工交回实测范围](references/human-writer-live-acceptance.md#completed-scenario-2026-10-29)。协调会话安全换班和父需求历史跨容量接续仍未支持；发布积压背压与独立开发并行仍需补齐针对性的证据对账。四个主 Issue 保持 open，#146 继续后置。
 
-> **同一父需求两次远端交付（2026-10-28）：** 在 main `6e01da0` 上完成阶段 [#159](https://github.com/musutrade/herdr-flow-rust/pull/159) → 原结果 ACK／应用 → 新开发与独立总体验收 → 最终 [#160](https://github.com/musutrade/herdr-flow-rust/pull/160) → 回收。两条 PR 各自三项 CI 通过；七个真实角色可见，九个已知原生会话的六库十八类关联与任务资源均完成核查。首次启动前锁争用和同一任务接续如实保留；不记为首次驱动无中断通过。[完整范围、实际 SHA 与失败记录](references/remote-stage-live-acceptance.md)。下一步是阶段资源提前回收，再推进人工写入权交接。
+> **同一父需求两次远端交付（2026-10-28）：** 在 main `6e01da0` 上完成阶段 [#159](https://github.com/musutrade/herdr-flow-rust/pull/159) → 原结果 ACK／应用 → 新开发与独立总体验收 → 最终 [#160](https://github.com/musutrade/herdr-flow-rust/pull/160) → 回收。两条 PR 各自三项 CI 通过；七个真实角色可见，九个已知原生会话的六库十八类关联与任务资源均完成核查。首次启动前锁争用和同一任务接续如实保留；不记为首次驱动无中断通过。[完整范围、实际 SHA 与失败记录](references/remote-stage-live-acceptance.md)。后续阶段回收与人工交回的独立证据见上方当前进度。
 
 > **独立发布切片（2026-10-28）：** [#156](https://github.com/musutrade/herdr-flow-rust/pull/156) 已合入 main `6e01da0`，三项 push CI 通过。发布使用显式 `role_models.publisher` 和冻结的 GitHub 目标／CI 策略；独立模型请求 `publish`、`merge`，宿主核验固定候选、CI 和实际落地。此前提交 `f29c0be` 的四角色真实验收通过 [#158](https://github.com/musutrade/herdr-flow-rust/pull/158) 完成一次非阶段最终交付与回收；最终 hooks/fsmonitor 修复另有实际 Git 回归及精确提交 CI，两个证据范围分开。[配置、实测范围与边界](references/upstream-configuration.md#independent-publisher-slice-2026-10-28-current)。
 

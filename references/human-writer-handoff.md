@@ -139,7 +139,9 @@ Local protocol tests exercise actual isolated ownership, Git worktrees, RPC
 observation and live process competition, including unknown background observation,
 late edits, stale verification, repeated result application and historical
 approval invalidation. Synthetic protocol peers are not real model acceptance.
-This change does not claim a new live model/Herdr acceptance or support for manual
+The initial protocol slice did not establish live model/Herdr acceptance. The
+later [completed scenario](human-writer-live-acceptance.md#completed-scenario-2026-10-29)
+establishes one scripted-operator loop. Neither establishes support for manual
 remote publication, existing ambiguous side effects, arbitrary external editors,
 automatic repair of shared services, or heterogeneous providers.
 
@@ -156,6 +158,6 @@ read/write limits are unchanged. The failed coverage attempt is retained in the
 validation record and is not counted as a pass.
 
 The separately opt-in [real human writer acceptance harness](human-writer-live-acceptance.md)
-prepares one full model/Herdr success loop with a disclosed scripted operator.
-It remains a prepared harness until that exact live run passes; ordinary CI and
-protocol fixtures do not establish native/model notification readiness.
+completed that loop on `9801f62`, merged through #165. Its three earlier failed
+attempts retain their outcomes. Ordinary CI and protocol fixtures alone do not
+establish native/model notification readiness.

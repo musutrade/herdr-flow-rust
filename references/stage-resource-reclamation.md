@@ -148,7 +148,36 @@ of the stage reviewer, ACK of the cleanup notice, and a distinct new session for
 overall acceptance under the same parent. Its shared protocol service records
 each thread's actual creation identity and rejects reused thread IDs.
 
-These are protocol and process fixtures, not a real model or Herdr-visible
-acceptance run, and not power-loss testing. Same-parent stage delivery evidence
-from earlier work remains separate. Real-role early resource reclamation and
-the human writer handoff remain acceptance work for the open lifecycle issues.
+These regression fixtures are not real model/Herdr acceptance or power-loss
+testing. The separate real-role evidence below does not expand their scope.
+
+## Completed live slice (2026-10-29)
+
+[PR #162](https://github.com/musutrade/herdr-flow-rust/pull/162) records candidate
+`afa3cdc485f1a0bc42616d4ae9aed660412e4437`, merged as
+`d2d63900cfc2446daa1e489fdc985d96ef8c4446`. Its fresh private five-role scenario
+exited 0 in **403.41 seconds**. The original parent and later developer continued
+after the settled stage developer/reviewer execution resources and proven
+descendants were reclaimed. Review clones stayed available for final acceptance.
+Stage candidate `7d88f2cdc119ce00b61d4a9e0d33cf72fd2f5b0c` and final candidate
+`39fac55840cd69762504ec7121caec937340f022` received separate independent reviews.
+Final local Git delivery contained only the agreed answer and explanation files;
+the original parent then finalized successfully.
+
+Independent final review passed the agreed five-role contract and the known
+resource-release checks (report SHA-256
+`50f7e326dacd92af04d0668248f6d6b61ba054ee921aa92aae5a02719d74ce4e`).
+Fourteen PID/start identities, nine observed native session IDs, twenty complete
+native inventories and nineteen queries across six databases showed no matching
+residue. Shared assets remained intact.
+
+An extra `final-dev-cleanup` activity removed an accidentally committed review
+report before fresh final acceptance. Its exact native session/activity binding
+and effective configuration were not fully captured and remain **ambiguous**.
+The nine observed IDs' release does not prove a complete audit of all extra
+executors. Three initial configuration comparisons also remain false: they read
+pre-turn creation snapshots; independent review used sent parameters, exact turns
+and applied records for the five contracted roles. The earlier 904.51, 608.46 and
+194.93 second failed live attempts retain their failures. This supports the
+bounded early execution-resource reclamation path, not early review-clone deletion
+or exhaustive additional-role acceptance.
