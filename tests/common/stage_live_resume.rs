@@ -71,7 +71,7 @@ fn no_send_tree(root: &Path, owner: &J) {
     }
 }
 
-fn no_marked_process(instance: &str, original_supervisor_start: u64) {
+pub(super) fn no_marked_process(instance: &str, original_supervisor_start: u64) {
     use std::io::Read;
     let started = Instant::now();
     let needle = format!("{}={instance}", task_env::MARKER_ENV);

@@ -136,6 +136,7 @@ pub(super) fn before(root: &Path, method: &str, params: &J) -> Result<()> {
     }
 }
 fn reserve_creation(root: &Path, runtime: &J, params: &J) -> Result<()> {
+    let _journal = session_lock(root)?;
     let path = root.join("upstream-session.json");
     native::receiver::ensure_absent(&path)?;
     ensure(
@@ -168,13 +169,42 @@ pub(super) fn after(root: &Path, method: &str, result: &J) -> Result<()> {
         return Ok(());
     }
     crate::identity::validate(&json!({"adapter":"codex","session":result["thread"]["id"]}))?;
+    let _journal = session_lock(root)?;
     let mut journal = util::read_state_json(root, "upstream-session.json")?;
+    seed_presentation_intent(&runtime, &mut journal);
     // Register even a response whose cwd/model validation will later fail: that
     // newly created thread still has to be reclaimed.
     journal["session"] = result["thread"]["id"].clone();
     journal["phase"] = json!("created");
     journal["session_configuration"] = subscription::configuration(result);
     util::atomic_write_json(&root.join("upstream-session.json"), &journal)
+}
+
+// Fresh creation publishes this proof with its successful session response.
+// A replay/prepare of an already-created journal never backfills the proof.
+fn seed_presentation_intent(runtime: &J, journal: &mut J) {
+    if journal["phase"] == "creating"
+        && journal.get("presentation_intent").is_none()
+        && runtime["recovery_role"] == true
+        && runtime.get("native_tui").is_some()
+    {
+        journal["presentation_intent"] = json!({"version":1,"phase":"not_requested"});
+    }
+}
+
+/// Session metadata writers share the existing runtime lock. Never hold this
+/// lock across native RPC or take a presentation lock while it is held.
+pub(in crate::task_runtime) fn session_lock(root: &Path) -> Result<util::FileLock> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if let Some(lock) = util::FileLock::acquire(&root.join("runtime.lock"), false)? {
+            return Ok(lock);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(FlowError::new(crate::ErrorKind::StateBusy, "upstream session metadata lock is busy; inspect the original operation without replay"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Freeze obligations while the task's exclusive lifecycle gate is held. The
@@ -360,6 +390,48 @@ mod tests {
             runtime
         );
         assert!(before(root, "thread/start", &json!({"cwd":"/task"})).is_err());
+    }
+
+    #[test]
+    fn presentation_proof_is_fresh_recovery_only_and_never_backfilled() {
+        for (role, expected) in [
+            ("recovery_role", true),
+            ("publication_role", false),
+            ("ordinary", false),
+        ] {
+            let (temp, _socket, mut runtime) = fixture();
+            runtime[role] = json!(true);
+            runtime["native_tui"] = json!({});
+            util::atomic_write_json(&temp.path().join("runtime.json"), &runtime).unwrap();
+            before(temp.path(), "thread/start", &json!({"cwd":"/task"})).unwrap();
+            after(temp.path(), "thread/start", &json!({"thread":{"id":ID}})).unwrap();
+            let mut journal = util::read_state_json(temp.path(), "upstream-session.json").unwrap();
+            assert_eq!(journal.get("presentation_intent").is_some(), expected);
+            journal
+                .as_object_mut()
+                .unwrap()
+                .remove("presentation_intent");
+            util::atomic_write_json(&temp.path().join("upstream-session.json"), &journal).unwrap();
+            after(temp.path(), "thread/start", &json!({"thread":{"id":ID}})).unwrap();
+            assert!(util::read_state_json(temp.path(), "upstream-session.json")
+                .unwrap()
+                .get("presentation_intent")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn busy_creation_response_keeps_original_unknown_without_replay() {
+        let (temp, _socket, _) = fixture();
+        before(temp.path(), "thread/start", &json!({"cwd":"/task"})).unwrap();
+        let _lock = util::FileLock::acquire(&temp.path().join("runtime.lock"), false)
+            .unwrap()
+            .unwrap();
+        let error = after(temp.path(), "thread/start", &json!({"thread":{"id":ID}})).unwrap_err();
+        assert!(error.to_string().contains("without replay"), "{error}");
+        let journal = util::read_state_json(temp.path(), "upstream-session.json").unwrap();
+        assert_eq!(journal["phase"], "creating");
+        assert_eq!(journal["session"], J::Null);
     }
 
     #[test]

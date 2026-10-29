@@ -1,5 +1,7 @@
 //! Real owned observer/brokers with a synthetic upstream; no user accounts.
 use super::*;
+#[path = "recovery_incident_server.rs"]
+mod fixture_server;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,10 +89,13 @@ fn exercise(mode: Mode) {
     let requests = Arc::new(Mutex::new(Vec::<J>::new()));
     let recorded = requests.clone();
     let server_cwd = cwd.clone();
-    let server =
-        coordinator_continuation::parallel(if mode.succeeds() { 6 } else { 5 }, move |peer| {
-            serve(peer, &server_cwd, &recorded, mode);
-        });
+    let server = fixture_server::Server::start(
+        if mode.succeeds() { 6 } else { 5 },
+        Duration::from_millis(100),
+        move |peer, connection| {
+            serve(peer, connection, &server_cwd, &recorded, mode);
+        },
+    );
     let config = f.temp.path().join("user-config");
     fs::write(&config, "must remain unchanged").unwrap();
     let mut broker = task_runtime::launch(
@@ -169,7 +174,11 @@ fn exercise(mode: Mode) {
             if !status["incident"]["repair_wait"].is_null() {
                 break status["incident"].clone();
             }
-            assert!(Instant::now() < deadline, "{status}");
+            assert!(
+                Instant::now() < deadline,
+                "{status}; fixture: {}",
+                fixture_evidence(&coordinator, &mut broker, &server)
+            );
             std::thread::sleep(Duration::from_millis(25));
         };
         std::thread::sleep(Duration::from_secs(3));
@@ -202,7 +211,11 @@ fn exercise(mode: Mode) {
         if status["incident"]["phase"] == if failed { "unavailable" } else { "handled" } {
             break status["incident"].clone();
         }
-        assert!(Instant::now() < deadline, "{status}");
+        assert!(
+            Instant::now() < deadline,
+            "{status}; fixture: {}",
+            fixture_evidence(&coordinator, &mut broker, &server)
+        );
         std::thread::sleep(Duration::from_millis(25));
     };
     if failed {
@@ -254,6 +267,12 @@ fn exercise(mode: Mode) {
         }
     }
     if mode == Mode::Unknown {
+        assert_eq!(
+            incident["repair"]["error"],
+            "unresolved tool operation blocks receiver recovery",
+            "{}",
+            fixture_evidence(&coordinator, &mut broker, &server)
+        );
         assert_eq!(
             util::read_state_json(&coordinator, "control-tools.json").unwrap(),
             unknown
@@ -546,10 +565,16 @@ fn status_reader_does_not_stop_observer(coordinator: &Path) {
     );
 }
 
-fn serve(mut peer: rpc_server::Peer, cwd: &Path, requests: &Mutex<Vec<J>>, mode: Mode) {
+fn serve(
+    mut peer: rpc_server::Peer,
+    mut connection: fixture_server::Connection,
+    cwd: &Path,
+    requests: &Mutex<Vec<J>>,
+    mode: Mode,
+) {
     peer.initialize();
     let mut turns = json!([]);
-    while let Some(request) = next(&mut peer) {
+    while let Some(request) = connection.next(&mut peer) {
         requests.lock().unwrap().push(request.clone());
         if mode == Mode::Failure
             && request["method"] == "turn/start"
@@ -625,26 +650,163 @@ fn response(request: &J, cwd: &Path, turns: &mut J, mode: Mode) -> J {
     }
 }
 
-fn next(peer: &mut rpc_server::Peer) -> Option<J> {
-    use std::os::fd::AsRawFd;
-    let mut fd = libc::pollfd {
-        fd: peer.stream.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: poll borrows one initialized descriptor for this bounded call.
-    if unsafe { libc::poll(&mut fd, 1, 30000) } <= 0 {
-        return None;
+fn fixture_evidence(
+    coordinator: &Path,
+    broker: &mut std::process::Child,
+    server: &fixture_server::Server,
+) -> J {
+    let runtime = util::read_state_json(coordinator, "runtime.json").unwrap_or(J::Null);
+    let pid = runtime["pid"].as_u64().unwrap_or_default() as u32;
+    json!({"runtime_pid":pid,"runtime_start_time":runtime["start_time"],
+        "observed_start_ticks":util::process_start_ticks(pid),
+        "broker_exit":broker.try_wait().unwrap().map(|s|s.to_string()),
+        "broker_status":util::read_state_json(coordinator,"broker-status.json").ok(),
+        "broker_log":util::read_file_limited(&coordinator.join("broker.log"),32*1024).ok().map(|b|String::from_utf8_lossy(&b).to_string()),
+        "connections":server.snapshot()})
+}
+
+#[test]
+fn idle_observation_does_not_disconnect_the_owned_broker() {
+    let f = Fixture::new();
+    let mut env = isolated_runtime::linked(&f);
+    let coordinator = task_runtime::prepare(&env, "coordinator").unwrap();
+    let cwd = env.workspace_root.join("checkout");
+    let server_cwd = cwd.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let receive = Mutex::new(receive);
+    let server = fixture_server::Server::start(
+        1,
+        Duration::from_millis(40),
+        move |mut peer, mut connection| {
+            peer.initialize();
+            let request = peer.request();
+            assert_eq!(request["method"], "thread/start");
+            let result = response(&request, &server_cwd, &mut json!([]), Mode::Diagnose);
+            peer.json(&json!({"id":request["id"],"result":result}));
+            receive
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            assert!(connection.next(&mut peer).is_none());
+        },
+    );
+    let mut broker=task_runtime::launch(&mut env,&coordinator,&json!({"adapter":"codex","configuration":"upstream","socket":server.path,"cwd":cwd,"model":{"providerID":"existing","id":"coord","reasoning_effort":"high"},"driver_binary":env!("CARGO_BIN_EXE_herdr-flow")})).unwrap();
+    task_runtime::native::receiver::bootstrap(
+        &env,
+        &coordinator,
+        &json!({"guard_dir":coordinator.join("guard"),"task":"task","role":"coordinator"}),
+    )
+    .unwrap();
+    send.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let mut byte = [0u8];
-    // SAFETY: byte is writable and the stream owns the descriptor.
-    if unsafe { libc::recv(fd.fd, byte.as_mut_ptr().cast(), 1, libc::MSG_PEEK) } <= 0 {
-        return None;
+    let before = fixture_evidence(&coordinator, &mut broker, &server);
+    let records = server.finish();
+    let exit = await_fixture_broker_exit(&mut broker);
+    eprintln!(
+        "fixture idle/shutdown evidence: {}",
+        json!({"before":before,"closed_connections":records,"exit_after_shutdown":exit.map(|s|s.to_string())})
+    );
+    assert!(
+        before["broker_exit"].is_null(),
+        "idle observation terminated broker: {before}"
+    );
+    assert!(
+        records[0]["idle_observations"].as_u64().unwrap() >= 2,
+        "{records}"
+    );
+    assert_eq!(records[0]["close_reason"], "explicit_shutdown", "{records}");
+    assert!(
+        exit.is_some(),
+        "explicit fixture shutdown did not stop broker: {before}"
+    );
+}
+
+fn await_fixture_broker_exit(broker: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let exit = broker.try_wait().unwrap();
+        if exit.is_some() {
+            return exit;
+        }
+        if Instant::now() >= deadline {
+            broker.kill().unwrap();
+            broker.wait().unwrap();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let (opcode, payload) = peer.frame();
-    if opcode == 8 {
-        return None;
+}
+
+#[test]
+fn recovery_fixture_drop_interrupts_an_idle_connection_during_unwind() {
+    let server =
+        fixture_server::Server::start(1, Duration::from_millis(40), |mut peer, mut connection| {
+            peer.initialize();
+            assert!(connection.next(&mut peer).is_none());
+        });
+    let mut client = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
+    client.connect().unwrap();
+    let started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _server = server;
+        panic!("exercise fixture owner unwind");
+    }));
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(client
+        .call("thread/read", &json!({"threadId":"unused"}))
+        .is_err());
+}
+
+#[test]
+fn recovery_fixture_records_actual_peer_eof() {
+    let server =
+        fixture_server::Server::start(1, Duration::from_millis(40), |mut peer, mut connection| {
+            peer.initialize();
+            assert!(connection.next(&mut peer).is_none());
+        });
+    let mut client = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
+    client.connect().unwrap();
+    client.close(false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let records = server.snapshot();
+        if records[0]["close_reason"] == "eof" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{records}");
+        std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(opcode, 1);
-    Some(serde_json::from_slice(&payload).unwrap())
+    assert_eq!(server.finish()[0]["close_reason"], "eof");
+}
+
+#[test]
+fn recovery_fixture_handler_failure_still_joins_other_idle_peers() {
+    let count = std::sync::atomic::AtomicUsize::new(0);
+    let server = fixture_server::Server::start(
+        2,
+        Duration::from_millis(40),
+        move |mut peer, mut connection| {
+            peer.initialize();
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                panic!("exercise handler failure");
+            }
+            assert!(connection.next(&mut peer).is_none());
+        },
+    );
+    let mut first = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
+    first.connect().unwrap();
+    let mut second = herdr_flow::codex::rpc::Client::new(server.path.to_str().unwrap());
+    second.connect().unwrap();
+    let started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || server.finish()));
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(second
+        .call("thread/read", &json!({"threadId":"unused"}))
+        .is_err());
 }

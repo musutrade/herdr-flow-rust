@@ -203,3 +203,7 @@ mod tests {
         assert!(safe_foreground(&binding, &processes).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/common/native_frontend_pty.rs"]
+mod pty_tests;

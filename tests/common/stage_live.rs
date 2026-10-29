@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 #[path = "stage_live_audit.rs"]
 mod audit;
+#[path = "human_writer_live.rs"]
+mod human_writer;
 #[path = "stage_live_resume.rs"]
 mod resume;
 
@@ -27,6 +29,23 @@ fn mutate(q: &mut J, mut spec: J) {
 }
 
 fn setup(f: &Fixture, target: &Path) -> task_env::TaskEnvironment {
+    setup_agreement(
+        f,
+        target,
+        GOAL,
+        json!([
+            {"id":"answer","description":"tracked answer.txt has exactly bytes 42 plus newline","required":true},
+            {"id":"explanation","description":"tracked explanation.txt has exactly bytes 6 * 7 = 42 plus newline","required":true}
+        ]),
+    )
+}
+
+fn setup_agreement(
+    f: &Fixture,
+    target: &Path,
+    goal: &str,
+    criteria: J,
+) -> task_env::TaskEnvironment {
     git(
         f.temp.path(),
         &[
@@ -39,10 +58,9 @@ fn setup(f: &Fixture, target: &Path) -> task_env::TaskEnvironment {
     git(target, &["update-ref", "refs/heads/accepted", &f.commit]);
     let mut q = f.state();
     q["tasks"].as_object_mut().unwrap().remove("task");
-    progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":GOAL,
-        "basis":{"original":[GOAL],"changes":[],"specifications":[],"endpoint":target,"confirmation":"explicit stage-delivery acceptance scenario"},
-        "acceptance":[{"id":"answer","description":"tracked answer.txt has exactly bytes 42 plus newline","required":true},
-            {"id":"explanation","description":"tracked explanation.txt has exactly bytes 6 * 7 = 42 plus newline","required":true}],
+    progress::lineage::action(&mut q, &json!({"kind":"plan","task":"task","goal":goal,
+        "basis":{"original":[goal],"changes":[],"specifications":[],"endpoint":target,"confirmation":"explicit stage-delivery acceptance scenario"},
+        "acceptance":criteria,
         "authorization":[{"id":"develop","action":"development","source":"scoped local acceptance task"},
             {"id":"verify","action":"review","source":"scoped local acceptance task"},
             {"id":"deliver-local","action":"delivery","source":"only this newly created local Git target"}]}), util::now()).unwrap();

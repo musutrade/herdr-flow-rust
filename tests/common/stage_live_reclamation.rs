@@ -3,7 +3,7 @@ use super::*;
 #[path = "stage_live_deletion.rs"]
 mod deletion;
 
-fn contains_identity(inventory: &J, identity: &J) -> bool {
+pub(super) fn contains_identity(inventory: &J, identity: &J) -> bool {
     match inventory {
         J::String(_) => inventory == identity,
         J::Array(items) => items.iter().any(|item| contains_identity(item, identity)),
@@ -267,3 +267,15 @@ pub(super) fn retained_review(audit: &StageAudit, env: &J) {
 #[cfg(test)]
 #[path = "stage_live_reclamation_tests.rs"]
 mod tests;
+
+pub(super) fn native_snapshot(socket: &str, cwd: &Path, parents: &[String]) -> J {
+    deletion::snapshot(socket, cwd, parents)
+}
+pub(super) fn native_absence(
+    socket: &str,
+    scope: &[PathBuf],
+    expected: &BTreeMap<String, PathBuf>,
+    parents: &[String],
+) -> J {
+    deletion::observe(socket, scope, expected, parents)
+}

@@ -304,3 +304,40 @@ fn handoff_command_child() {
     .unwrap();
     assert_eq!(returned["phase"], "verifying");
 }
+
+#[test]
+fn worker_without_observer_namespace_keeps_full_human_quiescence_available() {
+    let (f, service) = Fixture::with_server(1, "idle");
+    {
+        let env = f.active();
+        for role in ["developer", "reviewer", "recovery"] {
+            let root = super::super::super::prepare(&env, role).unwrap();
+            let mut runtime = util::read_state_json(&f.root(), "runtime.json").unwrap();
+            runtime["root"] = json!(root);
+            // These independent read-only role checkouts do not overlap the
+            // transferred checkout; their retained controls are still counted.
+            let cwd = f.temp.path().join(role);
+            util::ensure_private_dir(&cwd, true).unwrap();
+            runtime["cwd"] = json!(cwd);
+            util::atomic_write_json(&root.join("runtime.json"), &runtime).unwrap();
+            assert!(!root.join("recovery-observer").exists());
+        }
+    }
+    f.request();
+    let acquired = f.acquire();
+    assert_eq!(acquired["phase"], "human", "{acquired}");
+    assert!(
+        acquired["proof"]["retained_processes"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 4
+    );
+    service.finish();
+}
+
+#[path = "human_optional_observers.rs"]
+mod optional_observers;
+
+#[path = "human_prepared_recovery.rs"]
+mod prepared_recovery;

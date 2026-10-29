@@ -154,3 +154,8 @@ initialize that environment before starting RPC deadlines. Their bounded accept
 budget also covers the large-history compaction exercise; production RPC and peer
 read/write limits are unchanged. The failed coverage attempt is retained in the
 validation record and is not counted as a pass.
+
+The separately opt-in [real human writer acceptance harness](human-writer-live-acceptance.md)
+prepares one full model/Herdr success loop with a disclosed scripted operator.
+It remains a prepared harness until that exact live run passes; ordinary CI and
+protocol fixtures do not establish native/model notification readiness.
