@@ -348,7 +348,7 @@ fn human_process(
     pid: i32,
     path: &Path,
 ) -> Result<()> {
-    if !same_uid_process(pid, path)? {
+    if pid == std::process::id() as i32 || !same_uid_process(pid, path)? {
         return Ok(());
     }
     let Some((record, _, dead)) = stat(pid)? else {

@@ -1,5 +1,5 @@
 use super::*;
-const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|human-status|human-request|human-acquire|human-return|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Human writer transfer requires an explicit request, successful acquisition and recovery verification on return. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
+const USAGE: &str = "Usage: herdr-flow task-runtime <prepare|review-snapshot|launch|create|receiver-bootstrap|receiver-start|receiver-activate|receiver-recover|broker-recover|recover|dispatch|collect|status|recovery-start|recovery-status|publication-status|human-status|human-request|human-acquire|human-return|human-abandon|tui-open|tui-status|tui-close> --task TASK --state-dir DIR [--spec FILE]\n       herdr-flow task-runtime publication-watch --state-dir DIR\n       herdr-flow task-runtime configuration-status --adapter <codex>\nLogin/provider/billing belong to upstream. Native TUI resumes the same task in Herdr; closing it does not cancel the task. Human writer transfer requires an explicit request, successful acquisition and recovery verification on return. Codex upstream mode connects to an existing Unix app-server; isolated-fixture is only for credential-free protocol tests.";
 
 fn run(args: &[String]) -> Result<J> {
     if let Some(result) = special(args) {
@@ -29,7 +29,7 @@ fn run(args: &[String]) -> Result<J> {
 
 fn owned_action(action: &str, root: &Path, task: &str, spec: &J) -> Option<Result<J>> {
     match action {
-        "human-request" | "human-acquire" | "human-return" => {
+        "human-request" | "human-acquire" | "human-return" | "human-abandon" => {
             Some(human::action(root, task, action, spec))
         }
         _ => read_only_status(action, root, task),
@@ -185,6 +185,7 @@ mod tests {
             "human-request",
             "human-acquire",
             "human-return",
+            "human-abandon",
         ] {
             let error = run(&[
                 action.into(),

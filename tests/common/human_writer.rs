@@ -12,6 +12,9 @@ use std::{
 const SESSION: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER: &str = "22222222-2222-2222-2222-222222222222";
 
+#[path = "human_writer_review.rs"]
+mod review;
+
 struct Fixture {
     temp: tempfile::TempDir,
     owner: Owner,
@@ -39,7 +42,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 impl Fixture {
-    fn new(socket: &Path) -> Self {
+    fn new() -> Self {
         let temp = util::fs::test_tempdir();
         let queue = temp.path().join("queue");
         let control = task_env::test_env_root(&queue.join("queue.json/task-environments"));
@@ -86,14 +89,22 @@ impl Fixture {
             .unwrap()
             .unwrap();
         let broker = Command::new("sleep").arg("300").spawn().unwrap();
-        let fixture = Self {
+        Self {
             temp,
             owner,
             broker,
             _control: control,
-        };
-        fixture.prepare(socket);
-        fixture
+        }
+    }
+
+    fn with_server(count: usize, mode: &'static str) -> (Self, rpc_fixture::Server) {
+        // Acquire the shared environment fixture lock before starting an RPC
+        // deadline. Other tests can hold that lock for longer than a request.
+        let fixture = Self::new();
+        let config = Arc::new(Mutex::new(json!({"cwd":fixture.checkout()})));
+        let server = server(count, mode, config);
+        fixture.prepare(&server.path);
+        (fixture, server)
     }
 
     fn active(&self) -> TaskEnvironment {
@@ -193,48 +204,55 @@ impl Drop for Fixture {
 }
 
 fn server(count: usize, mode: &'static str, config: Arc<Mutex<J>>) -> rpc_fixture::Server {
-    rpc_fixture::Server::start_connections(count, move |mut peer| {
-        peer.initialize();
-        let request = peer.request();
-        assert_eq!(request["method"], "thread/read");
-        let cwd = config.lock().unwrap()["cwd"].clone();
-        let status = if mode == "busy" { "active" } else { "idle" };
-        peer.json(&json!({"id":request["id"],"result":{"thread":{"id":SESSION,"cwd":cwd,"status":{"type":status}}}}));
-        if mode == "busy" {
-            return;
-        }
-        let request = peer.request();
-        assert_eq!(request["method"], "thread/backgroundTerminals/list");
-        if mode == "unobservable" {
-            peer.json(
-                &json!({"id":request["id"],"error":{"code":-32601,"message":"method unavailable"}}),
-            );
-            return;
-        }
-        let terminals = if mode == "background" {
-            json!([{"processId":"still-running"}])
-        } else {
-            json!([])
-        };
-        peer.json(&json!({"id":request["id"],"result":{"data":terminals,"nextCursor":null}}));
-        if mode == "background" {
-            return;
-        }
-        let request = peer.request();
-        assert_eq!(request["method"], "thread/loaded/list");
-        let ids = if mode == "foreign" {
-            vec![SESSION, OTHER]
-        } else {
-            vec![SESSION]
-        };
-        peer.json(&json!({"id":request["id"],"result":{"data":ids,"nextCursor":null}}));
-        for id in ids {
+    // Between connections, large historical fixtures exercise compaction under
+    // coverage instrumentation. Only the fixture accept budget is extended;
+    // production RPC deadlines and each peer's read/write limits are unchanged.
+    rpc_fixture::Server::start_connections_with_timeout(
+        count,
+        std::time::Duration::from_secs(60),
+        move |mut peer| {
+            peer.initialize();
             let request = peer.request();
             assert_eq!(request["method"], "thread/read");
-            assert_eq!(request["params"]["threadId"], id);
-            peer.json(&json!({"id":request["id"],"result":{"thread":{"id":id,"cwd":cwd,"status":{"type":"idle"}}}}));
-        }
-    })
+            let cwd = config.lock().unwrap()["cwd"].clone();
+            let status = if mode == "busy" { "active" } else { "idle" };
+            peer.json(&json!({"id":request["id"],"result":{"thread":{"id":SESSION,"cwd":cwd,"status":{"type":status}}}}));
+            if mode == "busy" {
+                return;
+            }
+            let request = peer.request();
+            assert_eq!(request["method"], "thread/backgroundTerminals/list");
+            if mode == "unobservable" {
+                peer.json(
+                &json!({"id":request["id"],"error":{"code":-32601,"message":"method unavailable"}}),
+            );
+                return;
+            }
+            let terminals = if mode == "background" {
+                json!([{"processId":"still-running"}])
+            } else {
+                json!([])
+            };
+            peer.json(&json!({"id":request["id"],"result":{"data":terminals,"nextCursor":null}}));
+            if mode == "background" {
+                return;
+            }
+            let request = peer.request();
+            assert_eq!(request["method"], "thread/loaded/list");
+            let ids = if mode == "foreign" {
+                vec![SESSION, OTHER]
+            } else {
+                vec![SESSION]
+            };
+            peer.json(&json!({"id":request["id"],"result":{"data":ids,"nextCursor":null}}));
+            for id in ids {
+                let request = peer.request();
+                assert_eq!(request["method"], "thread/read");
+                assert_eq!(request["params"]["threadId"], id);
+                peer.json(&json!({"id":request["id"],"result":{"thread":{"id":id,"cwd":cwd,"status":{"type":"idle"}}}}));
+            }
+        },
+    )
 }
 
 fn verdict(incident: &J, disposition: &str) -> J {
@@ -245,10 +263,7 @@ fn verdict(incident: &J, disposition: &str) -> J {
 
 // Share the real isolated queue/worktree with the recovery observer's tests.
 pub(crate) fn returned_scenario(test: impl FnOnce(&Path, &J, &J)) {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(2, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(2, "idle");
     f.request();
     assert_eq!(f.acquire()["phase"], "human");
     f.give_back();
@@ -262,10 +277,7 @@ pub(crate) fn returned_scenario(test: impl FnOnce(&Path, &J, &J)) {
 
 #[test]
 fn explicit_handoff_preserves_owner_and_history_and_requires_fresh_acceptance() {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(3, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(3, "idle");
     assert_eq!(
         status(&f.root(), "parent").unwrap()["phase"],
         "not_requested"
@@ -350,10 +362,7 @@ fn explicit_handoff_preserves_owner_and_history_and_requires_fresh_acceptance() 
 #[test]
 fn active_unknown_native_and_background_work_never_grant_human_authority() {
     for mode in ["busy", "background", "unobservable", "foreign"] {
-        let config = Arc::new(Mutex::new(json!({})));
-        let service = server(1, mode, config.clone());
-        let f = Fixture::new(&service.path);
-        config.lock().unwrap()["cwd"] = json!(f.checkout());
+        let (f, service) = Fixture::with_server(1, mode);
         f.request();
         let result = f.acquire();
         assert_eq!(result["phase"], "draining", "{mode}: {result}");
@@ -366,8 +375,7 @@ fn active_unknown_native_and_background_work_never_grant_human_authority() {
 
 #[test]
 fn unresolved_journals_and_git_locks_are_preserved_without_an_upstream_send() {
-    let service = server(0, "idle", Arc::new(Mutex::new(json!({}))));
-    let f = Fixture::new(&service.path);
+    let (f, service) = Fixture::with_server(0, "idle");
     f.request();
     for (field, value) in [
         ("writer", json!({"workspace":f.checkout()})),
@@ -401,10 +409,7 @@ fn unresolved_journals_and_git_locks_are_preserved_without_an_upstream_send() {
 
 #[test]
 fn returned_checkout_changes_block_release_and_a_new_return_can_be_verified() {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(6, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(6, "idle");
     f.request();
     assert_eq!(f.acquire()["phase"], "human");
     f.give_back();
@@ -432,10 +437,7 @@ fn returned_checkout_changes_block_release_and_a_new_return_can_be_verified() {
 
 #[test]
 fn new_process_in_checkout_blocks_transfer_until_it_exits() {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(2, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(2, "idle");
     f.request();
     let mut writer = Command::new("sleep")
         .arg("60")
@@ -453,10 +455,7 @@ fn new_process_in_checkout_blocks_transfer_until_it_exits() {
 
 #[test]
 fn registered_descendant_retains_writer_even_after_leaving_the_checkout() {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(2, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(2, "idle");
     let mut writer = Command::new("sleep")
         .arg("60")
         .current_dir(f.temp.path())
@@ -488,10 +487,7 @@ fn registered_descendant_retains_writer_even_after_leaving_the_checkout() {
 
 #[test]
 fn original_tool_and_turn_journals_must_settle_before_any_human_acquisition() {
-    let config = Arc::new(Mutex::new(json!({})));
-    let service = server(1, "idle", config.clone());
-    let f = Fixture::new(&service.path);
-    config.lock().unwrap()["cwd"] = json!(f.checkout());
+    let (f, service) = Fixture::with_server(1, "idle");
     f.request();
     for (file, pending, settled) in [
         (
@@ -532,8 +528,7 @@ fn original_tool_and_turn_journals_must_settle_before_any_human_acquisition() {
 
 #[test]
 fn admission_is_serialized_and_allows_observation_and_original_replies() {
-    let service = server(0, "idle", Arc::new(Mutex::new(json!({}))));
-    let f = Fixture::new(&service.path);
+    let (f, service) = Fixture::with_server(0, "idle");
     let lease = lifecycle::write_permit(&f.owner).unwrap();
     assert_eq!(
         f.action("human-request", json!({"reason":"repair"}))

@@ -46,12 +46,8 @@ fn repeated(t: &J, owner: &Owner, outcome: &str, reason: &str) -> Result<()> {
 
 fn validate_new(t: &J, spec: &J, env: &TaskEnvironment, outcome: &str) -> Result<()> {
     ensure(
-        t["human_writer"].is_null()
-            || matches!(
-                t["human_writer"]["phase"].as_str(),
-                Some("draining" | "released")
-            ),
-        "return and verify the human writer before finalization; retain its checkout",
+        human_terminal_allowed(&t["human_writer"], outcome),
+        "return and verify the human writer, or explicitly human-abandon before failure finalization; retain its checkout",
     )?;
     ensure(
         t["state_version"] == spec["state_version"] && spec["state_version"].as_u64().is_some(),
@@ -65,6 +61,14 @@ fn validate_new(t: &J, spec: &J, env: &TaskEnvironment, outcome: &str) -> Result
         return confirmed_delivery(t, env);
     }
     Ok(())
+}
+
+fn human_terminal_allowed(record: &J, outcome: &str) -> bool {
+    record.is_null()
+        || matches!(record["phase"].as_str(), Some("draining" | "released"))
+        || (record["phase"] == "abandoned"
+            && record["abandon"]["acknowledge_cleanup"] == true
+            && outcome == "failure")
 }
 
 fn confirmed_delivery(parent: &J, env: &TaskEnvironment) -> Result<()> {

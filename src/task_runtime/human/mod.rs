@@ -5,6 +5,8 @@ use crate::{lifecycle::Owner, queue};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 mod gate;
+mod history;
+mod locking;
 mod observe;
 #[cfg(test)]
 #[path = "../../../tests/common/human_writer.rs"]
@@ -21,7 +23,7 @@ fn read(root: &Path, file: &str) -> Result<Option<J>> {
 }
 
 fn owner(coordinator: &Path, task: &str) -> Result<Owner> {
-    let permit = crate::lifecycle::runtime_observer_permit(coordinator)?
+    let permit = locking::retry(|| crate::lifecycle::runtime_observer_permit(coordinator))?
         .ok_or_else(|| FlowError::guard("human handoff requires an isolated Owner"))?;
     ensure(permit.owner().task_id == task, "human handoff task changed")?;
     Ok(permit.owner().clone())
@@ -34,13 +36,13 @@ pub fn status(coordinator: &Path, task: &str) -> Result<J> {
     if record.is_null() {
         return Ok(json!({"phase":"not_requested","writer":"agent"}));
     }
-    validate(record, &owner)?;
-    Ok(record.clone())
+    validate_structure(record, &owner)?;
+    history::status(record)
 }
 
 pub fn action(coordinator: &Path, task: &str, action: &str, spec: &J) -> Result<J> {
     let owner = owner(coordinator, task)?;
-    let permit = Arc::new(crate::lifecycle::acquire(&owner, true)?);
+    let permit = Arc::new(locking::retry(|| crate::lifecycle::acquire(&owner, true))?);
     let env = crate::task_env::isolation::restore_active(&owner, permit.clone())?;
     let (state, before) = action_state(&env, coordinator, &permit)?;
     let mut next = transition(&env, coordinator, &owner, &before, spec, &state, action)?;
@@ -48,7 +50,8 @@ pub fn action(coordinator: &Path, task: &str, action: &str, spec: &J) -> Result<
         return Ok(next);
     }
     next["updated_at"] = json!(util::now());
-    commit(&owner, &before, &next, false)?;
+    history::fit(&mut next)?;
+    commit(&owner, &before, &next, next["phase"] == "abandoned")?;
     notice(coordinator, &next);
     Ok(next)
 }
@@ -68,7 +71,7 @@ fn action_state(
     validate_coordinator(env, coordinator, &state)?;
     let before = state["tasks"][&owner.task_id][KEY].clone();
     if !before.is_null() {
-        validate(&before, owner)?;
+        validate_structure(&before, owner)?;
     }
     Ok((state, before))
 }
@@ -86,6 +89,7 @@ fn transition(
         "human-request" => request(env, coordinator, owner, before, spec),
         "human-acquire" => acquire(env, before, spec, state),
         "human-return" => give_back(env, before, spec, state),
+        "human-abandon" => abandon(before, spec),
         _ => Err(FlowError::usage("unknown human handoff action")),
     }
 }
@@ -210,13 +214,61 @@ fn acquire(env: &TaskEnvironment, before: &J, spec: &J, state: &J) -> Result<J> 
             next["writer"] = next["actor"].clone();
             next["before"] = json!(fingerprint(before)?);
             next["next_step"] = json!("Only this checkout is transferred. Finish all edits and child commands before human-return; do not edit after returning.");
-            next.as_object_mut().unwrap().remove("blocked_reason");
+            clear_return(&mut next);
         }
         Err(error) => {
             next["blocked_reason"] = json!(error.to_string());
             next["next_step"] = json!("Inspect the original execution or unknown operation. Retain this request and retry acquisition only after the condition changes; never replay work.");
         }
     }
+    Ok(next)
+}
+
+fn clear_return(next: &mut J) {
+    for field in [
+        "blocked_reason",
+        "return",
+        "verification",
+        "verification_proof",
+    ] {
+        next.as_object_mut().unwrap().remove(field);
+    }
+}
+
+fn abandon(before: &J, spec: &J) -> Result<J> {
+    fields(spec, &["id", "actor", "reason", "acknowledge_cleanup"])?;
+    bound(before, spec)?;
+    let reason = text(spec, "reason")?;
+    ensure(
+        spec["acknowledge_cleanup"] == true,
+        "abandon requires surrendering human writes and acknowledging failure cleanup",
+    )?;
+    if before["phase"] == "abandoned" {
+        ensure(
+            before["abandon"]["reason"] == reason,
+            "abandon reason changed",
+        )?;
+        return Ok(before.clone());
+    }
+    ensure(
+        before["phase"] != "released",
+        "released handoff needs no abandonment",
+    )?;
+    abandoned_record(before, spec)
+}
+
+fn abandoned_record(before: &J, spec: &J) -> Result<J> {
+    let mut next = before.clone();
+    let observation = match fingerprint(before) {
+        Ok(value) => json!({"fingerprint":value}),
+        Err(error) => json!({"unavailable":error.to_string()}),
+    };
+    next["abandon"] = json!({"actor":spec["actor"],"reason":spec["reason"],
+        "acknowledge_cleanup":true,"from_phase":before["phase"],"at":util::now(),
+        "before_sha256":history::digest(before)?,"checkout_observation":observation});
+    next["phase"] = json!("abandoned");
+    next["writer"] = json!("none");
+    next["next_step"] = json!("Human writes are surrendered. The checkout remains fenced; finalize this task as failure, then use the existing terminal cleanup. No recovery result may release this handoff.");
     Ok(next)
 }
 
@@ -263,13 +315,18 @@ fn fingerprint(record: &J) -> Result<String> {
 }
 
 fn validate(record: &J, owner: &Owner) -> Result<()> {
-    validate_identity(record, owner)?;
-    validate_paths(record)?;
-    validate_phase(record)?;
+    validate_structure(record, owner)?;
     ensure(
         serde_json::to_vec(record)?.len() <= LIMIT,
         "human handoff exceeds bound",
     )
+}
+
+fn validate_structure(record: &J, owner: &Owner) -> Result<()> {
+    validate_identity(record, owner)?;
+    validate_paths(record)?;
+    validate_phase(record)?;
+    validate_abandon(record)
 }
 
 fn validate_identity(record: &J, owner: &Owner) -> Result<()> {
@@ -300,7 +357,7 @@ fn validate_phase(record: &J) -> Result<()> {
     ensure(
         matches!(
             record["phase"].as_str(),
-            Some("draining" | "human" | "verifying" | "blocked" | "released")
+            Some("draining" | "human" | "verifying" | "blocked" | "released" | "abandoned")
         ),
         "unknown human handoff phase",
     )?;
@@ -323,9 +380,21 @@ fn validate_phase(record: &J) -> Result<()> {
     Ok(())
 }
 
+fn validate_abandon(record: &J) -> Result<()> {
+    if record["phase"] == "abandoned" {
+        ensure(
+            record["abandon"]["acknowledge_cleanup"] == true
+                && record["abandon"]["actor"] == record["actor"],
+            "invalid human abandonment",
+        )?;
+        text(&record["abandon"], "reason")?;
+    }
+    Ok(())
+}
+
 fn commit(owner: &Owner, before: &J, next: &J, invalidate: bool) -> Result<()> {
     validate(next, owner)?;
-    let _lock = queue::locked(&owner.queue_root, false)?;
+    let _lock = locking::retry(|| queue::locked(&owner.queue_root, false))?;
     let mut state = queue::load_queue(&owner.queue_root)?;
     ensure(
         crate::lifecycle::task_owner(&state, &owner.task_id)?.as_ref() == Some(owner),
@@ -395,7 +464,7 @@ pub(super) fn verification_fault(context: &J, state: &J) -> Result<Option<J>> {
     if record.is_null() {
         return Ok(None);
     }
-    validate(record, &owner)?;
+    validate_structure(record, &owner)?;
     if record["phase"] != "verifying" {
         return Ok(None);
     }
@@ -405,7 +474,7 @@ pub(super) fn verification_fault(context: &J, state: &J) -> Result<Option<J>> {
     )?;
     Ok(Some(
         json!({"source":format!("human-writer:{}", owner.task_id),"id":record["return"]["id"],
-        "kind":"human_writer_return","handoff":record,
+        "kind":"human_writer_return","handoff":history::status(record)?,
         "instruction":"Verify the returned checkout and actual task state. This is neither independent acceptance nor permission to replay an old operation."}),
     ))
 }
@@ -430,7 +499,11 @@ pub(super) fn finish_verification(context: &J, incident: &J, result: &J) -> Resu
 }
 
 fn validate_verification(before: &J, owner: &Owner, context: &J, incident: &J) -> Result<()> {
-    validate(before, owner)?;
+    validate_structure(before, owner)?;
+    ensure(
+        before["phase"] != "abandoned",
+        "human handoff was abandoned; verification is stale",
+    )?;
     ensure(
         before["coordinator"] == context["coordinator"]
             && incident["fault"]["handoff"]["owner"] == json!(owner),
@@ -468,26 +541,10 @@ fn commit_verification(
     let verdict = verify_return(env, &mut next, state, result);
     next["updated_at"] = json!(util::now());
     next["verification"] = json!({"incident":incident["id"],"agent":incident["agent"],"turn":incident["turn"],"model_result":result,"result":verdict,"at":next["updated_at"]});
-    append_verification(&mut next)?;
+    history::append_verification(&mut next)?;
     commit(owner, before, &next, next["phase"] == "released")?;
     notice(Path::new(&required(&next, "coordinator")?), &next);
     Ok(verdict)
-}
-
-fn append_verification(next: &mut J) -> Result<()> {
-    if next["verifications"].is_null() {
-        next["verifications"] = json!([]);
-    }
-    let entry = json!({"return":next["return"],"verification":next["verification"]});
-    let history = next["verifications"]
-        .as_array_mut()
-        .ok_or_else(|| FlowError::guard("invalid verification history"))?;
-    ensure(
-        history.len() < 64,
-        "human verification history exceeds bound",
-    )?;
-    history.push(entry);
-    Ok(())
 }
 
 fn verify_return(env: &TaskEnvironment, next: &mut J, state: &J, result: &J) -> J {

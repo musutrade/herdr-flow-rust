@@ -1,26 +1,44 @@
 use super::*;
+mod cache;
+
+#[derive(Clone)]
+enum Fences {
+    Unknown,
+    Checkouts(Vec<PathBuf>),
+}
+
+impl Fences {
+    fn blocks(&self, path: &Path) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Checkouts(paths) => paths
+                .iter()
+                .any(|checkout| crate::task_env::paths_overlap(path, checkout)),
+        }
+    }
+}
 
 pub(crate) fn check_workspace(state: &J, path: &Path) -> Result<()> {
     ensure(
-        !blocked(state, path)?,
+        !fences(state).blocks(path),
         "checkout writer is transferred or draining for human handoff; inspect human-status",
     )
 }
 
-fn blocked(state: &J, path: &Path) -> Result<bool> {
+fn fences(state: &J) -> Fences {
     let Some(tasks) = state["tasks"].as_object() else {
-        return Ok(false);
+        return Fences::Unknown;
     };
+    let mut paths = Vec::new();
     for (name, task) in tasks {
-        let Some(record) = active_record(state, name, task)? else {
-            continue;
-        };
-        let checkout = PathBuf::from(required(record, "checkout")?);
-        if crate::task_env::paths_overlap(&path.canonicalize()?, &checkout) {
-            return Ok(true);
+        match active_record(state, name, task) {
+            Ok(Some(record)) => paths.push(PathBuf::from(record["checkout"].as_str().unwrap())),
+            Ok(None) => (),
+            // An invalid record is a fence, not a transport/metadata failure.
+            Err(_) => return Fences::Unknown,
         }
     }
-    Ok(false)
+    Fences::Checkouts(paths)
 }
 
 fn active_record<'a>(state: &J, name: &str, task: &'a J) -> Result<Option<&'a J>> {
@@ -31,18 +49,26 @@ fn active_record<'a>(state: &J, name: &str, task: &'a J) -> Result<Option<&'a J>
     let recorded_owner: Owner = serde_json::from_value(record["owner"].clone())?;
     validate(record, &recorded_owner)?;
     // Released history remains valid after its environment mapping retires.
-    if record["phase"] == "released" {
+    if record["phase"] == "released" || abandoned_cleanup_complete(task, record) {
         return Ok(None);
     }
     let owner = crate::lifecycle::task_owner(state, name)?
         .ok_or_else(|| FlowError::guard("human writer lost Owner"))?;
-    validate(record, &owner)?;
+    ensure(owner == recorded_owner, "human handoff Owner changed")?;
     Ok(Some(record))
+}
+
+fn abandoned_cleanup_complete(task: &J, record: &J) -> bool {
+    record["phase"] == "abandoned"
+        && task["final_outcome"] == "failure"
+        && task["cleanup_obligation"]["status"] == "released"
+        && task["cleanup_obligation"]["owner"] == record["owner"]
 }
 
 pub(crate) fn admit_workspace(env: &TaskEnvironment, path: &Path) -> Result<()> {
     if let Some(owner) = crate::task_env::isolation::owner(env) {
-        check_workspace(&queue::load_queue(&owner.queue_root)?, path)?;
+        let state = queue::load_queue(&owner.queue_root).unwrap_or(J::Null);
+        check_workspace(&state, path)?;
     }
     Ok(())
 }
@@ -52,30 +78,29 @@ pub(crate) fn admit_launch(env: &TaskEnvironment, spec: &J) -> Result<()> {
 }
 
 pub(crate) fn admit_native(root: &Path, message: &J) -> Result<()> {
-    let Some(runtime) = read(root, "runtime.json")? else {
-        return Ok(());
-    };
-    if !runtime_blocked(&runtime)? {
+    let runtime = read(root, "runtime.json").ok().flatten().unwrap_or(J::Null);
+    if !runtime_blocked(root, &runtime).unwrap_or(true) {
         return Ok(());
     }
     ensure(readonly(message, &runtime), "human handoff refuses new native writes; original approvals, interrupts and metadata reads remain available")
 }
 
 pub(crate) fn automatic_input_allowed(root: &Path) -> Result<bool> {
-    match read(root, "runtime.json")? {
-        Some(runtime) => Ok(!runtime_blocked(&runtime)?),
-        None => Ok(true),
-    }
+    let runtime = read(root, "runtime.json").ok().flatten().unwrap_or(J::Null);
+    Ok(!runtime_blocked(root, &runtime).unwrap_or(true))
 }
 
-fn runtime_blocked(runtime: &J) -> Result<bool> {
+fn runtime_blocked(root: &Path, runtime: &J) -> Result<bool> {
+    if !runtime.is_object() {
+        return Ok(true);
+    }
     let Some(owner) = runtime.get("lifecycle_owner").filter(|v| !v.is_null()) else {
-        return Ok(false);
+        // Only an existing legacy runtime may omit lifecycle ownership.
+        return util::protected::is_runtime_namespace(root);
     };
     let owner: Owner = serde_json::from_value(owner.clone())?;
-    let state = queue::load_queue(&owner.queue_root)?;
     let path = PathBuf::from(required(runtime, "cwd")?);
-    blocked(&state, &path)
+    Ok(cache::load(&owner.queue_root)?.blocks(&path))
 }
 
 fn readonly(message: &J, runtime: &J) -> bool {

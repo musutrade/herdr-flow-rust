@@ -335,7 +335,8 @@ fn writer_fails_closed_on_unverifiable_sending_ownership() {
     let mut s = s;
     begin(&mut s).unwrap();
     assert!(reserve(&s, &repo.root.join("missing"), "other").is_err());
-    assert!(reserve(&json!({}), &repo.root, "new").is_ok());
+    assert!(reserve(&json!({}), &repo.root, "new").is_err());
+    assert!(reserve(&json!({"tasks":{}}), &repo.root, "new").is_ok());
     assert!(reserve(&json!({"tasks":false}), &repo.root, "new").is_err());
 }
 
