@@ -90,3 +90,68 @@ fn final_inventory_rejects_sql_json_rollouts_and_saved_herdr_backups() {
         true
     );
 }
+
+#[test]
+fn live_herdr_inventory_requires_exact_ids_and_preserves_unrelated_mentions() {
+    let views = [(
+        "coordinator".into(),
+        json!({"presentation":{"pane":"wJ:p3","tab":"wJ:t2","terminal":"terminal-7"}}),
+    )]
+    .into_iter()
+    .collect();
+    let panes = json!({"panes":[{"id":"wJ:p3A","label":"diagnostic mentions wJ:p3, wJ:t2 and terminal-7"}]});
+    let tabs = json!({"tabs":[{"id":"wJ:t2A","terminal":"terminal-7-extra"}]});
+    presentations_absent(&panes, &tabs, &views);
+    for identity in ["wJ:p3", "wJ:t2", "terminal-7"] {
+        assert!(
+            std::panic::catch_unwind(|| presentations_absent(
+                &json!({"nested":[{"id":identity}]}),
+                &tabs,
+                &views
+            ))
+            .is_err(),
+            "an exact owned resource identity was ignored"
+        );
+    }
+}
+
+#[test]
+fn dead_root_does_not_hide_a_saved_live_descendant_with_an_unrelated_marker() {
+    use std::os::unix::process::CommandExt;
+    let mut root = FixtureChild(
+        Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    let mut descendant = FixtureChild(
+        Command::new("sleep")
+            .arg("60")
+            .env(task_env::MARKER_ENV, "unrelated-audit-fixture")
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    let root_pid = root.0.id() as i32;
+    let child_pid = descendant.0.id() as i32;
+    let mut record = json!({"pid":root_pid,"pgid":root_pid,"start_time":task_env::process_start_time(root_pid).unwrap(),
+        "descendants":[{"pid":child_pid,"start_time":task_env::process_start_time(child_pid).unwrap()}],"direct_children":[]});
+    root.0.kill().unwrap();
+    root.0.wait().unwrap();
+    // This saved ownership snapshot, rather than a current marker or live root,
+    // must keep the descendant in the final absence proof.
+    assert!(std::panic::catch_unwind(|| registered_process_absent(&record)).is_err());
+    record["direct_children"] = record["descendants"].clone();
+    record["descendants"] = json!([]);
+    registered_process_absent(&record); // unrelated diagnostic children are not owned.
+    descendant.0.kill().unwrap();
+    descendant.0.wait().unwrap();
+    record["descendants"] = record["direct_children"].clone();
+    registered_process_absent(&record);
+    record["descendants"][0]["start_time"] = J::Null;
+    assert!(
+        std::panic::catch_unwind(|| registered_process_absent(&record)).is_err(),
+        "missing identity must fail closed"
+    );
+}

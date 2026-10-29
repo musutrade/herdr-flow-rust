@@ -186,12 +186,7 @@ pub(super) fn verify(
         }
     }
     for process in a.processes.values() {
-        let registered: task_env::RegisteredProcess =
-            serde_json::from_value(process.clone()).unwrap();
-        assert!(
-            !task_env::process_is_alive(&registered),
-            "owned process survived: {process}"
-        );
+        registered_process_absent(process);
     }
     // Private exact cwd inventories must be completely empty, including unknown
     // Guardian children. The same complete attached/pagination helper is used by
@@ -231,16 +226,7 @@ pub(super) fn verify(
             .as_str()
             .unwrap(),
     ]);
-    for view in a.views.values() {
-        for key in ["pane", "terminal", "tab"] {
-            assert!(!panes
-                .to_string()
-                .contains(view["presentation"][key].as_str().unwrap()));
-            assert!(!tabs
-                .to_string()
-                .contains(view["presentation"][key].as_str().unwrap()));
-        }
-    }
+    presentations_absent(&panes, &tabs, &a.views);
     let sessions: BTreeSet<_> = a.sessions.keys().map(String::as_str).collect();
     let disk = disk_inventory(config, &sessions);
     assert!(!a.workspace.exists() && !a.scratch.exists());
@@ -266,6 +252,35 @@ pub(super) fn verify(
     a.cleanup = json!({"native_absence":absence,"disk_and_sql_associations":disk,"roots_removed":true,
         "registered_processes_removed":true,"queue_empty":true,"registration_removed":true,
         "terminal_obligations_empty":true,"worktree_removed":true,"herdr_live_and_saved_associations_absent":true});
+}
+
+fn registered_process_absent(process: &J) {
+    let registered: task_env::RegisteredProcess = serde_json::from_value(process.clone()).unwrap();
+    // Saved descendants retain ownership even after their parent exits or their
+    // marker changes. direct_children is diagnostic and can belong to others.
+    let root = task_env::ProcessRecord {
+        pid: registered.pid,
+        start_time: registered.start_time,
+    };
+    for identity in std::iter::once(&root).chain(&registered.descendants) {
+        assert!(
+            !audit::exact_process_alive(&serde_json::to_value(identity).unwrap()),
+            "owned registered process identity survived: {identity:?}"
+        );
+    }
+}
+
+fn presentations_absent(panes: &J, tabs: &J, views: &BTreeMap<String, J>) {
+    for view in views.values() {
+        for key in ["pane", "terminal", "tab"] {
+            for inventory in [panes, tabs] {
+                assert!(
+                    !audit::contains_identity(inventory, &view["presentation"][key]),
+                    "owned Herdr {key} remains in live inventory"
+                );
+            }
+        }
+    }
 }
 
 fn disk_inventory(config: &evidence::Configuration, sessions: &BTreeSet<&str>) -> J {

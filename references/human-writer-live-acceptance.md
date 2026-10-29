@@ -165,3 +165,10 @@ association, an archived owned rollout filename and a typed Herdr backup pane
 association, and proves the read-only audit leaves SQLite bytes unchanged. This
 prevents the audit from requiring deletion of user/observer logs merely because
 they describe the experiment. It is not a generic machine-wide text erasure test.
+
+The final live Herdr audit reuses exact JSON string identity matching: a longer
+pane/tab/terminal ID or prose mentioning an owned ID is not a retained identity.
+The registered-process exit proof checks each root and every saved descendant
+by exact PID/start time, even after the root exits or a marker changes. Missing
+identity or procfs observation errors fail closed. Diagnostic `direct_children`
+are not ownership. Regressions exercise these boundaries with actual processes.

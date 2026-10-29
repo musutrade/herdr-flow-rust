@@ -475,3 +475,6 @@ pub(super) fn native_absence(
 pub(super) fn exact_process_alive(process: &J) -> bool {
     reclamation::process_alive(process)
 }
+pub(super) fn contains_identity(inventory: &J, identity: &J) -> bool {
+    reclamation::contains_identity(inventory, identity)
+}

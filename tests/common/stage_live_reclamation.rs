@@ -3,7 +3,7 @@ use super::*;
 #[path = "stage_live_deletion.rs"]
 mod deletion;
 
-fn contains_identity(inventory: &J, identity: &J) -> bool {
+pub(super) fn contains_identity(inventory: &J, identity: &J) -> bool {
     match inventory {
         J::String(_) => inventory == identity,
         J::Array(items) => items.iter().any(|item| contains_identity(item, identity)),
