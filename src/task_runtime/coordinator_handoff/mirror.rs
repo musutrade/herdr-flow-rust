@@ -5,10 +5,9 @@ use super::*;
 const FILE: &str = "receiver-handoff.json";
 
 pub(super) fn unregistered(root: &Path) -> Result<()> {
-    ensure(
-        util::read_state_json_bounded_if_exists(root, FILE, RECORD_BYTES)?.is_none(),
-        "runtime has an unregistered handoff mirror; inspect without adopting or replaying",
-    )
+    // Ordinary no-handoff work must not depend on opening a nonexistent
+    // namespace. Any reserved entry, including a dangling link, still fences.
+    native::receiver::ensure_absent(&root.join(FILE))
 }
 
 fn expected(state: &J) -> Result<J> {
@@ -131,4 +130,28 @@ fn compatible(state: &J, saved: &J) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_extension_needs_no_namespace_but_orphan_entries_block() {
+        let temp = util::fs::test_tempdir();
+        let root = temp.path().join("not-created");
+        let mut state = super::super::tests::queue();
+        state["tasks"]["parent"][KEY] = J::Null;
+        state["receiver"]["codex_runtime"]["runtime"] = json!(root);
+        let checkout = Path::new("/workspace/checkout");
+        check_workspace(&state, checkout).unwrap();
+        assert!(!root.exists());
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join(FILE), "unknown reservation").unwrap();
+        assert!(check_workspace(&state, checkout).is_err());
+        check_workspace(&state, Path::new("/independent/checkout")).unwrap();
+        std::fs::remove_file(root.join(FILE)).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join(FILE)).unwrap();
+        assert!(check_workspace(&state, checkout).is_err());
+    }
 }
