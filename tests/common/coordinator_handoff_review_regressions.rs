@@ -326,13 +326,15 @@ fn first_save_checks_the_original_recovery_namespace_and_context_authority() {
     assert!(validate_save(&before, &after).is_err());
     util::protected::runtime_namespace(&observer).unwrap();
     util::atomic_write_json(&observer.join("lifecycle-owner.json"), &json!(owner())).unwrap();
-    let context = json!({"owner":owner(),"observer":observer,"coordinator":root});
+    let context = json!({"owner":owner(),"observer":observer,"coordinator":root,
+        "runtime_parent":root.parent(),"runtime":runtime});
     util::atomic_write_json(&observer.join("observer.json"), &context).unwrap();
     validate_save(&before, &after).unwrap();
     for (field, value) in [
         ("owner", json!({"instance_id":"foreign"})),
         ("observer", json!(root.join("other-observer"))),
         ("coordinator", json!(root.join("other-runtime"))),
+        ("runtime", json!({"root":root.join("other-runtime")})),
     ] {
         let mut foreign = context.clone();
         foreign[field] = value;

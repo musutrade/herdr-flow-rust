@@ -3,7 +3,7 @@ use super::*;
 #[path = "coordinator_handoff_review_regressions.rs"]
 mod review_regressions;
 
-fn owner() -> Owner {
+pub(super) fn owner() -> Owner {
     Owner {
         queue_root: "/queue".into(),
         queue_id: "queue".into(),
@@ -34,7 +34,7 @@ fn notice(generation: usize, kind: &str) -> J {
     json!({"wait":format!("handoff-{generation}-{kind}"),"event":null,"delivery":null,"turn":null,"phase":"pending"})
 }
 
-fn record(n: usize) -> J {
+pub(super) fn record(n: usize) -> J {
     let from = target(n - 1, true);
     let to = target(n, false);
     let policy = json!({"type":"workspaceWrite","writableRoots":["/workspace/checkout"],"networkAccess":false});
@@ -46,7 +46,7 @@ fn record(n: usize) -> J {
         "notices":{"accept":notice(n,"accept"),"ready":notice(n,"ready")},"recovery":null,"retirement":null})
 }
 
-fn queue() -> J {
+pub(super) fn queue() -> J {
     json!({"guard_dir":target(0,true)["guard"],"receiver":target(0,true)["scope"],"id":"queue","lifecycle":{"queue_root":"/queue"},"tasks":{"parent":{"task":"parent","epoch":1,"schema_version":2,"requirements":{},
         "environment":{"phase":"active","queue_id":"queue","task_id":"parent","epoch":1,"instance_id":"instance","checkout":"/workspace/checkout","creation_seed":{"temp_root":"/scratch"}},
         KEY:{"version":1,"owner":owner(),"next_generation":2,"active_generation":1,"records":[record(1)]}}}})
@@ -366,8 +366,12 @@ fn intention_or_complete_label_cannot_grant_new_work_before_restore_driver() {
     let mut cancelled = q;
     entry(&mut cancelled)["phase"] = json!("cancelled");
     cancelled["tasks"]["parent"][KEY]["active_generation"] = J::Null;
-    check_workspace(&cancelled, Path::new("/workspace/checkout")).unwrap();
-    admit_control(&cancelled, &owner(), "run").unwrap();
+    // A queue-only cancelled label cannot bypass the original runtime mirror.
+    assert!(check_workspace(&cancelled, Path::new("/workspace/checkout")).is_err());
+    assert!(admit_control(&cancelled, &owner(), "run").is_err());
+    check_workspace(&cancelled, Path::new("/independent/checkout")).unwrap();
+    admit_control(&cancelled, &owner(), "inspect").unwrap();
+    admit_control(&cancelled, &owner(), "ack").unwrap();
 }
 
 #[test]
@@ -405,8 +409,8 @@ fn native_admission_keeps_reads_and_original_replies_but_refuses_new_turns() {
     q["tasks"]["parent"][KEY]["active_generation"] = J::Null;
     align_receiver(&mut q);
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
-    crate::task_runtime::human::admit_native(&runtime, &turn).unwrap();
-    assert!(crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
+    assert!(crate::task_runtime::human::admit_native(&runtime, &turn).is_err());
+    assert!(!crate::task_runtime::human::automatic_input_allowed(&runtime).unwrap());
     entry(&mut q)["phase"] = json!("corrupt");
     util::atomic_write_json(&root.join("queue.json"), &q).unwrap();
     assert!(crate::task_runtime::human::admit_native(&runtime, &turn).is_err());

@@ -91,6 +91,30 @@ pub fn locked_existing(root: &Path) -> Result<util::FileLock> {
     lock_state(root, false)
 }
 
+/// The lifetime keeps the caller's EX alive until the subordinate lock drops.
+pub(crate) struct ExclusiveLock<'a> {
+    _lock: util::FileLock,
+    _permit: &'a crate::lifecycle::Permit,
+}
+
+pub(crate) fn locked_ex<'a>(
+    root: &Path,
+    permit: &'a crate::lifecycle::Permit,
+) -> Result<ExclusiveLock<'a>> {
+    crate::lifecycle::check_runtime_ex(root, permit)?;
+    let root = util::state_dir(root, false)?;
+    let lock = util::FileLock::acquire(&root.join("guard.lock"), false)?.ok_or_else(|| {
+        FlowError::new(
+            ErrorKind::StateBusy,
+            "guard state is busy; no transaction committed",
+        )
+    })?;
+    Ok(ExclusiveLock {
+        _lock: lock,
+        _permit: permit,
+    })
+}
+
 fn lock_state(root: &Path, create: bool) -> Result<util::FileLock> {
     let permit = crate::lifecycle::runtime_permit(root)?;
     let root = util::state_dir(root, create)?;

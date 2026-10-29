@@ -198,6 +198,20 @@ fn acquire_runtime(root: &std::path::Path, marker: &std::path::Path) -> Result<O
     Ok(Some(permit))
 }
 
+/// Reuse an already held Owner EX without attempting a conflicting SH flock.
+/// The caller keeps the permit alive through all dependent locks and writes.
+pub(crate) fn check_runtime_ex(root: &std::path::Path, permit: &Permit) -> Result<()> {
+    if !permit.exclusive() {
+        return Err(FlowError::guard("runtime transaction requires Owner EX"));
+    }
+    let owner = runtime_owner(root, &root.join("lifecycle-owner.json"))?;
+    if &owner != permit.owner() {
+        return Err(FlowError::guard("runtime transaction Owner changed"));
+    }
+    permit.check(&crate::queue::load_queue(&owner.queue_root)?, false)?;
+    verify_runtime_record(root, &owner)
+}
+
 fn runtime_owner(root: &std::path::Path, marker: &std::path::Path) -> Result<Owner> {
     if !util::protected::is_runtime_namespace(root)? {
         return Err(FlowError::guard("runtime authority namespace is missing"));

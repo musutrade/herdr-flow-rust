@@ -41,7 +41,7 @@ pub(super) fn initial(before: &J, after: &J, name: &str, record: &J) -> Result<(
     original_runtime(record, &owner)
 }
 
-fn protected(root: &Path, owner: &Owner) -> Result<()> {
+pub(super) fn protected(root: &Path, owner: &Owner) -> Result<()> {
     ensure(
         util::protected::is_runtime_namespace(root)?,
         "handoff runtime namespace is not protected",
@@ -151,13 +151,6 @@ fn original_recovery(record: &J, owner: &Owner) -> Result<()> {
     if record["recovery"].is_null() {
         return Ok(());
     }
-    let root = path(&record["recovery"], "observer")?;
-    protected(&root, owner)?;
-    let context = util::read_state_json_bounded(&root, "observer.json", RECORD_BYTES)?;
-    ensure(
-        context["owner"] == json!(owner)
-            && context["observer"] == json!(root)
-            && context["coordinator"] == record["from"]["runtime"],
-        "original Recovery observer authority changed",
-    )
+    super::recovery::original_context(&path(&record["from"], "runtime")?, owner)?;
+    Ok(())
 }

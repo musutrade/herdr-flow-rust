@@ -15,6 +15,9 @@ const OTHER: &str = "22222222-2222-2222-2222-222222222222";
 #[path = "human_writer_review.rs"]
 mod review;
 
+#[path = "coordinator_handoff_environment.rs"]
+mod coordinator_handoff;
+
 struct Fixture {
     temp: tempfile::TempDir,
     owner: Owner,

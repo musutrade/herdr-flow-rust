@@ -5,8 +5,11 @@ use crate::lifecycle::Owner;
 mod anchor;
 mod configuration;
 mod gate;
+mod inventory;
+mod mirror;
 mod record;
 mod recovery;
+mod request;
 mod transition;
 
 pub(crate) const KEY: &str = "receiver_handoff";
@@ -16,6 +19,7 @@ const STATE_BYTES: usize = 256 * 1024;
 
 pub(crate) use gate::{admit_control, check_workspace, runtime_blocked};
 pub(crate) use record::validate_queue;
+pub(crate) use request::{action, status};
 pub(crate) use transition::validate_save;
 
 fn fields(value: &J, names: &[&str]) -> Result<()> {
