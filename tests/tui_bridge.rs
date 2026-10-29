@@ -5,6 +5,8 @@
 //! WebSocket handshake observation, the review journal, marker/lock/socket
 //! ownership and one real byte-proxy run.
 
+#[path = "common/native_catalog.rs"]
+mod catalog;
 pub mod common;
 
 use std::cell::RefCell;
@@ -261,6 +263,92 @@ fn wire_observer_handles_partial_handshakes_and_frames() {
         server.feed(&[byte]).expect("server byte");
     }
     assert_eq!(observer.borrow().session(), Some(NEW));
+}
+
+#[test]
+fn native_server_depth_is_separate_from_client_and_byte_limits() {
+    for (client, depth, accepted) in [
+        (false, 64, true),
+        (false, 65, false),
+        (true, 10, true),
+        (true, 11, false),
+    ] {
+        let (observer, _) = recording_observer();
+        let mut wire = WireObserver::new(client, Rc::new(RefCell::new(observer)));
+        let header = if client {
+            b"GET / HTTP/1.1\r\n\r\n".as_slice()
+        } else {
+            b"HTTP/1.1 101 OK\r\n\r\n".as_slice()
+        };
+        wire.feed(header).unwrap();
+        let payload = serde_json::to_vec(&catalog::nested_message(depth)).unwrap();
+        let frame = rpc::encode_frame(&payload, 1, client, true).unwrap();
+        assert_eq!(
+            wire.feed(&frame).is_ok(),
+            accepted,
+            "client={client}, depth={depth}"
+        );
+    }
+    let (observer, _) = recording_observer();
+    let mut wire = WireObserver::with_limit(false, Rc::new(RefCell::new(observer)), 32);
+    wire.feed(b"HTTP/1.1 101 OK\r\n\r\n").unwrap();
+    let frame = rpc::encode_frame(
+        &serde_json::to_vec(&catalog::catalog()).unwrap(),
+        1,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(wire.feed(&frame).is_err());
+}
+
+#[test]
+fn only_known_native_start_tool_schemas_get_extra_depth() {
+    let mut cases = Vec::new();
+    for namespace in [false, true] {
+        cases.push((catalog::tool_start(12, namespace), true));
+        cases.push((catalog::tool_start(64, namespace), true));
+        cases.push((catalog::tool_start(65, namespace), false));
+    }
+    let mut unknown = catalog::tool_start(12, true);
+    unknown["method"] = json!("future/start");
+    cases.push((unknown, false));
+    let mut config = catalog::tool_start(12, true);
+    config["params"]["config"] = catalog::nested_message(10);
+    cases.push((config, false));
+    let mut unknown_tool = catalog::tool_start(12, true);
+    unknown_tool["params"]["dynamicTools"][0]["tools"][0]["type"] = json!("future");
+    cases.push((unknown_tool, false));
+    for (request, accepted) in cases {
+        let payload = serde_json::to_vec(&request).unwrap();
+        assert!(rpc::decode_message(&payload).is_err());
+        let (observer, _) = recording_observer();
+        let mut wire = WireObserver::new(true, Rc::new(RefCell::new(observer)));
+        wire.feed(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        let frame = rpc::encode_frame(&payload, 1, true, true).unwrap();
+        assert_eq!(wire.feed(&frame).is_ok(), accepted);
+    }
+}
+
+#[test]
+fn native_wire_rejects_oversize_server_and_client_frames_from_headers() {
+    for (client, limit) in [(false, 128 << 20), (true, rpc::MAX_MESSAGE)] {
+        let (observer, _) = recording_observer();
+        let mut wire = WireObserver::new(client, Rc::new(RefCell::new(observer)));
+        let header = if client {
+            b"GET / HTTP/1.1\r\n\r\n".as_slice()
+        } else {
+            b"HTTP/1.1 101 OK\r\n\r\n".as_slice()
+        };
+        wire.feed(header).unwrap();
+        let mut frame = vec![0x81, if client { 0xff } else { 0x7f }];
+        frame.extend_from_slice(&((limit + 1) as u64).to_be_bytes());
+        assert!(wire
+            .feed(&frame)
+            .unwrap_err()
+            .message
+            .contains("exceeds limit"));
+    }
 }
 
 #[test]
@@ -1016,7 +1104,8 @@ fn real_byte_proxy_reports_ready_exit_and_reviews() {
     let listener = UnixListener::bind(&server_path).expect("server listener");
     listener.set_nonblocking(true).expect("nonblocking");
 
-    let request = json!({"id": 7, "method": "thread/start", "params": {"cwd": "/exact"}});
+    let mut request = catalog::tool_start(12, true);
+    request["params"]["cwd"] = json!("/exact");
     let request_payload = serde_json::to_vec(&request).expect("request json");
     let request_frame = rpc::encode_frame(&request_payload, 1, true, true).expect("request frame");
     let response = json!({
@@ -1024,8 +1113,20 @@ fn real_byte_proxy_reports_ready_exit_and_reviews() {
         "result": {"thread": {"id": NEW}, "model": "native"}
     });
     let response_payload = serde_json::to_vec(&response).expect("response json");
+    let catalog = serde_json::to_vec(&catalog::catalog()).unwrap();
+    assert!(rpc::decode_message(&catalog).is_err());
+    // Native plugin/list directory traffic is about 24 MB on the observed
+    // service. Exercise the actual transparent byte proxy above 16 MiB too.
+    let plugin = serde_json::to_vec(
+        &json!({"id":90,"result":{"marketplaces":[{"description":"x".repeat(rpc::MAX_MESSAGE)}]}}),
+    )
+    .unwrap();
+    assert!(rpc::decode_message(&plugin).is_err());
     let mut response_bytes =
-        rpc::encode_frame(&response_payload, 1, false, true).expect("response frame");
+        rpc::encode_frame_with_limit(&plugin, 1, false, true, 128 << 20).unwrap();
+    response_bytes.extend(rpc::encode_frame(&catalog, 1, false, true).unwrap());
+    response_bytes
+        .extend(rpc::encode_frame(&response_payload, 1, false, true).expect("response frame"));
     let review = json!({
         "method": "item/autoApprovalReview/completed",
         "params": {

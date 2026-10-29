@@ -2,6 +2,9 @@
 //! and broker keep their existing identities; each attachment owns a new tab.
 use super::*;
 use std::time::{Duration, Instant};
+#[cfg(test)]
+#[path = "../../../tests/common/native_catalog.rs"]
+mod catalog_fixture;
 mod drain;
 #[cfg(test)]
 mod fixture;

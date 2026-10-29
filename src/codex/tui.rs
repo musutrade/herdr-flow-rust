@@ -37,8 +37,9 @@ pub trait BridgePolicy {
     fn forward(&mut self, client: bool, data: &[u8]) -> Result<Vec<u8>>;
     fn observe(&mut self, marker: &J) -> Result<()>;
     fn arguments(&self) -> Vec<String>;
+    /// Server catalog bound; native client requests keep the broker byte bound.
     fn message_limit(&self) -> usize {
-        MAX_MESSAGE
+        NATIVE_SERVER_MESSAGE_LIMIT
     }
     fn take_responses(&mut self) -> Vec<u8> {
         Vec::new()
@@ -50,6 +51,10 @@ pub trait BridgePolicy {
 }
 
 pub use wire::WireObserver;
+
+// Matches the Codex remote client's bounded server catalog size. Ordinary
+// broker and native client requests keep MAX_MESSAGE (16 MiB).
+pub(crate) const NATIVE_SERVER_MESSAGE_LIMIT: usize = 128 << 20;
 
 pub const REVIEW_LIMIT: usize = 100;
 pub const PENDING_REQUEST_LIMIT: usize = 64;
@@ -2403,14 +2408,15 @@ impl ProxyBridge {
         upstream: UnixStream,
         observer: Rc<RefCell<SessionObserver>>,
     ) {
-        let limit = self
-            .policy
-            .as_ref()
-            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
+        let limit = self.direction_limit(1);
         self.endpoints[0] = Some(Endpoint {
             socket: downstream,
             buffer: Vec::new(),
-            wire: Some(WireObserver::with_limit(true, observer.clone(), limit)),
+            wire: Some(WireObserver::with_limit(
+                true,
+                observer.clone(),
+                MAX_MESSAGE,
+            )),
             eof: false,
         });
         self.endpoints[1] = Some(Endpoint {
@@ -2490,10 +2496,6 @@ impl ProxyBridge {
     }
 
     fn read_data(&mut self, index: usize, data: &[u8]) -> Result<()> {
-        let limit = self
-            .policy
-            .as_ref()
-            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
         let filtered;
         let mut responses = Vec::new();
         let data = if let Some(policy) = &mut self.policy {
@@ -2503,19 +2505,26 @@ impl ProxyBridge {
         } else {
             data
         };
+        let response_limit = self.direction_limit(1);
         if let Some(endpoint) = self.endpoints[0].as_mut() {
             endpoint.buffer.extend(responses);
-            check_forward_buffer(&endpoint.buffer, limit)?;
+            check_forward_buffer(&endpoint.buffer, response_limit)?;
         }
         self.buffer_incoming(index, data)?;
         self.feed_wire(index, data)
     }
 
-    fn buffer_incoming(&mut self, index: usize, data: &[u8]) -> Result<()> {
-        let limit = self
-            .policy
+    fn direction_limit(&self, index: usize) -> usize {
+        if index == 0 {
+            return MAX_MESSAGE;
+        }
+        self.policy
             .as_ref()
-            .map_or(MAX_MESSAGE, |policy| policy.message_limit());
+            .map_or(NATIVE_SERVER_MESSAGE_LIMIT, |policy| policy.message_limit())
+    }
+
+    fn buffer_incoming(&mut self, index: usize, data: &[u8]) -> Result<()> {
+        let limit = self.direction_limit(index);
         let Some((_, peer)) = self.pair_mut(index) else {
             return Ok(());
         };
