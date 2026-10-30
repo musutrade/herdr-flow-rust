@@ -12,7 +12,7 @@ herdr-flow light --data-root /absolute/private/light observe --once \
   --socket /absolute/herdr.sock
 ```
 
-`--service` must equal the binding's reported service label; the socket is supplied explicitly, never discovered by scanning. The returned workspace, pane, agent and full session reference must match the binding. A missing or changed session produces `unknown`; it never adopts another session or rewrites the binding. Service labels are operator-provided endpoint mappings, not authenticated server names. Unix peer credentials must match the current user.
+`--service` must equal the binding's reported service label; the socket is supplied explicitly, never discovered by scanning. The pane must be fully qualified (for example `wR:p1`) and its workspace prefix must equal the registered workspace; unqualified or inconsistent locations become unknown before any socket is opened. The returned workspace, pane, agent and full session reference must match the binding. A missing or changed session produces `unknown`; it never adopts another session or rewrites the binding. Service labels are operator-provided endpoint mappings, not authenticated server names. Unix peer credentials must match the current user.
 
 Use `--watch` for a foreground observer. `--samples N` bounds a controlled run; without it the command runs until stopped. There is no installation, daemon, profile or automatic restart. A per-binding advisory lock prevents competing observers in the same data root; lock contention exits 5 (`busy`). Different data-root copies do not share locks or notification budgets.
 

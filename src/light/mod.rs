@@ -1,4 +1,4 @@
-//! Optional, process-local records. No runtime, dispatch, or legacy state access.
+//! Optional records and bounded observation; no dispatch or legacy state access.
 pub mod cli;
 mod cli_args;
 mod cli_input;

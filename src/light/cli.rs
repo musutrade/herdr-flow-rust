@@ -1,9 +1,9 @@
-//! Record-only command entry point. Local queries never contact Herdr.
+//! Records and opt-in observation. Local record/cache queries never contact Herdr.
 use super::{cli_args, cli_output, cli_run};
 
 pub const USAGE: &str = r#"Usage: herdr-flow light [storage options] <command> [options]
 
-Records only; these commands do not control agents or legacy tasks.
+Records and optional observations; these commands do not control agents or legacy tasks.
   init
   project register --root DIR --label TEXT
   project list [--after-id ID] [--limit 1..100]

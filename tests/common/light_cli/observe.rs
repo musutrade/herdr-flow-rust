@@ -429,3 +429,56 @@ fn observer_busy_mapping_does_not_change_record_input_io_errors() {
     error(command.output().unwrap(), 6, "storage_unavailable");
     f.no_calls();
 }
+
+#[test]
+fn observer_unqualified_or_conflicting_locations_never_open_a_socket() {
+    let f = Fixture::new();
+    setup(&f, true);
+    let socket = f.temp.path().join("must-not-connect.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for (offset, (workspace, pane)) in [("wR", "p1"), ("other-workspace", "wR:p1")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut binding = attach(
+            &format!("invalid-location-{offset}"),
+            1,
+            2 + offset as i64,
+            "developer",
+        );
+        binding["change"]["binding"]["herdr_location"] =
+            json!({"service":"offline","workspace":workspace,"pane":pane});
+        binding["change"]["binding"]["session"] =
+            json!({"agent":"codex","source":"mock","kind":"id","value":"registered-session"});
+        let id = f.ok(&["binding", "attach", "--input", "-"], Some(&binding))["binding_id"]
+            .as_i64()
+            .unwrap()
+            .to_string();
+        for mode in ["--once", "--watch"] {
+            let mut arguments = args(path(&socket), mode);
+            let index = arguments.iter().position(|v| *v == "--binding").unwrap() + 1;
+            arguments[index] = &id;
+            if mode == "--watch" {
+                arguments.extend(["--samples", "1"]);
+            }
+            let out = f.run(&arguments, None);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            let first: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+            assert_eq!(
+                first["data"]["observation"]["reason"],
+                "registered_location_not_fully_qualified"
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+    f.no_calls();
+}

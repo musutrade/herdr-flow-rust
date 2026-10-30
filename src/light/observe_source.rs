@@ -20,6 +20,10 @@ impl Source {
     }
     pub fn read(&self, binding: Binding, now: u64, ttl: u64) -> Snapshot {
         let mut snapshot = Snapshot::unknown(binding, now, ttl, "source_unavailable");
+        if !qualified_location(&snapshot.binding) {
+            snapshot.reason = "registered_location_not_fully_qualified".into();
+            return snapshot;
+        }
         if self.fill(&mut snapshot).is_err() {
             snapshot.observed_state = "unknown".into();
             snapshot.reason = "source_unavailable_or_changed".into();
@@ -41,6 +45,9 @@ impl Source {
         Ok(())
     }
     pub fn subscribe(&self, binding: &Binding) -> io::Result<Wire> {
+        if !qualified_location(binding) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let mut wire = Wire::connect(&self.socket, self.timeout)?;
         wire.instance()?;
         let reply=response(wire.request("events.subscribe",json!({"subscriptions":[{"type":"pane.agent_status_changed","pane_id":binding.details.herdr_location.pane}]}))?)?;
@@ -58,4 +65,15 @@ fn response(value: Value) -> io::Result<Value> {
         .get("result")
         .cloned()
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
+fn qualified_location(binding: &Binding) -> bool {
+    let location = &binding.details.herdr_location;
+    let Some((workspace, pane)) = location.pane.split_once(':') else {
+        return false;
+    };
+    !workspace.is_empty()
+        && workspace == location.workspace
+        && !pane.is_empty()
+        && !pane.contains(':')
 }
