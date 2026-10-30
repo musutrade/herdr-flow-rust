@@ -52,6 +52,10 @@ pub fn cli(args: &[String]) -> i32 {
         Ok(inv) => inv,
         Err(error) => return cli_output::failure(error),
     };
+    dispatch(inv)
+}
+
+fn dispatch(inv: cli_args::Invocation) -> i32 {
     if inv.command == cli_args::Command::Tui {
         return match super::tui::run(inv) {
             Ok(()) => 0,

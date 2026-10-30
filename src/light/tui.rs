@@ -48,69 +48,99 @@ fn interaction(
     output: &mut impl Write,
 ) -> CliResult<()> {
     loop {
-        let frame=match browser.load(options) {
-            Ok(data)=>tui_view::render(browser,&data),
-            Err(error)=>format!("\nData error: {}\nNothing initialized or repaired. refresh retries reading; quit exits.\n",tui_view::safe(&error.to_string())),
-        };
+        let frame = frame(browser, options);
         write!(output, "{frame}light> ")
             .and_then(|_| output.flush())
             .map_err(Failure::Output)?;
-        let mut line = String::new();
-        let n = input.take(4097).read_line(&mut line)?;
-        if n == 0 {
+        let Some(line) = input_line(input)? else {
+            return Ok(());
+        };
+        if !respond(browser, line.trim(), output)? {
             return Ok(());
         }
-        if n > 4096 {
-            return Err(Failure::usage("input line exceeds 4096 bytes"));
-        }
-        match command(browser, line.trim()) {
-            Ok(false) => return writeln!(output, "Browser closed.").map_err(Failure::Output),
-            Ok(true) => {}
-            Err(message) => writeln!(output, "Input error: {message}").map_err(Failure::Output)?,
-        }
-        if line.trim() == "help" {
-            writeln!(output, "{}", tui_view::HELP).map_err(Failure::Output)?;
-        }
     }
+}
+fn frame(browser: &mut Browser, options: &Options) -> String {
+    match browser.load(options) {
+        Ok(data) => tui_view::render(browser, &data),
+        Err(error) => format!("\nData error: {}\nNothing initialized or repaired. refresh retries reading; quit exits.\n", tui_view::safe(&error.to_string())),
+    }
+}
+fn input_line(input: &mut impl BufRead) -> CliResult<Option<String>> {
+    let mut line = String::new();
+    let n = input.take(4097).read_line(&mut line)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n > 4096 {
+        return Err(Failure::usage("input line exceeds 4096 bytes"));
+    }
+    Ok(Some(line))
+}
+fn respond(browser: &mut Browser, line: &str, output: &mut impl Write) -> CliResult<bool> {
+    match command(browser, line) {
+        Ok(false) => {
+            writeln!(output, "Browser closed.").map_err(Failure::Output)?;
+            return Ok(false);
+        }
+        Ok(true) => {}
+        Err(message) => writeln!(output, "Input error: {message}").map_err(Failure::Output)?,
+    }
+    if line == "help" {
+        writeln!(output, "{}", tui_view::HELP).map_err(Failure::Output)?;
+    }
+    Ok(true)
 }
 fn command(b: &mut Browser, line: &str) -> Result<bool, &'static str> {
     let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
     let arg = arg.trim();
     if !arg.is_empty() {
-        argument(b, cmd, arg)?;
-        return Ok(true);
+        return argument(b, cmd, arg).map(|_| true);
     }
     match cmd {
-        "quit" | "q" => return Ok(false),
-        "projects" => b.reset(View::Projects),
-        "tasks" => b.reset(View::Tasks),
-        "events" => detail(b, View::Events)?,
-        "bindings" => detail(b, View::Bindings)?,
-        "next" | "n" => next(b)?,
-        "prev" | "p" => previous(b)?,
-        "refresh" | "r" | "help" | "" => {}
-        _ => return Err("unknown/incomplete command; type help"),
+        "quit" | "q" => Ok(false),
+        "projects" => {
+            b.reset(View::Projects);
+            Ok(true)
+        }
+        "tasks" => {
+            b.reset(View::Tasks);
+            Ok(true)
+        }
+        "refresh" | "r" | "help" | "" => Ok(true),
+        _ => navigation(b, cmd).map(|_| true),
     }
-    Ok(true)
+}
+fn navigation(b: &mut Browser, cmd: &str) -> Result<(), &'static str> {
+    match cmd {
+        "events" => detail(b, View::Events),
+        "bindings" => detail(b, View::Bindings),
+        "next" | "n" => next(b),
+        "prev" | "p" => previous(b),
+        _ => Err("unknown/incomplete command; type help"),
+    }
 }
 fn argument(b: &mut Browser, cmd: &str, arg: &str) -> Result<(), &'static str> {
     match cmd {
-        "project" => {
-            b.project = if arg == "all" { None } else { Some(id(arg)?) };
-            b.task = None;
-            b.reset(View::Tasks);
-        }
-        "batch" => {
-            if arg.len() > 256 {
-                return Err("batch must be at most 256 bytes");
-            }
-            b.batch = if arg == "-" { None } else { Some(arg.into()) };
-            b.task = None;
-            b.reset(View::Tasks);
-        }
-        "open" => open(b, id(arg)?)?,
-        _ => return Err("unexpected argument; type help"),
+        "project" => project(b, arg),
+        "batch" => batch(b, arg),
+        "open" => open(b, id(arg)?),
+        _ => Err("unexpected argument; type help"),
     }
+}
+fn project(b: &mut Browser, arg: &str) -> Result<(), &'static str> {
+    b.project = if arg == "all" { None } else { Some(id(arg)?) };
+    b.task = None;
+    b.reset(View::Tasks);
+    Ok(())
+}
+fn batch(b: &mut Browser, arg: &str) -> Result<(), &'static str> {
+    if arg.len() > 256 {
+        return Err("batch must be at most 256 bytes");
+    }
+    b.batch = if arg == "-" { None } else { Some(arg.into()) };
+    b.task = None;
+    b.reset(View::Tasks);
     Ok(())
 }
 fn id(arg: &str) -> Result<i64, &'static str> {

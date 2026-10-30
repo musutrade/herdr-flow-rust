@@ -54,18 +54,25 @@ impl Browser {
         }
     }
     fn details(&mut self, store: &Store, options: &Options) -> Result<Value> {
+        let task = self.selected_task(store)?;
+        let data = self.detail_data(store, options, task.id)?;
+        Ok(json!({"task":task,"detail":data}))
+    }
+    fn selected_task(&self, store: &Store) -> Result<super::Task> {
         let task = store.task(self.task.ok_or(Error::NotFound("selected task"))?)?;
         if self.project.is_some_and(|id| task.project_id != id) {
             return Err(Error::NotFound("task in selected project"));
         }
-        let data = match self.view {
-            View::Events => self.rows(json!(store.events(task.id, self.page)?))?,
-            View::Bindings => self.rows(json!(store.bindings(task.id, self.page)?))?,
-            View::Event(id) => event(store, task.id, id)?,
-            View::Binding(id) => binding(store, options, task.id, id)?,
-            _ => return Err(Error::Invalid("not a detail view".into())),
-        };
-        Ok(json!({"task":task,"detail":data}))
+        Ok(task)
+    }
+    fn detail_data(&mut self, store: &Store, options: &Options, task: i64) -> Result<Value> {
+        match self.view {
+            View::Events => self.rows(json!(store.events(task, self.page)?)),
+            View::Bindings => self.rows(json!(store.bindings(task, self.page)?)),
+            View::Event(id) => event(store, task, id),
+            View::Binding(id) => binding(store, options, task, id),
+            _ => Err(Error::Invalid("not a detail view".into())),
+        }
     }
     fn rows(&mut self, rows: Value) -> Result<Value> {
         self.ids = rows
