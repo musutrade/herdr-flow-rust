@@ -6,3 +6,6 @@ mod journey;
 mod observe;
 #[path = "common/light_cli/mod.rs"]
 mod support;
+
+#[path = "common/light_cli/tui.rs"]
+mod tui;

@@ -30,9 +30,19 @@ impl Store {
 
     /// All tasks in an explicitly selected project; optional batch label filter.
     pub fn tasks(&self, project_id: i64, batch: Option<&str>, page: Page) -> Result<Vec<Task>> {
+        self.filtered_tasks(Some(project_id), batch, page)
+    }
+
+    /// The same task records across projects, with optional explicit filters.
+    pub fn filtered_tasks(
+        &self,
+        project_id: Option<i64>,
+        batch: Option<&str>,
+        page: Page,
+    ) -> Result<Vec<Task>> {
         self.check()?;
         validate::page(page)?;
-        let mut q = self.conn.prepare("SELECT * FROM tasks WHERE project_id=?1 AND (?2 IS NULL OR batch_ref=?2) AND id>?3 ORDER BY id LIMIT ?4")?;
+        let mut q = self.conn.prepare("SELECT * FROM tasks WHERE (?1 IS NULL OR project_id=?1) AND (?2 IS NULL OR batch_ref=?2) AND id>?3 ORDER BY id LIMIT ?4")?;
         let rows = q.query_map(params![project_id, batch, page.after_id, page.limit], task)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

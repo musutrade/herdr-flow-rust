@@ -75,3 +75,5 @@ fn binding() -> BindingInput {
     }
 }
 mod observe;
+
+mod tui;

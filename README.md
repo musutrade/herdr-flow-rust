@@ -302,3 +302,5 @@ Confirmed-delivery legacy finish: [delivery contract](references/delivery.md).
 Fresh isolated final success/failure and unified cleanup: [task lifecycle](references/task-lifecycle.md).
 
 Optional read-only observation: [light observe](docs/light-observe.md).
+
+For local, read-only terminal browsing, see [the light TUI](docs/light-tui.md).
