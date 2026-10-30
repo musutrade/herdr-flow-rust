@@ -91,7 +91,7 @@ pub(super) fn run(inv: Invocation) -> CliResult<Value> {
     let source = source(&inv, &binding, settings.timeout)?;
     check_notification(&inv)?;
     let cache = Cache::open(&inv.options, false)?;
-    let _lease = cache.lease(binding.id)?;
+    let _lease = lease(&cache, binding.id)?;
     let run = Run {
         inv,
         settings,
@@ -103,6 +103,15 @@ pub(super) fn run(inv: Invocation) -> CliResult<Value> {
         gap: None,
     };
     run.execute()
+}
+fn lease(cache: &Cache, id: i64) -> CliResult<std::fs::File> {
+    match cache.lease(id) {
+        Ok(handle) => Ok(handle),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(Failure::ObserverBusy)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 fn source(inv: &Invocation, binding: &Binding, timeout: u64) -> CliResult<Source> {
     if inv.required("--service")? != binding.details.herdr_location.service {

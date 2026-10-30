@@ -307,6 +307,7 @@ fn observer_killed_watch_expires_without_claiming_an_exit_record() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     assert!(line.contains("watch_lease_unconfirmed"));
+    error(f.run(&args(path(&mock.socket), "--once"), None), 5, "busy");
     child.kill().unwrap();
     child.wait().unwrap();
     std::thread::sleep(Duration::from_millis(330));
@@ -406,4 +407,25 @@ fn observer_cli_notification_is_deduplicated_and_queryable_without_key() {
     let report = f.ok(&["task", "show", "--project", "1", "--task", "1"], None);
     assert_eq!(report["task"]["reported_state"], "open");
     assert_eq!(report["task"]["revision"], 2);
+}
+
+#[test]
+fn observer_busy_mapping_does_not_change_record_input_io_errors() {
+    use std::{
+        os::{fd::OwnedFd, unix::net::UnixStream},
+        process::Stdio,
+    };
+    let f = Fixture::new();
+    f.init_project();
+    let (reader, _writer) = UnixStream::pair().unwrap();
+    reader.set_nonblocking(true).unwrap();
+    let input: OwnedFd = reader.into();
+    let mut command = f.command(env!("CARGO_BIN_EXE_herdr-flow"));
+    command
+        .args(["light", "--data-root"])
+        .arg(&f.data)
+        .args(["task", "add", "--input", "-"])
+        .stdin(Stdio::from(input));
+    error(command.output().unwrap(), 6, "storage_unavailable");
+    f.no_calls();
 }

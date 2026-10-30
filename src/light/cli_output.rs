@@ -4,6 +4,7 @@ use std::io::Write;
 
 pub(super) type CliResult<T> = Result<T, Failure>;
 pub(super) enum Failure {
+    ObserverBusy,
     Usage(String),
     Output(std::io::Error),
     Store(Error),
@@ -48,6 +49,10 @@ fn detail(code: &str, message: impl ToString) -> Value {
 }
 fn describe(failure: Failure) -> (i32, Value) {
     match failure {
+        Failure::ObserverBusy => (
+            5,
+            detail("busy", "observation already active for this binding"),
+        ),
         Failure::Output(error) => (6, detail("output_unavailable", error)),
         Failure::Usage(message) => (2, detail("usage", message)),
         Failure::Store(error) => storage(error),
@@ -68,10 +73,6 @@ fn storage(error: Error) -> (i32, Value) {
             json!({"code":"unsupported_schema","message":message,"version":version}),
         ),
         Error::Sqlite(error) => sqlite(error),
-        Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => (
-            5,
-            detail("busy", "observation already active for this binding"),
-        ),
         _ => (6, detail("storage_unavailable", message)),
     }
 }
