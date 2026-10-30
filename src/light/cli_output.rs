@@ -4,6 +4,7 @@ use std::io::Write;
 
 pub(super) type CliResult<T> = Result<T, Failure>;
 pub(super) enum Failure {
+    ObserverBusy,
     Usage(String),
     Output(std::io::Error),
     Store(Error),
@@ -24,12 +25,15 @@ impl From<std::io::Error> for Failure {
     }
 }
 
-pub(super) fn success(data: Value) -> i32 {
+pub(super) fn write_success(data: Value) -> std::io::Result<()> {
     let line = json!({"ok":true,"data":data}).to_string();
-    if let Err(error) = writeln!(std::io::stdout().lock(), "{line}") {
-        return failure(Failure::Output(error));
+    writeln!(std::io::stdout().lock(), "{line}")
+}
+pub(super) fn success(data: Value) -> i32 {
+    match write_success(data) {
+        Ok(()) => 0,
+        Err(error) => failure(Failure::Output(error)),
     }
-    0
 }
 pub(super) fn failure(failure: Failure) -> i32 {
     let (code, detail) = describe(failure);
@@ -45,6 +49,10 @@ fn detail(code: &str, message: impl ToString) -> Value {
 }
 fn describe(failure: Failure) -> (i32, Value) {
     match failure {
+        Failure::ObserverBusy => (
+            5,
+            detail("busy", "observation already active for this binding"),
+        ),
         Failure::Output(error) => (6, detail("output_unavailable", error)),
         Failure::Usage(message) => (2, detail("usage", message)),
         Failure::Store(error) => storage(error),

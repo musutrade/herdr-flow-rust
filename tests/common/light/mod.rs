@@ -74,3 +74,4 @@ fn binding() -> BindingInput {
         cwd: "/project/worktree".into(),
     }
 }
+mod observe;

@@ -1,9 +1,9 @@
-//! Record-only command entry point. Local queries never contact Herdr.
+//! Records and opt-in observation. Local record/cache queries never contact Herdr.
 use super::{cli_args, cli_output, cli_run};
 
 pub const USAGE: &str = r#"Usage: herdr-flow light [storage options] <command> [options]
 
-Records only; these commands do not control agents or legacy tasks.
+Records and optional observations; these commands do not control agents or legacy tasks.
   init
   project register --root DIR --label TEXT
   project list [--after-id ID] [--limit 1..100]
@@ -14,6 +14,13 @@ Records only; these commands do not control agents or legacy tasks.
   binding attach --input FILE|-
   binding show --project ID --task ID [--after-id BINDING_ID] [--limit 1..100]
   backup --output-root DIR
+  observe --once|--watch|--show --project ID --task ID --binding ID
+    --socket ABSOLUTE_PATH --service REGISTERED_SERVICE (not required for --show)
+    [--interval-ms 100..60000] [--timeout-ms 50..5000] [--stale-ms 100..3600000]
+    [--samples N] (watch only; omit for foreground until stopped)
+    [--bark-key-file PRIVATE_FILE] [--bark-endpoint https://HOST/push]
+Observation uses the current public Herdr JSON API; versions are diagnostic only.
+--show reads cached observations/notification attempts offline. No task reports are changed.
 
 Storage options (may appear anywhere):
   --data-root DIR       default: ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-light
@@ -32,7 +39,7 @@ Exit codes: 0 success/help, 2 input/usage, 3 missing task/project scope,
 Pages expose items and next_after_id; a full final page may require an empty next page.
 Unknown project list filters and missing-task binding pages return []; task show
 requires an existing task. Existing tasks must match the requested project. Re-registering a project returns its original id and label.
-No Herdr connection is required. See docs/light-cli.md for input examples.
+Record commands require no Herdr connection. See docs/light-cli.md for input examples.
 "#;
 
 pub fn cli(args: &[String]) -> i32 {

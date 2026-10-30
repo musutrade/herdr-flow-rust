@@ -407,9 +407,10 @@ fn default_state_path_and_separate_help_are_available_offline() {
     assert_eq!(success(output(c, None))["database_path"], path(&root));
     let out = f.run(&["--help"], None);
     assert!(out.status.success());
-    assert!(String::from_utf8(out.stdout)
-        .unwrap()
-        .contains("Records only"));
+    let light_help = String::from_utf8(out.stdout).unwrap();
+    assert!(light_help.contains("Records and optional observations"));
+    assert!(light_help.contains("Record commands require no Herdr connection"));
+    assert!(light_help.contains("versions are diagnostic only"));
     let mut c = f.command(env!("CARGO_BIN_EXE_herdr-flow"));
     c.arg("--help");
     let help = c.output().unwrap();

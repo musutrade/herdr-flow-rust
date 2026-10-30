@@ -200,7 +200,10 @@ fn every_route_ignores_legacy_sentinels_and_never_spawns_or_connects() {
 
 // Check the entire transitive repository closure, not only imports in cli.rs:
 // light's modules may use sibling modules and these external leaf crates only.
-struct Boundary;
+struct Boundary {
+    wire: bool,
+    notify: bool,
+}
 impl<'ast> Visit<'ast> for Boundary {
     fn visit_path(&mut self, p: &'ast syn::Path) {
         let parts: Vec<_> = p.segments.iter().map(|s| s.ident.to_string()).collect();
@@ -213,7 +216,9 @@ impl<'ast> Visit<'ast> for Boundary {
             "parent escape: {parts:?}"
         );
         assert!(
-            !parts.iter().any(|s| s == "process" || s == "net"),
+            !parts
+                .iter()
+                .any(|s| (s == "process" && !self.notify) || (s == "net" && !self.wire)),
             "non-leaf API: {parts:?}"
         );
         if parts.first().is_some_and(|s| s == "libc") {
@@ -221,6 +226,7 @@ impl<'ast> Visit<'ast> for Boundary {
                 parts.len() == 2
                     && [
                         "geteuid",
+                        "getpid",
                         "openat",
                         "mkdirat",
                         "fstatfs",
@@ -232,9 +238,13 @@ impl<'ast> Visit<'ast> for Boundary {
                         "O_CLOEXEC",
                         "O_RDONLY",
                         "O_DIRECTORY",
-                        "O_NONBLOCK"
+                        "O_NONBLOCK",
+                        "flock",
+                        "LOCK_EX",
+                        "LOCK_NB"
                     ]
-                    .contains(&parts[1].as_str()),
+                    .contains(&parts[1].as_str())
+                    || (self.wire && wire_ffi(&parts)),
                 "unreviewed FFI: {parts:?}"
             );
         }
@@ -261,7 +271,7 @@ impl<'ast> Visit<'ast> for Boundary {
                 "import escape: {name}"
             );
         }
-        check_use(&item.tree);
+        check_use(&item.tree, self.wire, self.notify);
         syn::visit::visit_item_use(self, item);
     }
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
@@ -273,30 +283,24 @@ impl<'ast> Visit<'ast> for Boundary {
         syn::visit::visit_item_mod(self, item);
     }
 }
-fn check_use(tree: &syn::UseTree) {
+fn check_use(tree: &syn::UseTree, wire: bool, notify: bool) {
     match tree {
         syn::UseTree::Path(p) => {
-            assert!(
-                !["crate", "herdr_flow", "process", "net"].contains(&p.ident.to_string().as_str())
-            );
+            assert!(allowed_use(&p.ident.to_string(), wire, notify));
             if p.ident == "super" {
                 assert!(
                     !matches!(p.tree.as_ref(), syn::UseTree::Path(next) if next.ident == "super")
                 );
             }
-            check_use(&p.tree);
+            check_use(&p.tree, wire, notify);
         }
         syn::UseTree::Group(g) => {
             for child in &g.items {
-                check_use(child);
+                check_use(child, wire, notify);
             }
         }
-        syn::UseTree::Name(n) => assert!(
-            !["crate", "herdr_flow", "process", "net"].contains(&n.ident.to_string().as_str())
-        ),
-        syn::UseTree::Rename(n) => assert!(
-            !["crate", "herdr_flow", "process", "net"].contains(&n.ident.to_string().as_str())
-        ),
+        syn::UseTree::Name(n) => assert!(allowed_use(&n.ident.to_string(), wire, notify)),
+        syn::UseTree::Rename(n) => assert!(allowed_use(&n.ident.to_string(), wire, notify)),
         _ => {}
     }
 }
@@ -307,9 +311,45 @@ fn all_light_modules_have_a_closed_repository_dependency_boundary() {
     for file in fs::read_dir(root).unwrap() {
         let path = file.unwrap().path();
         assert_eq!(path.extension().unwrap(), "rs", "review new module layout");
-        let ast = syn::parse_file(&fs::read_to_string(path).unwrap()).unwrap();
-        Boundary.visit_file(&ast);
+        let ast = syn::parse_file(&fs::read_to_string(&path).unwrap()).unwrap();
+        Boundary {
+            wire: path.ends_with("observe_wire.rs"),
+            notify: path.ends_with("observe_notify.rs"),
+        }
+        .visit_file(&ast);
         count += 1;
     }
-    assert_eq!(count, 14, "new modules need an explicit boundary review");
+    assert_eq!(count, 20, "new modules need an explicit boundary review");
+}
+
+fn allowed_use(name: &str, wire: bool, notify: bool) -> bool {
+    !["crate", "herdr_flow"].contains(&name)
+        && (name != "net" || wire)
+        && (name != "process" || notify)
+}
+fn wire_ffi(parts: &[String]) -> bool {
+    parts.len() == 2
+        && [
+            "ucred",
+            "socklen_t",
+            "getsockopt",
+            "SOL_SOCKET",
+            "SO_PEERCRED",
+            "sockaddr_un",
+            "AF_UNIX",
+            "sa_family_t",
+            "c_char",
+            "socket",
+            "SOCK_STREAM",
+            "SOCK_CLOEXEC",
+            "SOCK_NONBLOCK",
+            "connect",
+            "EINPROGRESS",
+            "pollfd",
+            "POLLOUT",
+            "poll",
+            "c_int",
+            "SO_ERROR",
+        ]
+        .contains(&parts[1].as_str())
 }
