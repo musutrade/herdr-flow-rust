@@ -19,7 +19,7 @@ jobs:
       - name: Install isolated Codex fixture dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap strace
           profile_dir="$(mktemp -d "$RUNNER_TEMP/herdr-apparmor.XXXXXX")"
           (
             cd "$profile_dir"
