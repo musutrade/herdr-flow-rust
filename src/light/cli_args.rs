@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Command {
     Init,
+    Tui,
     Observe,
     Register,
     Projects,
@@ -122,6 +123,7 @@ fn command(words: &[String]) -> CliResult<Command> {
     let words: Vec<_> = words.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["init"] => Ok(Command::Init),
+        ["tui"] => Ok(Command::Tui),
         ["observe"] => Ok(Command::Observe),
         ["backup"] => Ok(Command::Backup),
         [group, action] => grouped(group, action),
@@ -148,6 +150,7 @@ fn grouped(group: &str, action: &str) -> CliResult<Command> {
 fn allowed(command: Command) -> &'static [&'static str] {
     match command {
         Command::Init => &[],
+        Command::Tui => &["--project", "--batch", "--limit"],
         Command::Observe => &[
             "--once",
             "--watch",

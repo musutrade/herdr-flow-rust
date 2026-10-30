@@ -16,6 +16,9 @@ mod paths;
 mod query;
 mod schema;
 mod store;
+mod tui;
+mod tui_data;
+mod tui_view;
 mod validate;
 mod write;
 

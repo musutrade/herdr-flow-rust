@@ -5,6 +5,7 @@ pub const USAGE: &str = r#"Usage: herdr-flow light [storage options] <command> [
 
 Records and optional observations; these commands do not control agents or legacy tasks.
   init
+  tui [--project ID] [--batch TEXT] [--limit 1..100] (interactive terminals only)
   project register --root DIR --label TEXT
   project list [--after-id ID] [--limit 1..100]
   task add --input FILE|-
@@ -47,7 +48,21 @@ pub fn cli(args: &[String]) -> i32 {
         print!("{USAGE}");
         return 0;
     }
-    match cli_args::parse(args).and_then(cli_run::execute) {
+    let inv = match cli_args::parse(args) {
+        Ok(inv) => inv,
+        Err(error) => return cli_output::failure(error),
+    };
+    dispatch(inv)
+}
+
+fn dispatch(inv: cli_args::Invocation) -> i32 {
+    if inv.command == cli_args::Command::Tui {
+        return match super::tui::run(inv) {
+            Ok(()) => 0,
+            Err(error) => cli_output::failure(error),
+        };
+    }
+    match cli_run::execute(inv) {
         Ok(value) => cli_output::success(value),
         Err(error) => cli_output::failure(error),
     }

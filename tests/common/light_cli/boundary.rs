@@ -319,7 +319,7 @@ fn all_light_modules_have_a_closed_repository_dependency_boundary() {
         .visit_file(&ast);
         count += 1;
     }
-    assert_eq!(count, 20, "new modules need an explicit boundary review");
+    assert_eq!(count, 23, "new modules need an explicit boundary review");
 }
 
 fn allowed_use(name: &str, wire: bool, notify: bool) -> bool {
@@ -352,4 +352,52 @@ fn wire_ffi(parts: &[String]) -> bool {
             "SO_ERROR",
         ]
         .contains(&parts[1].as_str())
+}
+
+// The browser may read cache/state types but cannot enter the observation or
+// notification runners. Guard this narrower closure in addition to syscall tests.
+struct BrowserBoundary;
+impl<'ast> Visit<'ast> for BrowserBoundary {
+    fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+        assert!(
+            ![
+                "observe",
+                "observe_notify",
+                "observe_source",
+                "observe_wire",
+                "cli_run",
+                "apply",
+                "register_project",
+                "backup",
+                "put",
+                "reserve",
+                "finish",
+                "lease",
+                "check_observer"
+            ]
+            .contains(&ident.to_string().as_str()),
+            "browser control/mutation/live probe"
+        );
+    }
+}
+
+#[test]
+fn browser_cannot_enter_observer_or_mutation_routes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/light");
+    for name in ["tui.rs", "tui_data.rs", "tui_view.rs"] {
+        let ast = syn::parse_file(&fs::read_to_string(root.join(name)).unwrap()).unwrap();
+        BrowserBoundary.visit_file(&ast);
+    }
+}
+
+#[test]
+fn browser_guard_rejects_aliases_and_mutating_method_calls() {
+    for text in [
+        "use super::observe::run as reader;",
+        "fn f() { store.apply(request); }",
+        "fn f() { snapshot.check_observer(); }",
+    ] {
+        let ast = syn::parse_file(text).unwrap();
+        assert!(std::panic::catch_unwind(|| BrowserBoundary.visit_file(&ast)).is_err());
+    }
 }
