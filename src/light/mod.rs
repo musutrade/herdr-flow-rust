@@ -1,4 +1,9 @@
 //! Optional, process-local records. No runtime, dispatch, or legacy state access.
+pub mod cli;
+mod cli_args;
+mod cli_input;
+mod cli_output;
+mod cli_run;
 mod error;
 mod model;
 mod paths;

@@ -1,10 +1,10 @@
 # light P1a 记录存储 API
 
-对应 [#171](https://github.com/musutrade/herdr-flow-rust/issues/171) 与 [P0 边界](light-p0-baseline.md)。实现基线为 `e808f19880b5171745a3995f74becbb5c06ab3f9`。这是进程内 Rust API；没有新增 CLI、观察器、消息发送、旧格式读取或业务控制动作。P1b 再接 CLI。
+对应 [#171](https://github.com/musutrade/herdr-flow-rust/issues/171) 与 [P0 边界](light-p0-baseline.md)。实现基线为 `e808f19880b5171745a3995f74becbb5c06ab3f9`。本文描述进程内 Rust 存储 API；P1b 的独立命令见 [记录 CLI](light-cli.md)。存储 API 不执行观察、消息发送、旧格式读取或业务控制动作。
 
 ## 调用与一致性
 
-入口为 `herdr_flow::light::{Store, Options, Request, Change}`。调用者显式传入数据根和禁止目录；本模块不读环境配置、不发现旧任务。`Options::new(root)` 默认可写、busy_timeout 为 250ms，最大允许 5s；`read_only=true` 仅打开已存在的库。每个进程/调用按需打开连接并及时 drop，不要求常驻服务。
+入口为 `herdr_flow::light::{Store, Options, Request, Change}`。调用者显式传入数据根和禁止目录；存储 API 不读环境配置、不发现旧任务（CLI 只解析其文档所列的数据根环境变量）。`Options::new(root)` 默认可写、busy_timeout 为 250ms，最大允许 5s；`read_only=true` 仅打开已存在的库。每个进程/调用按需打开连接并及时 drop，不要求常驻服务。
 
 1. `register_project(existing_root, label)` 用 Linux canonicalize 登记现存目录，别名返回原 id/label；不自动把不同 worktree 合并。`projects(Page)` 分页读取。
 2. `apply(Request { request_id, reporter, summary, refs, change })` 提交报告。`CreateTask` 指定 project_id，每个独立批次调用一次（不同 request_id），产生独立 task.id；source_ref 和可空 batch_ref 不唯一。

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 fn usage() {
     println!(
-        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nCommands:\n  queue    durable waits, tasks, deliveries and metrics\n  ci       read-only GitHub Actions / Check observer\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  task-env preparatory owned environment create/status/recover\n  task-runtime task-owned native sessions and collection\n  delivery confirmed customer delivery and final destruction\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
+        "herdr-flow {}\n\nUsage: herdr-flow <command> [options]\n\nRecord commands:\n  light    local reports, queries and backups (no agent control)\n\nLegacy control commands:\n  queue    durable waits, tasks, deliveries and metrics\n  guard    Codex context guard and session rotation\n  tui      native Codex TUI observation bridge\n  advisor  optional handoff text advice\n  task-env preparatory owned environment create/status/recover\n  task-runtime task-owned native sessions and collection\n  delivery confirmed customer delivery and final destruction\n\nIndependent tools:\n  ci       read-only GitHub Actions / Check observer\n  lint-policy  reject Clippy suppressions\n  crap     Rust complexity/CRAP gate",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -34,6 +34,7 @@ fn dispatch(command: &str, rest: &[String]) -> i32 {
 
 fn fallback(command: &str, rest: &[String]) -> i32 {
     match command {
+        "light" => herdr_flow::light::cli::cli(rest),
         "delivery" | "task-runtime-broker" | "task-runtime" | "task-env" => {
             environment_command(command, rest)
         }
