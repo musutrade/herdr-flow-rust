@@ -47,8 +47,45 @@ fn traced(
             old.display()
         );
     }
+    assert!(
+        !relative_legacy_access(&calls),
+        "relative legacy access: {calls}"
+    );
     f.no_calls();
     result
+}
+// strace prints relative paths separately from AT_FDCWD/dirfd annotations.
+// Inspect quoted path components as well as the absolute sentinel paths.
+fn relative_legacy_access(calls: &str) -> bool {
+    let quoted = regex::Regex::new(r#""[^"\n]*""#).unwrap();
+    let found = quoted.find_iter(calls).any(|m| {
+        m.as_str().trim_matches('"').split('/').any(|component| {
+            [
+                ".herdr",
+                "herdr-issue-flow",
+                "queue.json",
+                "authority.json",
+                "guard",
+                "receiver.json",
+                "lifecycle.json",
+                ".herdr-issue-flow.toml",
+            ]
+            .contains(&component)
+        })
+    });
+    found
+}
+#[test]
+fn trace_guard_catches_relative_file_and_directory_access() {
+    assert!(relative_legacy_access(
+        r#"openat(AT_FDCWD</tmp/project>, "queue.json", O_RDONLY) = 3"#
+    ));
+    assert!(relative_legacy_access(
+        r#"openat(4</tmp/home>, ".herdr/flow/registry.json", O_RDONLY) = 5"#
+    ));
+    assert!(!relative_legacy_access(
+        r#"openat(4</tmp/data>, "records.sqlite3", O_RDONLY) = 5"#
+    ));
 }
 fn legacy_paths(f: &Fixture) -> Vec<std::path::PathBuf> {
     [
