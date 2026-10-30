@@ -2,6 +2,14 @@ use super::*;
 use rusqlite::{params, OptionalExtension, Row};
 
 impl Store {
+    pub fn binding(&self, id: i64) -> Result<Binding> {
+        self.check()?;
+        self.conn
+            .query_row("SELECT * FROM bindings WHERE id=?1", [id], binding)
+            .optional()?
+            .ok_or(Error::NotFound("binding"))
+    }
+
     pub fn projects(&self, page: Page) -> Result<Vec<Project>> {
         self.check()?;
         validate::page(page)?;

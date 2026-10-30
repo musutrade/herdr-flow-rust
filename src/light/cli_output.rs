@@ -24,12 +24,15 @@ impl From<std::io::Error> for Failure {
     }
 }
 
-pub(super) fn success(data: Value) -> i32 {
+pub(super) fn write_success(data: Value) -> std::io::Result<()> {
     let line = json!({"ok":true,"data":data}).to_string();
-    if let Err(error) = writeln!(std::io::stdout().lock(), "{line}") {
-        return failure(Failure::Output(error));
+    writeln!(std::io::stdout().lock(), "{line}")
+}
+pub(super) fn success(data: Value) -> i32 {
+    match write_success(data) {
+        Ok(()) => 0,
+        Err(error) => failure(Failure::Output(error)),
     }
-    0
 }
 pub(super) fn failure(failure: Failure) -> i32 {
     let (code, detail) = describe(failure);
@@ -65,6 +68,10 @@ fn storage(error: Error) -> (i32, Value) {
             json!({"code":"unsupported_schema","message":message,"version":version}),
         ),
         Error::Sqlite(error) => sqlite(error),
+        Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => (
+            5,
+            detail("busy", "observation already active for this binding"),
+        ),
         _ => (6, detail("storage_unavailable", message)),
     }
 }

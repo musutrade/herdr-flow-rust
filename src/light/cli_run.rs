@@ -10,6 +10,7 @@ use std::path::Path;
 pub(super) fn execute(inv: Invocation) -> CliResult<Value> {
     match inv.command {
         Command::Init => init(inv),
+        Command::Observe => super::observe::run(inv),
         Command::Register => register(inv),
         Command::Projects => projects(inv),
         Command::Backup => backup(inv),
