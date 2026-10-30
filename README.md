@@ -1,5 +1,7 @@
 # herdr-issue-flow（纯 Rust）
 
+轻量记录层：见 [light CLI](docs/light-cli.md) 与 [现有团队的可选记录调用](references/light-record-hook.md)。下方保留旧受管路线的历史说明；可选记录不接管该路线。
+
 > **当前进度（2026-10-29）：** #163–#165 已合并，main `147ab3b` 的三项 CI 通过。人工写权 acquire → 脚本操作者修改并 return → 真实 Recovery／宿主复核 → 原协调者接续 → 新独立验收 → 本地 Git 交付及回收，已完成一次限定范围的真实验收。阶段执行资源提前回收已有 #162 的独立记录；审核克隆仍保留到父任务终态。见[当前范围与证据对账](references/end-to-end-readiness.md#current-execution-order-2026-10-29)和[人工交回实测范围](references/human-writer-live-acceptance.md#completed-scenario-2026-10-29)。协调会话安全换班和父需求历史跨容量接续仍未支持；发布积压背压与独立开发并行仍需补齐针对性的证据对账。四个主 Issue 保持 open，#146 继续后置。
 
 > **同一父需求两次远端交付（2026-10-28）：** 在 main `6e01da0` 上完成阶段 [#159](https://github.com/musutrade/herdr-flow-rust/pull/159) → 原结果 ACK／应用 → 新开发与独立总体验收 → 最终 [#160](https://github.com/musutrade/herdr-flow-rust/pull/160) → 回收。两条 PR 各自三项 CI 通过；七个真实角色可见，九个已知原生会话的六库十八类关联与任务资源均完成核查。首次启动前锁争用和同一任务接续如实保留；不记为首次驱动无中断通过。[完整范围、实际 SHA 与失败记录](references/remote-stage-live-acceptance.md)。后续阶段回收与人工交回的独立证据见上方当前进度。
