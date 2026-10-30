@@ -14,6 +14,7 @@ pub mod guard;
 pub mod herdr;
 pub mod identity;
 pub mod lifecycle;
+pub mod light;
 pub mod lint_policy;
 pub mod logging;
 pub mod metrics;
