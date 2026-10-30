@@ -107,6 +107,42 @@ fn unknown_blocks_after_restart_even_if_new_failure_or_success_arrives() {
     }
     assert_eq!(s.calls, 1);
 }
+
+#[test]
+fn unrelated_success_does_not_reset_or_close_the_chain() {
+    let t = TempDir::new().unwrap();
+    let options = Options::new(t.path().join("ledger"));
+    let mut c = Controller::open(&options, auth(&t)).unwrap();
+    let mut s = Sender {
+        calls: 0,
+        outcome: Outcome::Accepted {
+            turn_id: "expected-child".into(),
+        },
+    };
+    c.step(&failed("root", 1, 100), 130, &mut s).unwrap();
+    let mut unrelated = failed("user-work", 3, 200);
+    unrelated.status = "completed".into();
+    assert_eq!(
+        c.step(&unrelated, 250, &mut s).unwrap(),
+        Decision::Ineligible
+    );
+    drop(c);
+    let mut c = Controller::open(&options, auth(&t)).unwrap();
+    assert_eq!(
+        c.step(&failed("expected-child", 2, 200), 260, &mut s)
+            .unwrap(),
+        Decision::Ineligible
+    );
+    assert_eq!(s.calls, 1);
+    drop(c);
+    let db = rusqlite::Connection::open(options.data_root.join("recovery.sqlite3")).unwrap();
+    let state: String = db
+        .query_row("SELECT state FROM recovery", [], |r| r.get(0))
+        .unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(state["root"], "root");
+}
 #[test]
 fn quota_auth_policy_retry_approval_old_missing_and_unfinished_never_send() {
     let t = TempDir::new().unwrap();

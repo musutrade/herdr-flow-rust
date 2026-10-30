@@ -145,7 +145,16 @@ impl State {
         if t.ordinal < self.high_water {
             return Decision::Ineligible;
         }
-        if t.status == "completed" && t.items_terminal && t.completed_at.is_some_and(|s| s <= now) {
+        // Even an unrelated/active turn fences older history projections. It
+        // must not clear the chain or allow an older failed child to reappear.
+        self.high_water = t.ordinal;
+        if !self.matches_successor(t) {
+            return Decision::Ineligible;
+        }
+        if t.status == "completed"
+            && t.items_terminal
+            && t.completed_at.is_some_and(|s| s >= activated && s <= now)
+        {
             self.high_water = t.ordinal.saturating_add(1);
             self.root = None;
             self.attempts.clear();
@@ -154,13 +163,14 @@ impl State {
         if !eligible(t, now, activated) {
             return Decision::Ineligible;
         }
-        if let Some(last) = self.attempts.last() {
-            match &last.outcome {
-                Outcome::Accepted { turn_id } if turn_id == &t.turn_id => (),
-                _ => return Decision::Ineligible,
-            }
-        }
         self.reserve(t, now)
+    }
+    fn matches_successor(&self, t: &Turn) -> bool {
+        match self.attempts.last().map(|a| &a.outcome) {
+            None => true,
+            Some(Outcome::Accepted { turn_id }) => turn_id == &t.turn_id,
+            _ => false,
+        }
     }
     fn reserve(&mut self, t: &Turn, now: i64) -> Decision {
         if self.attempts.len() >= 3 {
