@@ -19,9 +19,11 @@ cli(['init'])
 for i in [1,2]:cli(['project','register','--root',str(ROOT/f'project{i}'),'--label',f'Project-{i}'])
 add('task-one',1,'alpha','First task');add('task-two',1,'beta','Second task');add('task-three',2,'alpha','Third task')
 # Data containing terminal escapes is never interpreted by the browser.
-add('task-four',2,'beta','unsafe\x1b]52;c;evil\x07\u202e'+'x'*170)
+add('task-four',2,'beta','unsafe\x1b]52;c;evil\x07\u009b2J\u202e'+'x'*170)
 refs=[{'target':'https://example.invalid/result','commit':'abc123','result':'old-failure','recorded_at':'2026-10-30','sha256':'a'*64,'temporary':False},{'target':str(legacy/'queue.json'),'temporary':True}]
-cli(['task','report','--input','-'],req('report-one',{'kind':'report','task_id':1,'expected_revision':1,'reported_state':'reported-review'},refs))
+report=req('report-one',{'kind':'report','task_id':1,'expected_revision':1,'reported_state':'reported-review'},refs)
+report['summary']+=' C1=\u009b2J'
+cli(['task','report','--input','-'],report)
 session={'agent':'codex','kind':'id','source':'fixture','value':'recorded-session'}
 for i,role in enumerate(['developer','auditor']):
  cli(['binding','attach','--input','-'],req('bind-'+role,{'kind':'attach_binding','task_id':1,'expected_revision':2+i,'binding':{'role':role,'herdr_location':{'service':'offline','workspace':'fixture','pane':'fixture:p1'},'session':session if i==0 else None,'cwd':str(ROOT/'project1')}}))
@@ -50,7 +52,7 @@ class Terminal:
     data=os.read(self.master,65536);assert data;self.buf+=data;self.all+=data
    assert self.p.poll() is None or b'light> ' in self.buf,self.all
   result,self.buf=self.buf.split(b'light> ',1)
-  assert b'\x1b' not in result,('terminal control injection',result)
+  assert not any((ord(c)<32 and c not in '\r\n\t') or 127<=ord(c)<=159 for c in result.decode('utf-8')),('terminal control injection',result)
   return result.decode('utf-8')
  def cmd(self,text):os.write(self.master,text.encode()+b'\n');return self.screen()
  def close(self,mode='quit'):

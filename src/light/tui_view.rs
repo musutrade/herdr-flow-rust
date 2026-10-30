@@ -88,12 +88,14 @@ pub(super) fn safe(text: &str) -> String {
         .collect()
 }
 fn pretty(data: &Value) -> String {
-    // JSON encodes ESC/control characters in all stored text; additionally escape bidi controls.
+    // JSON escapes ASCII controls in stored text; also escape C1/bidi controls.
     let text = serde_json::to_string_pretty(data).unwrap_or_default();
     let safe: String = text
         .chars()
         .map(|c| {
-            if matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}') {
+            if (c.is_control() && c != '\n')
+                || matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+            {
                 c.escape_unicode().to_string()
             } else {
                 c.to_string()
