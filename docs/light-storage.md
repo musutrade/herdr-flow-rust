@@ -33,7 +33,7 @@ WAL 使用 `synchronous=FULL`，启用 foreign_keys、关闭 trusted_schema，�
 
 ## 备份、恢复和版本
 
-`Store::backup(new_root, additional_forbidden)` 使用 SQLite 在线备份 API；源数据根也自动加入备份禁止范围。分段复制有 5s 总时限；失败不发布 `records.sqlite3`。在私有临时文件上完成 integrity_check、foreign_key_check 和 schema 检查，关闭目标连接、sync 后以不覆盖方式发布最终文件名，再 sync 目录。已有目标库不会被覆盖；失败可能留下新建的空目标目录，调用者按归属处理。
+`Store::backup(new_root, additional_forbidden)` 使用 SQLite 在线备份 API；源数据根也自动加入备份禁止范围。分段复制有 5s 总时限；复制或校验失败不发布 `records.sqlite3`。在私有临时文件上完成 integrity_check、foreign_key_check 和 schema 检查，关闭目标连接、sync 后以不覆盖方式发布最终文件名，再 sync 目录。已有目标库不会被覆盖；失败可能留下新建的空目标目录，调用者按归属处理。如果最终文件名已发布而目录 sync 或后续权限复核失败，API 会报错，但目标可能已存在；应先核验该结果，不盲目覆盖或重复业务操作。
 
 恢复方式是把已验证备份根传给 `Store::open`，重新启用 WAL 后即可查询/补报；若需保留备份不动，先将它以只读 Store 打开，再调用 backup 到另一个新根并打开该根。测试对比恢复后的摘要、refs、事件、revision、schema 及原请求重试结果。
 
