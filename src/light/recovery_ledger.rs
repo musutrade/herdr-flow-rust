@@ -20,8 +20,8 @@ impl Ledger {
         // record store, a Codex internal database, or the observation cache.
         let dir = Directory::open(&options.data_root, &options.forbidden_directories, true)?;
         let lock = lock(&dir)?;
-        let conn = connect(&dir, options)?;
-        identity(&conn, authorization)?;
+        let (conn, created) = connect(&dir, options)?;
+        identity(&conn, authorization, created)?;
         check(&dir)?;
         dir.sync()?;
         Ok(Self {
@@ -79,7 +79,7 @@ fn lock(dir: &Directory) -> Result<File> {
     }
     Ok(file)
 }
-fn connect(dir: &Directory, options: &Options) -> Result<Connection> {
+fn connect(dir: &Directory, options: &Options) -> Result<(Connection, bool)> {
     let exists = dir.path.join("recovery.sqlite3").try_exists()?;
     let path = dir.file("recovery.sqlite3", true)?;
     check(dir)?;
@@ -89,7 +89,7 @@ fn connect(dir: &Directory, options: &Options) -> Result<Connection> {
     )?;
     conn.busy_timeout(options.busy_timeout)?;
     initialize(&conn, exists)?;
-    Ok(conn)
+    Ok((conn, !exists))
 }
 fn initialize(conn: &Connection, existed: bool) -> Result<()> {
     conn.execute_batch(
@@ -107,12 +107,14 @@ fn initialize(conn: &Connection, existed: bool) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS recovery(id INTEGER PRIMARY KEY CHECK(id=1),authorization TEXT NOT NULL,state TEXT NOT NULL); PRAGMA user_version=1; COMMIT;")?;
     Ok(())
 }
-fn identity(conn: &Connection, authorization: &Authorization) -> Result<()> {
+fn identity(conn: &Connection, authorization: &Authorization, created: bool) -> Result<()> {
     let identity = serde_json::to_string(authorization)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO recovery VALUES(1,?1,?2)",
-        rusqlite::params![identity, serde_json::to_string(&State::default())?],
-    )?;
+    if created {
+        conn.execute(
+            "INSERT INTO recovery VALUES(1,?1,?2)",
+            rusqlite::params![identity, serde_json::to_string(&State::default())?],
+        )?;
+    }
     let stored: String =
         conn.query_row("SELECT authorization FROM recovery WHERE id=1", [], |r| {
             r.get(0)

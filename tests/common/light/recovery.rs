@@ -405,6 +405,17 @@ fn deleting_database_while_retaining_lock_cannot_reset_budget() {
 }
 
 #[test]
+fn missing_state_row_cannot_reinitialize_budget() {
+    let t = TempDir::new().unwrap();
+    let options = Options::new(t.path().join("ledger"));
+    drop(Controller::open(&options, auth(&t)).unwrap());
+    let db = rusqlite::Connection::open(options.data_root.join("recovery.sqlite3")).unwrap();
+    db.execute("DELETE FROM recovery", []).unwrap();
+    drop(db);
+    assert!(Controller::open(&options, auth(&t)).is_err());
+}
+
+#[test]
 fn history_structured_network_errors_and_pending_items_fail_closed() {
     let t = TempDir::new().unwrap();
     let a = auth(&t);
