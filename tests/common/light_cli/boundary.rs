@@ -319,7 +319,7 @@ fn all_light_modules_have_a_closed_repository_dependency_boundary() {
         .visit_file(&ast);
         count += 1;
     }
-    assert_eq!(count, 23, "new modules need an explicit boundary review");
+    assert_eq!(count, 26, "new modules need an explicit boundary review");
 }
 
 fn allowed_use(name: &str, wire: bool, notify: bool) -> bool {

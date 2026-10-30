@@ -77,3 +77,5 @@ fn binding() -> BindingInput {
 mod observe;
 
 mod tui;
+
+mod recovery;
