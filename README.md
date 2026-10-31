@@ -304,3 +304,6 @@ Fresh isolated final success/failure and unified cleanup: [task lifecycle](refer
 Optional read-only observation: [light observe](docs/light-observe.md).
 
 For local, read-only terminal browsing, see [the light TUI](docs/light-tui.md).
+
+[Native Hook local receipt command](docs/native-hook-receiver.md) — standalone
+Python receiver; synthetic stdin validation only, not installed or connected.
